@@ -3,6 +3,7 @@ import { statSync, type Stats } from "fs";
 import { homedir } from "os";
 import { isAbsolute, resolve } from "path";
 import { allowFileRoot } from "@/lib/file-access";
+import { isRegistrableRoot } from "@/lib/root-registration-policy";
 import { projectIdentityKey } from "@/lib/project-identity";
 import { resolveProject } from "@/lib/worktree";
 
@@ -35,11 +36,23 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: `Path is not a directory: ${cwd}` }, { status: 400 });
     }
 
-    allowFileRoot(normalizedCwd);
-    const project = await resolveProject(normalizedCwd);
+    // Client-supplied paths may only become allowed file roots when their
+    // realpath lies within an allowed registration prefix (homedir or an
+    // operator-configured prefix, plus idempotent revalidation of roots
+    // registered earlier). Refuse anything else before any promotion.
+    const registrable = isRegistrableRoot(normalizedCwd);
+    if (!registrable.ok) {
+      return NextResponse.json(
+        { error: "Path is not registrable as a workspace root", reason: registrable.reason },
+        { status: 403 },
+      );
+    }
+
+    allowFileRoot(registrable.path);
+    const project = await resolveProject(registrable.path);
     return NextResponse.json({
       success: true,
-      cwd: normalizedCwd,
+      cwd: registrable.path,
       projectRoot: project.projectRoot,
       projectKey: projectIdentityKey(project.projectRoot),
     });
