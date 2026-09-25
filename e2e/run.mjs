@@ -135,7 +135,17 @@ try {
   const base = `http://127.0.0.1:${port}`;
   server = spawn(process.execPath, [join(root, "node_modules/next/dist/bin/next"), mode, "-H", "127.0.0.1", "-p", String(port)], {
     cwd: root,
-    env: { ...process.env, PI_CODING_AGENT_DIR: agentDir, PI_WEB_PASSWORD: "", NEXT_TELEMETRY_DISABLED: "1" },
+    env: {
+      ...process.env,
+      PI_CODING_AGENT_DIR: agentDir,
+      PI_WEB_PASSWORD: "",
+      NEXT_TELEMETRY_DISABLED: "1",
+      // The e2e workspace lives under os.tmpdir(), which the registrable-root
+      // guard does NOT trust by default (only homedir + operator prefixes).
+      // Register the e2e scratch tree as an operator prefix — the exact
+      // operator escape hatch the guard ships for (pi#55).
+      PI_WEB_ALLOWED_ROOT_PREFIXES: agentDir,
+    },
     stdio: ["ignore", "pipe", "pipe"],
   });
   server.once("error", (error) => { serverError = error; });
