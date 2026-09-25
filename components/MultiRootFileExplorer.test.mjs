@@ -132,15 +132,17 @@ test("exactly one global build-outputs toggle renders at the bottom of the block
 test("TreeNode indents the row box itself by depth", () => {
   // The indent must shift the ROW BOX (its left edge and hover-highlight
   // strip), not merely pad content inside a full-width row: per-level
-  // marginLeft on the row element.
-  assert.match(explorerSource, /marginLeft: depth \* 14,/);
+  // marginLeft on the row element. (depth + 1): depth-0 children nest one
+  // level inside their section header, which stays flush at margin 0.
+  assert.match(explorerSource, /marginLeft: \(depth \+ 1\) \* 14,/);
   // Base content padding is kept so rows do not hug the container edge.
   assert.match(explorerSource, /paddingLeft: 8,/);
   // Children render one level deeper, so each nesting level shifts right
   // by a further 14px (>= 12px per level).
   assert.match(explorerSource, /depth=\{depth \+ 1\}/);
-  // The "empty" placeholder row follows the same geometry.
-  assert.match(explorerSource, /marginLeft: \(depth \+ 1\) \* 14, paddingLeft: 8/);
+  // The "empty" placeholder row follows the same geometry, aligned with
+  // the children level it labels (one deeper than its own indent).
+  assert.match(explorerSource, /marginLeft: \(depth \+ 2\) \* 14, paddingLeft: 8/);
   // The old content-only indent must be gone: padding inside a full-width
   // row left the row box flush with its parent (the observed defect).
   assert.ok(!explorerSource.includes("paddingLeft: 8 + depth * 14"), "no content-only indent may remain");

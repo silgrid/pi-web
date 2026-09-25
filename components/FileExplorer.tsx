@@ -315,7 +315,9 @@ function TreeNode({
           // shifts per nesting level (fix for the "no visible indent"
           // defect: content padding inside a full-width row leaves the row
           // flush with its parent).
-          marginLeft: depth * 14,
+          // (depth + 1): depth-0 children must nest one level INSIDE their
+          // section header, which stays flush at margin 0 (wi pi#57).
+          marginLeft: (depth + 1) * 14,
           paddingLeft: 8,
           paddingRight: 8,
           height: 24,
@@ -472,7 +474,7 @@ function TreeNode({
             />
           ))}
           {children.length === 0 && loaded && (
-            <div style={{ marginLeft: (depth + 1) * 14, paddingLeft: 8, fontSize: 11, color: "var(--text-dim)", height: 22, display: "flex", alignItems: "center" }}>
+            <div style={{ marginLeft: (depth + 2) * 14, paddingLeft: 8, fontSize: 11, color: "var(--text-dim)", height: 22, display: "flex", alignItems: "center" }}>
               empty
             </div>
           )}

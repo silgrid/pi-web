@@ -41,22 +41,26 @@ test("the manage rows run through the guarded seams, not raw store calls (wi pi#
   assert.match(source, /directoryPicker\.cannotRemoveLastEntry/);
   assert.match(source, /directoryPicker\.renamePathRequired/);
   assert.match(source, /directoryPicker\.renamePathDuplicate/);
-  // The seams are wired ONLY into the add-directory manage picker, exactly
-  // like the pin callback: the plain customPath picker stays untouched.
-  assert.equal((source.match(/onRenameEntryPath=/g) ?? []).length, 1);
-  assert.equal((source.match(/onRemoveEntry=/g) ?? []).length, 1);
+  // The seams are wired into BOTH picker instances (wi pi#57): the manage
+  // (add-directory) picker and the session-cwd (选择目录) picker, which
+  // now renders the same registered entries with per-row rename/delete.
+  assert.equal((source.match(/onRenameEntryPath=/g) ?? []).length, 2);
+  assert.equal((source.match(/onRemoveEntry=/g) ?? []).length, 2);
   const customPathPickerStart = source.indexOf("{customPathOpen && (");
   const addDirectoryPickerStart = source.indexOf("{addDirectoryOpen && (");
   const managePickerEnd = source.indexOf("onCancel={() => setAddDirectoryOpen(false)}");
   assert.ok(customPathPickerStart !== -1 && addDirectoryPickerStart !== -1);
-  assert.ok(
-    source.slice(customPathPickerStart, addDirectoryPickerStart).indexOf("onRemoveEntry") === -1
-      && source.slice(customPathPickerStart, addDirectoryPickerStart).indexOf("onRenameEntryPath") === -1,
-    "the plain customPath picker must not receive the manage callbacks",
-  );
+  // The session-cwd picker renders the registered entries with the guarded
+  // seams, and its onSelect stays pure cwd selection (commitCustomPath) —
+  // selecting a directory never registers it.
+  const customPathSlice = source.slice(customPathPickerStart, addDirectoryPickerStart);
+  assert.ok(customPathSlice.includes("entries={"), "the customPath picker receives the managed entries");
+  assert.ok(customPathSlice.includes("rowPathRenameHandler(path, nextPath)"), "the customPath rename delegates to the guarded rename seam");
+  assert.ok(customPathSlice.includes("rowDeleteHandler(path)"), "the customPath delete delegates to the guarded delete seam");
+  assert.ok(customPathSlice.includes("onSelect={(path) => void commitCustomPath(path)}"), "the customPath onSelect stays pure cwd selection");
   for (const marker of ["onRenameEntryPath=", "onRemoveEntry="]) {
-    const at = source.indexOf(marker);
-    assert.ok(at > addDirectoryPickerStart && at < managePickerEnd, `${marker} sits inside the manage picker's props`);
+    const manageSlice = source.slice(addDirectoryPickerStart, managePickerEnd);
+    assert.ok(manageSlice.includes(marker), `${marker} sits inside the manage picker's props`);
   }
 });
 
@@ -64,10 +68,18 @@ test("a successful rename keeps the renamed group expanded under its new identit
   // The re-expand rule: only when the OLD identity was the expanded group.
   // A rename handler body that unconditionally expands would collapse the
   // accordion onto the renamed group even when another group was open.
-  const renamePropAt = source.indexOf("onRenameEntryPath={");
-  const reExpandAt = source.indexOf("expandPinnedGroup(customDirectoryIdentity(nextPath.trim()))");
+  // Scope to the MANAGE picker instance: both picker instances now carry
+  // onRenameEntryPath=, so an unscoped first-occurrence indexOf would shift
+  // this assertion onto the customPath instance and leave the manage
+  // instance's expansion behavior uncovered (review warn, pi#57).
+  const manageStart = source.indexOf("{addDirectoryOpen && (");
+  const manageEnd = source.indexOf("onCancel={() => setAddDirectoryOpen(false)}");
+  assert.ok(manageStart !== -1 && manageEnd > manageStart, "the manage picker block is locatable");
+  const manageSlice = source.slice(manageStart, manageEnd);
+  const renamePropAt = manageSlice.indexOf("onRenameEntryPath={");
+  const reExpandAt = manageSlice.indexOf("expandPinnedGroup(customDirectoryIdentity(nextPath.trim()))");
   assert.ok(renamePropAt !== -1 && reExpandAt > renamePropAt, "the rename callback re-expands under the new identity");
-  const guardAt = source.indexOf("expandedGroupKeys.has(oldKey)");
+  const guardAt = manageSlice.indexOf("expandedGroupKeys.has(oldKey)");
   assert.ok(guardAt > renamePropAt && guardAt < reExpandAt, "the re-expand is guarded on the old key being expanded");
 });
 
