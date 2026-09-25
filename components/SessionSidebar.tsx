@@ -1603,16 +1603,53 @@ export function SessionSidebar({ selectedSessionId, highlightSessionId, followHi
         "--sidebar-session-pane-height": `${sessionPaneResizer.width}px`,
       } as CSSProperties}
     >
+      {/* Managed entries with per-row rename/delete in the session-cwd
+          picker too (wi pi#57): the SAME registered list and guarded seams
+          as the manage picker, so the owner can rename/delete a registered
+          directory right here. onSelect stays pure session-cwd selection
+          (commitCustomPath) — picking a directory never registers it.
+          Browse rows carry no manage actions; the buttons render only on
+          the registered-entries rows because manage mode is
+          `entries !== undefined`. */}
       {customPathOpen && (
         <DirectoryPicker
           initialPath={customPathValue}
           busy={customPathValidating}
           error={customPathError}
+          entries={pinnedEntries.map((entry) => ({ path: entry.path, displayName: entry.displayName }))}
+          onRenameEntryPath={(path, nextPath) => {
+            const outcome = rowPathRenameHandler(path, nextPath);
+            if (outcome.ok) {
+              // Same expansion preservation as the manage picker: when the
+              // renamed entry's group was the expanded one, keep it
+              // expanded under the NEW identity.
+              const oldKey = customDirectoryIdentity(path);
+              if (expandedGroupKeys.has(oldKey)) {
+                expandPinnedGroup(customDirectoryIdentity(nextPath.trim()));
+              }
+              setPinnedRevision((revision) => revision + 1);
+              return { ok: true };
+            }
+            return {
+              ok: false,
+              error: t(outcome.reason === "empty"
+                ? "directoryPicker.renamePathRequired"
+                : "directoryPicker.renamePathDuplicate"),
+            };
+          }}
+          onRemoveEntry={(path) => {
+            const outcome = rowDeleteHandler(path);
+            if (outcome.ok) {
+              setPinnedRevision((revision) => revision + 1);
+              return { ok: true };
+            }
+            return { ok: false, error: t("directoryPicker.cannotRemoveLastEntry") };
+          }}
+          onSelect={(path) => void commitCustomPath(path)}
           onCancel={() => {
             setCustomPathOpen(false);
             setCustomPathError(null);
           }}
-          onSelect={(path) => void commitCustomPath(path)}
         />
       )}
       {/* Add-directory picker (manage mode): select adds the directory to
