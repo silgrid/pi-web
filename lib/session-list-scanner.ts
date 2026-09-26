@@ -11,6 +11,7 @@ import { basename, join } from "node:path";
 import { createInterface } from "node:readline";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { writePrivateFileAtomicSync } from "./atomic-file";
+import { isRecord } from "./type-guards";
 
 export interface ScannedSessionInfo {
 	path: string;
@@ -39,10 +40,6 @@ interface IndexEntry {
 }
 
 type RawEntry = Record<string, unknown>;
-
-function isRecord(value: unknown): value is RawEntry {
-	return value !== null && typeof value === "object" && !Array.isArray(value);
-}
 
 const INDEX_FORMAT_VERSION = 1;
 

@@ -192,6 +192,9 @@ const SESSION_PANE_DEFAULT_HEIGHT = 320;
 const SESSION_PANE_MIN_HEIGHT = 80;
 const EXPLORER_PANE_MIN_HEIGHT = 120;
 const SESSION_PANE_MAX_HEIGHT = 1600;
+/** Stable empty set for the server-filter match fallback (a mismatched key
+ *  must read as "no server matches", never as a new Set per render). */
+const EMPTY_SERVER_FILTER_MATCH: ReadonlySet<string> = new Set<string>();
 
 function loadLastCustomCwd(): string {
   if (typeof window === "undefined") return "";
@@ -686,6 +689,55 @@ export function SessionSidebar({ selectedSessionId, highlightSessionId, followHi
   const sessionFilter = useSyncExternalStore(subscribeSessionFilter, getSessionFilterState, getServerSessionFilterState);
   const sessionFilterPatterns = sessionFilter.patterns;
   const showFilteredSessions = sessionFilter.showFiltered;
+  // Server-side full-text filter matching (review r1 on the list payload
+  // slim-down): the LIST payload carries only a firstMessage preview, so a
+  // pattern whose only match sits beyond the preview boundary is matched
+  // server-side against the reader's cached FULL text. The result is keyed by
+  // the pattern list it was computed for, so an in-flight response from older
+  // patterns is never applied to newer ones (it just reads as empty). Local
+  // matching still runs first — names and short previews never need the
+  // round-trip, and the server set only ever ADDS hidden rows.
+  const sessionFilterPatternsKey = sessionFilterPatterns.join("\n");
+  const [serverFilterMatch, setServerFilterMatch] = useState<{ key: string; ids: ReadonlySet<string> }>(() => ({
+    key: "",
+    ids: new Set<string>(),
+  }));
+  // review r2: re-run when the catalogue itself changes, not only when the
+  // pattern list changes — a newly-arrived session whose only match sits
+  // beyond the preview boundary must not stay visible until the user edits
+  // the filter or reloads. `allSessions.length` is a cheap, stable proxy for
+  // "the catalogue changed" (a session added or removed); it intentionally
+  // ignores in-place field updates on existing rows, which cannot introduce a
+  // NEW server-only match for an already-scanned session.
+  const allSessionsCount = allSessions.length;
+  useEffect(() => {
+    if (showFilteredSessions || sessionFilterPatterns.length === 0) return;
+    const controller = new AbortController();
+    // Debounced so typing a pattern in Settings does not fetch per keystroke.
+    const timer = setTimeout(() => {
+      fetch(`/api/sessions/filter-match?patterns=${encodeURIComponent(JSON.stringify(sessionFilterPatterns))}`, {
+        signal: controller.signal,
+      })
+        .then((response) => (response.ok ? response.json() : { matchedIds: [] }))
+        .then((payload: { matchedIds?: unknown }) => {
+          const matchedIds = Array.isArray(payload?.matchedIds)
+            ? payload.matchedIds.filter((id): id is string => typeof id === "string")
+            : [];
+          setServerFilterMatch({ key: sessionFilterPatternsKey, ids: new Set(matchedIds) });
+        })
+        .catch(() => {
+          // Offline/failed fetch: local matching still applies; the next
+          // pattern change or sidebar reload retries.
+        });
+    }, 150);
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [sessionFilterPatterns, sessionFilterPatternsKey, showFilteredSessions, allSessionsCount]);
+  const serverFilterMatchedIds = serverFilterMatch.key === sessionFilterPatternsKey
+    ? serverFilterMatch.ids
+    : EMPTY_SERVER_FILTER_MATCH;
   // Pinned projects: the store re-reads localStorage on every call, so a
   // revision counter is all the React state we need — bump it after each
   // pin/unpin and rows move immediately without a reload.
@@ -1476,7 +1528,11 @@ export function SessionSidebar({ selectedSessionId, highlightSessionId, followHi
   // Worker-session filter (wi pi#49 R1): sessions matching any pattern (a
   // case-insensitive substring hit on name OR firstMessage) are hidden from
   // every RENDERED list before grouping — the main list and the pinned
-  // groups both derive from visibleSessions. Non-render concerns
+  // groups both derive from visibleSessions. Local matching covers the
+  // stored name and the first-message PREVIEW the list payload carries;
+  // matches beyond the preview come from the server-side full-text match
+  // (serverFilterMatchedIds), keeping the filter's original full-text
+  // semantics without restoring the oversized payload. Non-render concerns
   // (background-completion notifications, unread/running bookkeeping,
   // initial-project restore, recent-project selection) keep operating on
   // allSessions. The reveal toggle disables the filtering entirely, so a
@@ -1484,8 +1540,11 @@ export function SessionSidebar({ selectedSessionId, highlightSessionId, followHi
   const visibleSessions = useMemo(
     () => showFilteredSessions || sessionFilterPatterns.length === 0
       ? allSessions
-      : allSessions.filter((session) => !isSessionFiltered(session, sessionFilterPatterns)),
-    [allSessions, showFilteredSessions, sessionFilterPatterns],
+      : allSessions.filter((session) => (
+        !isSessionFiltered(session, sessionFilterPatterns)
+        && !serverFilterMatchedIds.has(session.id)
+      )),
+    [allSessions, showFilteredSessions, sessionFilterPatterns, serverFilterMatchedIds],
   );
   // The main list below the listed groups keeps its existing filtering
   // rules, minus the sessions grouped under a listed directory — those
@@ -2321,8 +2380,14 @@ function SessionItem({
 
   // A stored first message may be an SDK-expanded <skill> block; collapse it
   // back to the compact /skill:name args command the user typed before using
-  // it as the auto-name fallback, mirroring MessageView's rendering.
-  const displayFirstMessage = skillExpansionToCommand(session.firstMessage) ?? session.firstMessage;
+  // it as the auto-name fallback, mirroring MessageView's rendering. Long
+  // expansions arrive from the LIST payload already truncated, so the row
+  // carries `firstMessageDisplay` (the compact command computed server-side
+  // from the FULL text before the cut) — without it the collapse regex
+  // cannot find the closing envelope and the title would render raw markup.
+  const displayFirstMessage = session.firstMessageDisplay
+    ?? skillExpansionToCommand(session.firstMessage)
+    ?? session.firstMessage;
   const title = session.name || displayFirstMessage.slice(0, 50) || session.id.slice(0, 12);
 
   const startRename = useCallback((e: React.MouseEvent) => {

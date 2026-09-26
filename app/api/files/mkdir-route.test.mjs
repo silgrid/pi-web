@@ -36,13 +36,14 @@ test("mkdir reuses the upload path's security machinery verbatim", async () => {
 
 test("outside-roots parents are refused before mkdir runs", async () => {
   const route = routeSource;
-  // getUploadDirectory is the shared allowed-roots + realpath gate; the mkdir
-  // branch runs only after it resolves (the "response" early-return above).
+  // getUploadDirectory is the shared symlink-safe containment gate (audit P1:
+  // isExistingFilePathAllowed resolves BOTH sides); the mkdir branch runs
+  // only after it resolves (the "response" early-return above).
   const uploadDirStart = route.indexOf("async function getUploadDirectory(");
   const uploadDirBlock = route.slice(uploadDirStart, route.indexOf("function parseUploadFileNames"));
-  assert.match(uploadDirBlock, /isFilePathAllowed\(directory, allowedRoots\)/);
-  assert.match(uploadDirBlock, /realDirectory = fs\.realpathSync\(directory\)/);
-  assert.match(uploadDirBlock, /isFilePathAllowed\(realDirectory, realRoots\)/);
+  assert.match(uploadDirBlock, /isExistingFilePathAllowed\(directory, allowedRoots\)/);
+  assert.match(uploadDirBlock, /status: 404/);
+  assert.match(uploadDirBlock, /status: 400/);
   assert.match(uploadDirBlock, /status: 403/);
   const mkdirStart = route.indexOf('if (type === "mkdir")');
   const postBlock = route.slice(route.indexOf("export async function POST("));

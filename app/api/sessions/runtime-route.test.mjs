@@ -89,9 +89,14 @@ test("session listing returns a gzip-compressed response when the client accepts
   });
 
   const firstMessage = "compressible session content ".repeat(500);
-  const manager = SessionManager.create(dir);
-  manager.appendMessage({ role: "user", content: firstMessage, timestamp: Date.now() });
-  manager.appendMessage({ role: "assistant", content: [{ type: "text", text: "done" }], timestamp: Date.now() });
+  // Trimmed rows are small (that is the point of the audit task), so the
+  // fixture needs several sessions for the body to cross the gzip size
+  // threshold again.
+  for (let i = 0; i < 6; i++) {
+    const manager = SessionManager.create(dir);
+    manager.appendMessage({ role: "user", content: firstMessage, timestamp: Date.now() });
+    manager.appendMessage({ role: "assistant", content: [{ type: "text", text: "done" }], timestamp: Date.now() });
+  }
   invalidateSessionListCache();
 
   const response = await getSessionList(new Request("http://localhost/api/sessions", {
@@ -102,7 +107,53 @@ test("session listing returns a gzip-compressed response when the client accepts
   assert.equal(response.headers.get("Content-Encoding"), "gzip");
   assert.match(response.headers.get("Vary") ?? "", /(?:^|,\s*)Accept-Encoding(?:\s*,|$)/i);
   const payload = JSON.parse(gunzipSync(Buffer.from(await response.arrayBuffer())).toString("utf8"));
-  assert.equal(payload.sessions[0].firstMessage, firstMessage);
+  // The list payload carries a trimmed preview (audit task: list size),
+  // never the full first-message text.
+  assert.equal(payload.sessions.length, 6);
+  for (const row of payload.sessions) {
+    assert.equal(row.firstMessage, firstMessage.slice(0, 160));
+    assert.equal(row.firstMessageTruncated, true);
+  }
+});
+
+test("the list payload stays bounded for huge first messages while the detail keeps full text", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "pi-web-list-payload-bound-"));
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = dir;
+  invalidateSessionListCache();
+  let sessionId;
+  t.after(async () => {
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+    if (sessionId) invalidateSessionPathCache(sessionId);
+    invalidateSessionListCache();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  const hugeMessage = "x".repeat(10_000);
+  const manager = SessionManager.create(dir);
+  manager.appendMessage({ role: "user", content: hugeMessage, timestamp: Date.now() });
+  manager.appendMessage({ role: "assistant", content: [{ type: "text", text: "done" }], timestamp: Date.now() });
+  sessionId = manager.getSessionId();
+  invalidateSessionListCache();
+
+  const listResponse = await getSessionList(new Request("http://localhost/api/sessions"));
+  const listPayload = await listResponse.json();
+  const row = listPayload.sessions.find((session) => session.id === sessionId);
+  assert.equal(row.firstMessage.length, 160);
+  assert.equal(row.firstMessageTruncated, true);
+  // Payload-size regression: the whole list body stays kilobytes, not the
+  // tens of kilobytes a full-text row would cost.
+  assert.ok(JSON.stringify(listPayload).length < 8_000, JSON.stringify(listPayload).length);
+
+  const detailResponse = await getSessionDetail(
+    new Request(`http://localhost/api/sessions/${sessionId}`),
+    { params: Promise.resolve({ id: sessionId }) },
+  );
+  assert.equal(detailResponse.status, 200);
+  const detail = await detailResponse.json();
+  assert.equal(detail.info.firstMessage, hugeMessage);
+  assert.equal(detail.info.firstMessageTruncated, undefined);
 });
 
 test("deleting an unpersisted session shuts down its runtime and invalidates caches", async (t) => {

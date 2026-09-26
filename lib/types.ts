@@ -358,6 +358,17 @@ export interface SessionInfo {
   modified: string;
   messageCount: number;
   firstMessage: string;
+  /** True when the LIST payload cut `firstMessage` to a preview (the
+   *  session-detail endpoint always carries the full text). */
+  firstMessageTruncated?: boolean;
+  /** Same fact as `firstMessageTruncated`, under the field name the audit's
+   *  response contract literally names; kept alongside it (review r2). */
+  truncated?: boolean;
+  /** Compact display form of `firstMessage` (e.g. an expanded <skill> block
+   *  collapsed back to `/skill:name args`), present only on truncated rows
+   *  — computed server-side from the full text BEFORE the cut, since the
+   *  collapse regex needs the complete envelope a preview no longer has. */
+  firstMessageDisplay?: string;
   /** True while the sidebar has only header/stat metadata for this session. */
   detailsPending?: boolean;
   parentSessionId?: string; // source session for a fork, or parent session for a subagent

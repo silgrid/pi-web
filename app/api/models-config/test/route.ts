@@ -1,18 +1,23 @@
 import { NextResponse } from "next/server";
-import { mkdtempSync, rmSync, writeFileSync } from "fs";
-import { tmpdir } from "os";
-import { join } from "path";
 import { completeSimple, type AssistantMessage } from "@earendil-works/pi-ai/compat";
-import { ModelRuntime } from "@earendil-works/pi-coding-agent";
+import { withTempModelsRuntime, TempModelsLoadError } from "@/lib/model-discovery-auth";
+import {
+  getConfiguredProviderBaseUrl,
+  getConfiguredProviderCredentials,
+  isConfigExpression,
+  redirectRefusingFetch,
+  resolveModelDiscoveryCredentialDecision,
+  validateModelDiscoveryModel,
+  validateModelDiscoveryProvider,
+  verifyConfigExpressionsAreConfigured,
+} from "@/lib/model-discovery-guards";
+import { readModelsConfig } from "@/lib/models-config-store";
 import { hasJsonContentType, isApiRequestAllowed } from "@/lib/request-security";
+import { isRecord } from "@/lib/type-guards";
 
 export const dynamic = "force-dynamic";
 
 const TEST_TIMEOUT_MS = 20_000;
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -36,86 +41,148 @@ export async function POST(req: Request) {
     );
   }
 
-  let tempDir: string | undefined;
-
   try {
-    const body = await req.json() as { providerName?: unknown; provider?: unknown; model?: unknown };
-    const providerName = typeof body.providerName === "string" ? body.providerName.trim() : "";
-    if (!providerName) return NextResponse.json({ ok: false, error: "providerName is required" }, { status: 400 });
-    if (!isRecord(body.provider)) return NextResponse.json({ ok: false, error: "provider is required" }, { status: 400 });
-    if (!isRecord(body.model)) return NextResponse.json({ ok: false, error: "model is required" }, { status: 400 });
+    const body = await req.json().catch(() => null);
+    const validated = validateModelDiscoveryProvider(body);
+    if (!validated.ok) {
+      return NextResponse.json({ ok: false, error: validated.reason }, { status: 400 });
+    }
+    const { providerName, provider } = validated;
+    const rawModel = isRecord(body) ? body.model : undefined;
+    const validatedModel = validateModelDiscoveryModel(rawModel);
+    if (!validatedModel.ok) {
+      return NextResponse.json({ ok: false, error: validatedModel.reason }, { status: 400 });
+    }
+    const model = validatedModel.model;
 
-    const modelId = typeof body.model.id === "string" ? body.model.id.trim() : "";
-    if (!modelId) return NextResponse.json({ ok: false, error: "Model ID is required" }, { status: 400 });
+    const modelsConfig = readModelsConfig();
 
-    tempDir = mkdtempSync(join(tmpdir(), "pi-web-model-test-"));
-    const modelsPath = join(tempDir, "models.json");
-    writeFileSync(modelsPath, JSON.stringify({
-      providers: {
-        [providerName]: {
-          ...body.provider,
-          models: [{ ...body.model, id: modelId }],
-        },
+    // review r2: an expression apiKey/header ("$VAR", "!command") is refused
+    // unless it exactly matches what the operator already persisted for this
+    // provider name — an attacker can replay an authorized expression, never
+    // forge a new one (see lib/model-discovery-guards.ts module doc).
+    const configExpressionCheck = verifyConfigExpressionsAreConfigured(
+      provider,
+      getConfiguredProviderCredentials(providerName, modelsConfig),
+    );
+    if (!configExpressionCheck.ok) {
+      return NextResponse.json({ ok: false, error: configExpressionCheck.reason }, { status: 403 });
+    }
+    // An expression apiKey is never a portable "request-chosen" literal, even
+    // once verified authentic — it is resolved exclusively through the
+    // configured (getAuth) path below, so it still requires the configured-
+    // base-URL gate to pass.
+    const literalApiKey = provider.apiKey && !isConfigExpression(provider.apiKey) ? provider.apiKey : undefined;
+
+    // Audit S2 (review r1): the credential policy is decided against the
+    // EFFECTIVE destination — the SDK's modelFromJson gives a model-level
+    // baseUrl precedence over the provider's, so the provider-level check
+    // alone would let a model.baseUrl override smuggle the operator's stored
+    // credential to a foreign URL.
+    const decision = resolveModelDiscoveryCredentialDecision({
+      baseUrl: provider.baseUrl,
+      ...(literalApiKey ? { requestApiKey: literalApiKey } : {}),
+      modelBaseUrl: model.baseUrl ?? null,
+      configuredBaseUrl: getConfiguredProviderBaseUrl(providerName, modelsConfig),
+    });
+    if (!decision.attach) {
+      return NextResponse.json({ ok: false, error: decision.reason }, { status: 403 });
+    }
+    const isRequestKey = decision.source === "requestApiKey";
+
+    const providerEntry: Record<string, unknown> = {
+      baseUrl: provider.baseUrl,
+      api: provider.api,
+      ...(provider.apiKey ? { apiKey: provider.apiKey } : {}),
+      ...(Object.keys(provider.headers).length > 0 ? { headers: provider.headers } : {}),
+      ...provider.extra,
+    };
+
+    const outcome = await withTempModelsRuntime(
+      providerName,
+      providerEntry,
+      [model.entry],
+      async (modelRuntime) => {
+        const resolvedModel = modelRuntime.getModel(providerName, model.id);
+        if (!resolvedModel) return { ok: false as const, error: `Model not found: ${providerName}/${model.id}` };
+
+        // Request-key path (review r1): the key is the client's own LITERAL —
+        // it goes out exactly as supplied, on an ISOLATED runtime whose
+        // credential store is empty, so no getAuth() resolution can swap in
+        // the operator's stored credential (the SDK's auth precedence puts
+        // auth.json ahead of a models.json apiKey), inherit OAuth tokens, or
+        // resolve server env/command expressions. The stored path resolves
+        // through the operator's real auth storage and was gated above on the
+        // configured base URL.
+        let apiKey: string | undefined;
+        let requestHeaders: Record<string, string> | undefined;
+        if (isRequestKey) {
+          apiKey = literalApiKey;
+          requestHeaders = provider.headers;
+        } else {
+          const resolved = await modelRuntime.getAuth(resolvedModel);
+          apiKey = resolved?.auth.apiKey;
+          const resolvedHeaders = resolved?.auth.headers;
+          requestHeaders = resolvedHeaders
+            ? Object.fromEntries(Object.entries(resolvedHeaders).filter((entry): entry is [string, string] => typeof entry[1] === "string"))
+            : undefined;
+        }
+        if (!apiKey) {
+          return { ok: false as const, error: `No API key found for "${providerName}"` };
+        }
+
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), TEST_TIMEOUT_MS);
+        let status: number | undefined;
+        const startedAt = Date.now();
+
+        try {
+          const message = await completeSimple(resolvedModel, {
+            messages: [{
+              role: "user",
+              content: "Reply with OK only.",
+              timestamp: Date.now(),
+            }],
+          }, {
+            apiKey,
+            ...(requestHeaders && Object.keys(requestHeaders).length > 0 ? { headers: requestHeaders } : {}),
+            maxTokens: 16,
+            timeoutMs: TEST_TIMEOUT_MS,
+            maxRetries: 0,
+            cacheRetention: "none",
+            signal: controller.signal,
+            fetch: redirectRefusingFetch,
+            onResponse: (response) => { status = response.status; },
+          });
+
+          const latencyMs = Date.now() - startedAt;
+          if (message.stopReason === "error" || message.stopReason === "aborted") {
+            return {
+              ok: false as const,
+              error: message.errorMessage ?? (controller.signal.aborted ? "Test timed out" : "Model returned an error"),
+              latencyMs,
+              status,
+            };
+          }
+
+          return {
+            ok: true as const,
+            latencyMs,
+            status,
+            responseText: getAssistantText(message).slice(0, 300),
+          };
+        } finally {
+          clearTimeout(timeout);
+        }
       },
-    }, null, 2), "utf8");
+      { isolatedCredentials: isRequestKey },
+    );
 
-    const modelRuntime = await ModelRuntime.create({ modelsPath });
-    const loadError = modelRuntime.getError();
-    if (loadError) return NextResponse.json({ ok: false, error: loadError });
-
-    const model = modelRuntime.getModel(providerName, modelId);
-    if (!model) return NextResponse.json({ ok: false, error: `Model not found: ${providerName}/${modelId}` });
-
-    const resolved = await modelRuntime.getAuth(model);
-    if (!resolved?.auth.apiKey) {
-      return NextResponse.json({ ok: false, error: `No API key found for "${providerName}"` });
-    }
-
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), TEST_TIMEOUT_MS);
-    let status: number | undefined;
-    const startedAt = Date.now();
-
-    try {
-      const message = await completeSimple(model, {
-        messages: [{
-          role: "user",
-          content: "Reply with OK only.",
-          timestamp: Date.now(),
-        }],
-      }, {
-        apiKey: resolved.auth.apiKey,
-        headers: resolved.auth.headers,
-        maxTokens: 16,
-        timeoutMs: TEST_TIMEOUT_MS,
-        maxRetries: 0,
-        cacheRetention: "none",
-        signal: controller.signal,
-        onResponse: (response) => { status = response.status; },
-      });
-
-      const latencyMs = Date.now() - startedAt;
-      if (message.stopReason === "error" || message.stopReason === "aborted") {
-        return NextResponse.json({
-          ok: false,
-          error: message.errorMessage ?? (controller.signal.aborted ? "Test timed out" : "Model returned an error"),
-          latencyMs,
-          status,
-        });
-      }
-
-      return NextResponse.json({
-        ok: true,
-        latencyMs,
-        status,
-        responseText: getAssistantText(message).slice(0, 300),
-      });
-    } finally {
-      clearTimeout(timeout);
-    }
+    return NextResponse.json(outcome);
   } catch (error) {
+    if (error instanceof TempModelsLoadError) {
+      return NextResponse.json({ ok: false, error: error.message });
+    }
     return NextResponse.json({ ok: false, error: errorMessage(error) }, { status: 500 });
-  } finally {
-    if (tempDir) rmSync(tempDir, { recursive: true, force: true });
   }
 }

@@ -1,11 +1,8 @@
-import { execFile } from "child_process";
 import { existsSync, mkdirSync, realpathSync } from "fs";
 import { basename, dirname, join, resolve } from "path";
-import { promisify } from "util";
 import { allowFileRoot } from "./allowed-roots";
+import { runGit } from "./exec-file";
 import { samePath, toNativePath } from "./paths";
-
-const execFileAsync = promisify(execFile);
 
 // ============================================================================
 // Project resolution: cwd → { projectRoot, branch }
@@ -57,17 +54,6 @@ export function invalidateProjectCache(): void {
   globalThis.__piProjectRefresh?.clear();
 }
 
-async function git(cwd: string, args: string[], timeoutMs = 10_000): Promise<string> {
-  const { stdout } = await execFileAsync("git", ["-C", cwd, ...args], {
-    timeout: timeoutMs,
-    maxBuffer: 1024 * 1024,
-    // Pin the message locale so error-text matching (e.g. the dirty-worktree
-    // detection in the DELETE route) works regardless of system language.
-    env: { ...process.env, LC_ALL: "C" },
-  });
-  return stdout.trim();
-}
-
 function realPathOrSelf(filePath: string): string {
   try {
     return realpathSync(filePath);
@@ -98,7 +84,7 @@ async function inferRemovedWorktree(cwd: string): Promise<ProjectInfo | null> {
   if (existsSync(repoRoot)) {
     try {
       const toplevel = toNativePath(
-        await git(repoRoot, ["rev-parse", "--path-format=absolute", "--show-toplevel"]),
+        await runGit(repoRoot, ["rev-parse", "--path-format=absolute", "--show-toplevel"], { trim: true }),
       );
       if (toplevel) return removedWorktreeProjectInfo(toplevel, cwd);
     } catch {
@@ -168,11 +154,11 @@ async function resolveProjectUncached(cwd: string): Promise<ProjectInfo> {
       cache.set(cwd, { info, expiresAt: Date.now() + PROJECT_CACHE_TTL_MS });
       return info;
     }
-    const out = await git(cwd, [
+    const out = await runGit(cwd, [
       "rev-parse", "--path-format=absolute",
       "--git-common-dir", "--git-dir", "--show-toplevel",
       "--abbrev-ref", "HEAD",
-    ]);
+    ], { trim: true });
     const [commonDirRaw, gitDirRaw, toplevelRaw, ref] = out.split("\n").map((l) => l.trim());
     // Only the first three lines are paths — `ref` is a branch name and must
     // keep its forward slashes (`feature/foo`).
@@ -210,12 +196,12 @@ async function resolveProjectUncached(cwd: string): Promise<ProjectInfo> {
 
 /** Main repo root (parent of the shared .git dir), or throws for non-git dirs */
 async function getRepoRoot(cwd: string): Promise<string> {
-  const commonDir = await git(cwd, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+  const commonDir = await runGit(cwd, ["rev-parse", "--path-format=absolute", "--git-common-dir"], { trim: true });
   return realPathOrSelf(dirname(toNativePath(commonDir)));
 }
 
 export async function listWorktrees(cwd: string): Promise<WorktreeInfo[]> {
-  const out = await git(cwd, ["worktree", "list", "--porcelain"]);
+  const out = await runGit(cwd, ["worktree", "list", "--porcelain"], { trim: true });
   const worktrees: WorktreeInfo[] = [];
   let current: (Partial<WorktreeInfo> & { prunable?: boolean }) | null = null;
 
@@ -283,7 +269,7 @@ export async function addWorktree(cwd: string, branch: string): Promise<{ path: 
   // fetch here: worktree creation must stay a local, offline-safe operation.
   let branchExists = false;
   try {
-    await git(repoRoot, ["rev-parse", "--verify", "--quiet", `refs/heads/${trimmed}`]);
+    await runGit(repoRoot, ["rev-parse", "--verify", "--quiet", `refs/heads/${trimmed}`], { trim: true });
     branchExists = true;
   } catch {
     branchExists = false;
@@ -293,20 +279,20 @@ export async function addWorktree(cwd: string, branch: string): Promise<{ path: 
     // Large repos (30k+ files) can take minutes to checkout.
     const WORKTREE_TIMEOUT = 5 * 60_000;
     if (branchExists) {
-      await git(repoRoot, ["worktree", "add", "--", worktreePath, trimmed], WORKTREE_TIMEOUT);
+      await runGit(repoRoot, ["worktree", "add", "--", worktreePath, trimmed], { timeoutMs: WORKTREE_TIMEOUT, trim: true });
     } else {
       // New branch: prefer the remote-tracking tip (refs/remotes/origin/<branch>)
       // over local HEAD when the user already fetched it; fall back to HEAD.
       let startFrom: string | undefined;
       try {
-        await git(repoRoot, ["rev-parse", "--verify", "--quiet", `refs/remotes/origin/${trimmed}`]);
+        await runGit(repoRoot, ["rev-parse", "--verify", "--quiet", `refs/remotes/origin/${trimmed}`], { trim: true });
         startFrom = `refs/remotes/origin/${trimmed}`;
       } catch {
         startFrom = undefined;
       }
       const addArgs = ["worktree", "add", "-b", trimmed, "--", worktreePath];
       if (startFrom) addArgs.push(startFrom);
-      await git(repoRoot, addArgs, WORKTREE_TIMEOUT);
+      await runGit(repoRoot, addArgs, { timeoutMs: WORKTREE_TIMEOUT, trim: true });
     }
   } catch (error) {
     throw new Error(extractGitError(error));
@@ -324,7 +310,7 @@ export async function removeWorktree(cwd: string, worktreePath: string, force = 
   if (target.isMain) throw new Error("Cannot remove the main worktree");
 
   try {
-    await git(cwd, ["worktree", "remove", ...(force ? ["--force"] : []), target.path]);
+    await runGit(cwd, ["worktree", "remove", ...(force ? ["--force"] : []), target.path], { trim: true });
   } catch (error) {
     throw new Error(extractGitError(error));
   }

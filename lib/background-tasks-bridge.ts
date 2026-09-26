@@ -1,6 +1,7 @@
 import { randomUUID } from "crypto";
 import type { EventBus, InlineExtension } from "@earendil-works/pi-coding-agent";
 import type { BgTaskSnapshot } from "./types";
+import { isRecord } from "./type-guards";
 
 /**
  * Server-side bridge between pi-web route handlers and the session-scoped
@@ -53,10 +54,6 @@ export function isBgTaskSnapshot(value: unknown): value is BgTaskSnapshot {
     && typeof task.triggerOnCompletion === "boolean";
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -96,14 +93,6 @@ type PendingRequest = {
 };
 
 export type BgBridgeResult<T> = { ok: true; result: T } | { ok: false; error: string };
-
-export interface BgBridgeCapabilities {
-  api_version: number;
-  status: boolean;
-  logs: boolean;
-  logs_bounded: boolean;
-  kill: boolean;
-}
 
 export interface BgBridgeLogs {
   text: string;

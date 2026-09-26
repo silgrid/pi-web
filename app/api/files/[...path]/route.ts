@@ -88,9 +88,6 @@ async function getUploadDirectory(segments: string[]): Promise<
 > {
   const directory = filePathFromApiSegments(segments);
   const allowedRoots = await getAllowedFileRoots();
-  if (!isFilePathAllowed(directory, allowedRoots)) {
-    return { response: NextResponse.json({ error: "Access denied" }, { status: 403 }) };
-  }
 
   let stat: fs.Stats;
   try {
@@ -102,22 +99,14 @@ async function getUploadDirectory(segments: string[]): Promise<
     return { response: NextResponse.json({ error: "Upload target is not a directory" }, { status: 400 }) };
   }
 
-  // A browsable directory can be a symlink. Resolve both sides before writes
+  // Audit P1: reuse the shared symlink-safe containment helper instead of a
+  // private realpath dance — isExistingFilePathAllowed resolves BOTH sides,
   // so a symlink inside an allowed root cannot redirect uploads outside it.
-  const realDirectory = fs.realpathSync(directory);
-  const realRoots = new Set<string>();
-  for (const root of allowedRoots) {
-    try {
-      realRoots.add(fs.realpathSync(root));
-    } catch {
-      // Ignore stale session roots that no longer exist.
-    }
-  }
-  if (!isFilePathAllowed(realDirectory, realRoots)) {
+  if (!isExistingFilePathAllowed(directory, allowedRoots)) {
     return { response: NextResponse.json({ error: "Access denied" }, { status: 403 }) };
   }
 
-  return { directory: realDirectory };
+  return { directory: fs.realpathSync(directory) };
 }
 
 function parseUploadFileNames(value: unknown): string[] | null {

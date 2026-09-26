@@ -1,7 +1,5 @@
-import { execFile } from "child_process";
 import { existsSync, readFileSync } from "fs";
 import { join } from "path";
-import { promisify } from "util";
 import {
   DefaultPackageManager,
   getAgentDir,
@@ -11,8 +9,7 @@ import { gt, maxSatisfying, rcompare, valid, validRange } from "semver";
 import type { PluginScope, PluginUpdateResult } from "@/lib/api-types";
 import { nodeCliInvocation } from "./node-cli";
 import { getProjectTrustStatus } from "./project-trust";
-
-const execFileAsync = promisify(execFile);
+import { execFileAsync } from "./exec-file";
 
 type ConfiguredPackage = {
   source: string;
