@@ -339,7 +339,7 @@ try {
       // the new page commits. On a slow runner the assertion can observe the
       // DOM between commit and compensation, so poll until the anchor settles
       // instead of measuring once (CI flake, pi#56).
-      let anchoredOffset: number | null = null;
+      let anchoredOffset = null;
       const settleDeadline = Date.now() + 4000;
       while (Date.now() < settleDeadline) {
         anchoredOffset = await entryViewportOffset(before.firstRenderedEntryId);
