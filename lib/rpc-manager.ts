@@ -1990,6 +1990,22 @@ export function hasBusyRpcSessionForCwd(cwd: string): boolean {
   );
 }
 
+/**
+ * Every cwd that currently has a live or loaded agent session (wi pi#59):
+ * the fs-manage route refuses to rename/delete a directory containing one.
+ * Unions every STARTING cwd (the globalThis starting map) with every
+ * registry wrapper's cwd — running OR idle-but-loaded, because deleting
+ * under an idle-but-loaded wrapper breaks it just the same. Normalized the
+ * same way hasBusyRpcSessionForCwd normalizes (realpath when it resolves).
+ */
+export function listLiveSessionCwds(): string[] {
+  const cwds = new Set<string>(getStartingSessionCwds().keys());
+  for (const session of getRegistry().values()) {
+    cwds.add(normalizeRpcCwd(session.cwd));
+  }
+  return [...cwds];
+}
+
 export async function destroyRpcSessionsForCwd(cwd: string): Promise<number> {
   const targetCwd = normalizeRpcCwd(cwd);
   const sessions = Array.from(getRegistry().values()).filter(
