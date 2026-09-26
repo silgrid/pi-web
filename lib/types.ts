@@ -114,6 +114,23 @@ export interface BashExecutionMessage {
 
 export type AgentMessage = UserMessage | AssistantMessage | ToolResultMessage | CustomMessage | BashExecutionMessage;
 
+/**
+ * Prompt and tool loadout carried by the session transcript (Pi >= 0.86). The
+ * leading one holds the base prompt; later ones patch `sections` by name and
+ * list tool changes. Never a chat message: the UI hides it everywhere.
+ */
+export interface SystemMessage {
+  role: "system";
+  content: string | TextContent[];
+  sections?: Record<string, string | null>;
+  toolsAdded?: unknown[];
+  toolsRemoved?: Array<{ name: string }>;
+  timestamp?: number;
+}
+
+/** Any message a `message` entry can store, including transcript system messages. */
+export type SessionMessage = AgentMessage | SystemMessage;
+
 export type ExtensionUiRequest =
   | {
       type: "extension_ui_request";
@@ -216,7 +233,7 @@ export interface ExtensionWidgetItem {
 
 export interface SessionMessageEntry extends SessionEntryBase {
   type: "message";
-  message: AgentMessage;
+  message: SessionMessage;
 }
 
 export interface ThinkingLevelChangeEntry extends SessionEntryBase {
@@ -228,6 +245,16 @@ export interface ModelChangeEntry extends SessionEntryBase {
   type: "model_change";
   provider: string;
   modelId: string;
+}
+
+/** Model usage outside the conversation, such as prompt-cache warming (`kind: "cache_warm"`). */
+export interface UsageEntry extends SessionEntryBase {
+  type: "usage";
+  kind: string;
+  provider: string;
+  model: string;
+  usage: AgentUsage;
+  note?: string;
 }
 
 export interface CompactionEntry extends SessionEntryBase {
@@ -274,14 +301,27 @@ export interface SessionInfoEntry extends SessionEntryBase {
   name?: string;
 }
 
+/**
+ * Append-only edit of an earlier entry's model context. Raw history, usage
+ * and the UI are unaffected: `replacement: null` omits the target from future
+ * provider requests, a value replaces only its content.
+ */
+export interface ContextEditEntry extends SessionEntryBase {
+  type: "context_edit";
+  targetId: string;
+  replacement: { content: unknown } | null;
+}
+
 export type SessionEntry =
   | SessionMessageEntry
   | ThinkingLevelChangeEntry
   | ModelChangeEntry
+  | UsageEntry
   | CompactionEntry
   | BranchSummaryEntry
   | CustomEntry
   | CustomMessageEntry
+  | ContextEditEntry
   | LabelEntry
   | SessionInfoEntry;
 
@@ -318,6 +358,8 @@ export interface SessionInfo {
   modified: string;
   messageCount: number;
   firstMessage: string;
+  /** True while the sidebar has only header/stat metadata for this session. */
+  detailsPending?: boolean;
   parentSessionId?: string; // source session for a fork, or parent session for a subagent
   /** How this session relates to another session. Forks remain top-level in the
    *  UI; only subagent relations form a visible parent/child tree. */

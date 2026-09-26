@@ -54,11 +54,23 @@ function toolCallMetadata(
   return id !== null && toolName !== null ? { id, toolName } : null;
 }
 
+/** A `message_start` / `message_end` for a transcript system message (prompt and tool loadout). */
+export function isSystemMessageEvent(event: AgentEventLike): boolean {
+  return (event.type === "message_start" || event.type === "message_end")
+    && isObject(event.message)
+    && event.message.role === "system";
+}
+
 /** Apply pi-web's event filters plus Pi 0.84's message_update projection. */
 export function toClientAgentEvent(
   event: AgentEventLike,
 ): AgentEventLike | ClientMessageUpdateEvent | null {
   if (OMITTED_EVENT_TYPES.has(event.type)) return null;
+  // Pi >= 0.86 appends the prompt and tool loadout to the transcript as system
+  // messages, which the agent loop announces like any message. They carry the
+  // whole prompt plus every tool schema and are never rendered, so drop them
+  // before they cost the browser bandwidth.
+  if (isSystemMessageEvent(event)) return null;
 
   if (event.type === "message_update") {
     const assistantMessageEvent = event.assistantMessageEvent;

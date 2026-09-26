@@ -44,8 +44,9 @@ export function buildActivePath(nodes: SessionTreeNode[], targetId: string | nul
   return new Set();
 }
 
+// Transcript system messages hold the prompt, not a turn, so they never label a branch.
 function isMessageEntry(entry: SessionEntry): boolean {
-  return entry.type === "message" && "message" in entry;
+  return entry.type === "message" && "message" in entry && entry.message.role !== "system";
 }
 
 // Compress a visible linear chain into the first branching/leaf node.
@@ -82,7 +83,7 @@ export function selectTopLevelBranches(tree: SessionTreeNode[]): SessionTreeNode
 }
 
 function getLabel(entry: SessionEntry): string {
-  if (entry.type === "message" && "message" in entry) {
+  if (entry.type === "message" && isMessageEntry(entry)) {
     const msg = entry.message as { role: string; content: unknown };
     const content = msg.content;
     let text = "";

@@ -3,10 +3,11 @@
 import Image from "next/image";
 import { useState, type FormEvent } from "react";
 import { I18nProvider, useI18n } from "@/hooks/useI18n";
+import { safeLoginDestination } from "@/lib/login-destination";
 
 function safeDestination(): string {
   const destination = new URLSearchParams(window.location.search).get("next");
-  return destination?.startsWith("/") && !destination.startsWith("//") ? destination : "/";
+  return safeLoginDestination(destination, window.location.origin);
 }
 
 function LoginForm() {

@@ -47,6 +47,7 @@ import { workspaceKeyOf } from "@/lib/workspace-memory";
 import { formatRelativeTime } from "@/lib/i18n/format";
 import { useI18n } from "@/hooks/useI18n";
 import { useResizablePanel } from "@/hooks/useResizablePanel";
+import { useScrollbarVisibility } from "@/hooks/useScrollbarVisibility";
 import { DirectoryPicker } from "./DirectoryPicker";
 import { createDirectoryPinFlow } from "@/lib/custom-directory-pin";
 import { MultiRootFileExplorer, type MultiRootFileExplorerHandle } from "./MultiRootFileExplorer";
@@ -126,6 +127,12 @@ function ToolbarIconButton({
   );
 }
 
+function sessionListUrl(summary: boolean, force: boolean): string {
+  if (summary) return "/api/sessions?summary=1";
+  if (force) return "/api/sessions?force=1";
+  return "/api/sessions";
+}
+
 interface Props {
   selectedSessionId: string | null;
   /** Split-view follow: focus-derived session id the sidebar highlights.
@@ -180,6 +187,7 @@ interface ValidatedProject {
 const UNREAD_SESSIONS_STORAGE_KEY = "pi-web:unread-session-ids";
 const LAST_CUSTOM_CWD_STORAGE_KEY = "pi-web:last-custom-cwd";
 const RUNNING_SESSIONS_POLL_MS = 2500;
+const SESSION_DETAILS_HYDRATION_DELAY_MS = 750;
 const SESSION_PANE_DEFAULT_HEIGHT = 320;
 const SESSION_PANE_MIN_HEIGHT = 80;
 const EXPLORER_PANE_MIN_HEIGHT = 120;
@@ -638,7 +646,8 @@ export function SessionSidebar({ selectedSessionId, highlightSessionId, followHi
     ? selectedSessionId
     : highlightSessionId;
   const [allSessions, setAllSessions] = useState<SessionInfo[]>([]);
-  const [sessionListVersion, setSessionListVersion] = useState<number | null>(null);
+  // Tracked in a ref only: the version is compared against the polled value to
+  // decide whether the list needs reloading, and no render reads it.
   const sessionListVersionRef = useRef<number | null>(null);
   const sessionLoadIdRef = useRef(0);
   // Pane-tab restore (this wi): flips once the FIRST session-list load settles
@@ -765,11 +774,15 @@ export function SessionSidebar({ selectedSessionId, highlightSessionId, followHi
   selectedSessionIdRef.current = selectedSessionId;
   const onExternalSessionChangeRef = useRef(onExternalSessionChange);
   onExternalSessionChangeRef.current = onExternalSessionChange;
+  const detailsHydrationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const explorerRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const multiRootExplorerRef = useRef<MultiRootFileExplorerHandle>(null);
 
   // Virtualized session list: only the visible window of rows is mounted.
   const listScrollRef = useRef<HTMLDivElement>(null);
+  const explorerScrollRef = useRef<HTMLDivElement>(null);
+  useScrollbarVisibility(listScrollRef);
+  useScrollbarVisibility(explorerScrollRef, explorerOpen && Boolean(selectedCwdProp || selectedCwd));
   const sessionPaneRef = useRef<HTMLDivElement>(null);
   const explorerSectionRef = useRef<HTMLDivElement>(null);
   const sessionPaneHeightRef = useRef(SESSION_PANE_DEFAULT_HEIGHT);
@@ -807,12 +820,17 @@ export function SessionSidebar({ selectedSessionId, highlightSessionId, followHi
   const [listScrollTop, setListScrollTop] = useState(0);
   const [focusedSessionId, setFocusedSessionId] = useState<string | null>(null);
   const listScrollRafRef = useRef<number | null>(null);
+  const listScrollTopRef = useRef(0);
+  const renderedListScrollTopRef = useRef(0);
   const handleListScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
-    const top = e.currentTarget.scrollTop;
+    listScrollTopRef.current = e.currentTarget.scrollTop;
     if (listScrollRafRef.current != null) return;
     listScrollRafRef.current = requestAnimationFrame(() => {
       listScrollRafRef.current = null;
-      setListScrollTop(top);
+      const nextTop = Math.floor(listScrollTopRef.current / SESSION_LIST_ITEM_HEIGHT) * SESSION_LIST_ITEM_HEIGHT;
+      if (renderedListScrollTopRef.current === nextTop) return;
+      renderedListScrollTopRef.current = nextTop;
+      setListScrollTop(nextTop);
     });
   }, []);
   useLayoutEffect(() => {
@@ -823,15 +841,17 @@ export function SessionSidebar({ selectedSessionId, highlightSessionId, followHi
     });
     ro.observe(el);
     setListViewportH(el.clientHeight);
-    setListScrollTop(el.scrollTop);
+    listScrollTopRef.current = el.scrollTop;
+    renderedListScrollTopRef.current = Math.floor(el.scrollTop / SESSION_LIST_ITEM_HEIGHT) * SESSION_LIST_ITEM_HEIGHT;
+    setListScrollTop(renderedListScrollTopRef.current);
     return () => ro.disconnect();
   }, [sessionSearchActive]);
 
-  const loadSessions = useCallback(async (showLoading = false, force = false) => {
+  const loadSessions = useCallback(async (showLoading = false, force = false, summary = false) => {
     const loadId = ++sessionLoadIdRef.current;
     try {
       if (showLoading) setLoading(true);
-      const res = await fetch(force ? "/api/sessions?force=1" : "/api/sessions", {
+      const res = await fetch(sessionListUrl(summary, force), {
         cache: "no-store",
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -843,7 +863,6 @@ export function SessionSidebar({ selectedSessionId, highlightSessionId, followHi
       };
       if (loadId !== sessionLoadIdRef.current) return;
       sessionListVersionRef.current = data.sessionListVersion;
-      setSessionListVersion(data.sessionListVersion);
       setAllSessions(data.sessions);
       // Treat the fetched running set as an initial fallback only. Once the
       // lightweight poll is live, a slow session-list fetch cannot overwrite it.
@@ -880,7 +899,30 @@ export function SessionSidebar({ selectedSessionId, highlightSessionId, followHi
   useEffect(() => {
     const isFirst = !initialLoadDone.current;
     initialLoadDone.current = true;
-    loadSessions(isFirst, !isFirst);
+    let active = true;
+
+    if (isFirst) {
+      // Header/stat metadata is enough to select the URL session and paint the
+      // sidebar. Hydrate exact counts, names, and first messages once the
+      // selected chat has had a chance to start loading.
+      void loadSessions(true, false, true).then(() => {
+        if (!active) return;
+        detailsHydrationTimerRef.current = setTimeout(() => {
+          detailsHydrationTimerRef.current = null;
+          if (active) void loadSessions(false, true);
+        }, SESSION_DETAILS_HYDRATION_DELAY_MS);
+      });
+    } else {
+      void loadSessions(false, true);
+    }
+
+    return () => {
+      active = false;
+      if (detailsHydrationTimerRef.current) {
+        clearTimeout(detailsHydrationTimerRef.current);
+        detailsHydrationTimerRef.current = null;
+      }
+    };
   }, [loadSessions, refreshKey]);
 
   // Browser storage is unavailable during server rendering. Restore the panel
@@ -1411,7 +1453,7 @@ export function SessionSidebar({ selectedSessionId, highlightSessionId, followHi
   }, [pinnedRootsKey]);
 
   // Sessions of every worktree in the selected project are shown together
-  const selectedProject = projectFor(selectedCwd);
+  const selectedProject = useMemo(() => projectFor(selectedCwd), [projectFor, selectedCwd]);
 
   // On load, the selected directory's group starts expanded; other groups
   // start collapsed unless its persisted state says otherwise. Fires once,
@@ -1449,7 +1491,9 @@ export function SessionSidebar({ selectedSessionId, highlightSessionId, followHi
   // rules, minus the sessions grouped under a listed directory — those
   // render only inside their group, so a listed directory's sessions never
   // appear twice. Recomputed per render, exactly like the pre-group session
-  // list was.
+  // list was. NOTE (pi#56 merge): filteredSessions keeps OUR visibleSessions
+  // (session-filter) source, not upstream's allSessions — the upstream view
+  // cache feeds allSessions upstream of the filter.
   const filteredSessions = selectedProject
     ? sessionsForProject(visibleSessions, selectedProject.key)
     : visibleSessions;
@@ -1470,6 +1514,14 @@ export function SessionSidebar({ selectedSessionId, highlightSessionId, followHi
   }
   const mainFamilies = listSessionFamilies(
     filteredSessions.filter((session) => !groupedSessionIds.has(session.id)),
+  );
+  // Worktree switcher visibility (upstream 234e19e, pi#56 merge): shown when
+  // the selected directory is the top level of a git repository.
+  const showWorktreeSwitcher = Boolean(
+    worktreeState?.isGit
+    && worktreeState.isTopLevel
+    && selectedCwd
+    && selectedProject?.key === worktreeState.projectKey
   );
   // Per-group activity counts (running / unread), aggregated over the
   // directory's grouped sessions and keyed by the entry's normalized path
@@ -1795,10 +1847,11 @@ export function SessionSidebar({ selectedSessionId, highlightSessionId, followHi
           overflow: "hidden",
         }}
       >
-        <SessionSearch open={sessionSearchOpen} query={sessionSearchQuery} refreshKey={sessionListVersion} selectedSessionId={selectedSessionId} onSelectSession={handleSelectSessionFromList}>
+        <SessionSearch open={sessionSearchOpen} query={sessionSearchQuery} selectedSessionId={selectedSessionId} onSelectSession={handleSelectSessionFromList}>
         <div
           ref={listScrollRef}
           onScroll={handleListScroll}
+          className="scrollbar-subtle"
           onTouchStart={(event) => {
             const el = listScrollRef.current;
             if (!el || el.scrollTop > 0) return;
@@ -1814,10 +1867,7 @@ export function SessionSidebar({ selectedSessionId, highlightSessionId, followHi
               void loadSessions(false, true);
             }
           }}
-          onTouchEnd={() => {
-            pullStartYRef.current = null;
-            pullFiredRef.current = false;
-          }}
+
           style={{
             flex: "1 1 auto",
             minHeight: 0,
@@ -2105,7 +2155,7 @@ export function SessionSidebar({ selectedSessionId, highlightSessionId, followHi
             </ToolbarIconButton>
           </div>
           {explorerOpen && (
-            <div style={{ flex: 1, overflowY: "auto", overflowX: "hidden" }}>
+            <div ref={explorerScrollRef} className="scrollbar-subtle" style={{ flex: 1, overflowY: "auto", overflowX: "hidden" }}>
               <MultiRootFileExplorer
                 ref={multiRootExplorerRef}
                 roots={explorerRoots}
@@ -2483,7 +2533,9 @@ function SessionItem({
               ) : (
                 <span title={session.modified}>{formatRelativeTime(session.modified, locale)}</span>
               )}
-              <span>{t("sidebar.messagesCount", { count: session.messageCount })}</span>
+              <span>
+                {session.detailsPending ? "…" : t("sidebar.messagesCount", { count: session.messageCount })}
+              </span>
               {session.isWorktree && session.branch && (
                 <span
                   title={`Worktree: ${session.cwd}`}

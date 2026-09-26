@@ -6,10 +6,9 @@ import { formatRelativeTime } from "@/lib/i18n/format";
 import type { SessionInfo } from "@/lib/types";
 import type { SessionSearchResponse } from "@/lib/session-search";
 
-export function SessionSearch({ open, query, refreshKey, children, selectedSessionId, onSelectSession }: {
+export function SessionSearch({ open, query, children, selectedSessionId, onSelectSession }: {
   open: boolean;
   query: string;
-  refreshKey: number | null;
   children: ReactNode;
   selectedSessionId: string | null;
   onSelectSession: (session: SessionInfo, entryId?: string, blockIndex?: number) => void;
@@ -20,6 +19,10 @@ export function SessionSearch({ open, query, refreshKey, children, selectedSessi
   const response = state.query === search ? state.response : undefined;
   const failed = state.query === search && state.failed;
 
+  // Re-runs only when the query changes. It deliberately does not depend on the
+  // session-list version: ordinary agent activity bumps that version every few
+  // seconds, which used to refetch (and re-order) results while they were being
+  // read.
   useEffect(() => {
     if (!open || !search) return;
     const controller = new AbortController();
@@ -38,7 +41,7 @@ export function SessionSearch({ open, query, refreshKey, children, selectedSessi
       clearTimeout(timer);
       controller.abort();
     };
-  }, [open, search, refreshKey]);
+  }, [open, search]);
 
   return !open || !search ? children : (
     <div className="min-h-20 flex-1 overflow-y-auto" aria-busy={!response && !failed}>
