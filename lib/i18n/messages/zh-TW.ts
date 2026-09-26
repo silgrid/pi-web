@@ -265,7 +265,7 @@ export const zhTWLocale: LocalePlugin = {
     "directoryPicker.rowRename": "重新命名",
     "directoryPicker.rowDelete": "刪除",
     "directoryPicker.rowRenamePrompt": "新的目錄名稱",
-    "directoryPicker.rowDeletePrompt": "輸入目錄名稱以確認刪除",
+    "directoryPicker.rowDeletePrompt": "確認刪除該目錄？此操作不可撤銷：",
     "directoryPicker.fsManage.invalidBody": "請求無效",
     "directoryPicker.fsManage.nonexistent": "目錄不存在",
     "directoryPicker.fsManage.symlinkEntry": "無法在此重新命名或刪除符號連結",

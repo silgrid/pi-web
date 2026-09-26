@@ -657,6 +657,17 @@ function siblingPathUnder(directoryPath: string, name: string): string {
   return withoutTrailing.slice(0, cut) + separator + name;
 }
 
+/** The basename of a browse entry path, separator-agnostic (POSIX and
+ *  Windows drive paths). Used by the delete flow to auto-fill the typed
+ *  confirmation the fs-manage API requires — the human confirmation is the
+ *  dialog itself (wi pi#61). */
+function entryBasename(directoryPath: string): string {
+  const separator = directoryPath.includes("\\") ? "\\" : "/";
+  const withoutTrailing = directoryPath.replace(/[\\/]+$/, "");
+  const cut = withoutTrailing.lastIndexOf(separator);
+  return cut < 0 ? withoutTrailing : withoutTrailing.slice(cut + 1);
+}
+
 /**
  * Browse-row fs-manage flow (wi pi#59), as ONE production-used seam so
  * tests drive the real rules without a DOM —
@@ -729,14 +740,14 @@ export function createBrowseRowManageFlow(deps: {
         deps.setBusy(false);
       }
     },
-    async submitDelete(rawValue: string) {
+    async submitDelete() {
       if (pending) return;
       const path = deps.rowPath();
-      // RAW confirmation (review r2 B3, pi#60): the server compares
-      // basename(path) exactly, so trimming here would make a directory
-      // named "project " unconfirmable and let "project" confirm it.
-      const confirm = rawValue;
-      if (!confirm) return; // nothing typed: nothing requested
+      // The human confirmation is the DIALOG itself (wi pi#61): the request
+      // auto-carries the entry's exact basename, which is what the reviewed
+      // fs-manage contract compares against — the API is untouched.
+      const confirm = entryBasename(path);
+      if (!confirm) return;
       pending = true;
       deps.setBusy(true);
       deps.onManageStart();
@@ -877,6 +888,7 @@ export function PickerRowManagePanel({
   mode,
   value,
   busy,
+  deleteName,
   onChange,
   onSubmit,
   onCancel,
@@ -885,21 +897,48 @@ export function PickerRowManagePanel({
   mode: "rename" | "delete";
   value: string;
   busy?: boolean;
+  /** Delete mode only: the directory's own name, shown in the confirm
+   *  dialog (wi pi#61 — the confirm is a dialog, not a type-the-name step). */
+  deleteName?: string;
   onChange: (value: string) => void;
   onSubmit: () => void;
   onCancel: () => void;
 }) {
+  if (mode === "delete") {
+    return (
+      <div className="directory-picker-row-manage-panel" style={{ display: "flex", flexDirection: "column", gap: 6, flexShrink: 0, padding: "4px 8px 8px 30px" }}>
+        <div style={{ color: "var(--text-dim)", fontSize: 11, lineHeight: 1.35 }}>
+          {t("directoryPicker.rowDeletePrompt")}
+          {deleteName ? <span style={{ color: "var(--text)", fontFamily: "var(--font-mono)" }}>{deleteName}</span> : null}
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
+          <button
+            type="button"
+            onClick={onSubmit}
+            disabled={busy}
+            style={{ padding: "5px 12px", border: 0, borderRadius: 5, background: "#b91c1c", color: "#fff", fontSize: 11, fontWeight: 600, cursor: busy ? "not-allowed" : "pointer", opacity: busy ? 0.65 : 1 }}
+          >
+            {t("directoryPicker.rowDelete")}
+          </button>
+          <button
+            type="button"
+            onClick={onCancel}
+            style={{ padding: "5px 12px", border: "1px solid var(--border)", borderRadius: 5, background: "var(--bg-hover)", color: "var(--text-muted)", fontSize: 11, cursor: "pointer" }}
+          >
+            {t("i18n.cancel")}
+          </button>
+        </div>
+      </div>
+    );
+  }
   return (
     <div className="directory-picker-row-manage-panel" style={{ display: "flex", flexDirection: "column", gap: 6, flexShrink: 0, padding: "4px 8px 8px 30px" }}>
-      {mode === "delete" && (
-        <div style={{ color: "var(--text-dim)", fontSize: 11, lineHeight: 1.35 }}>{t("directoryPicker.rowDeletePrompt")}</div>
-      )}
       <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
         <input
           type="text"
           value={value}
           autoFocus
-          placeholder={mode === "rename" ? t("directoryPicker.rowRenamePrompt") : t("directoryPicker.rowDeletePrompt")}
+          placeholder={t("directoryPicker.rowRenamePrompt")}
           onChange={(event) => onChange(event.target.value)}
           onKeyDown={createPickerFieldKeyDown({ submit: onSubmit, cancel: onCancel })}
           style={{ minWidth: 0, flex: 1, height: 28, padding: "0 8px", border: "1px solid var(--accent)", borderRadius: 5, outline: "none", background: "var(--bg-panel)", color: "var(--text)", fontFamily: "var(--font-mono)", fontSize: 11, boxSizing: "border-box" }}
@@ -910,7 +949,7 @@ export function PickerRowManagePanel({
           disabled={busy || !value}
           style={{ padding: "5px 12px", border: 0, borderRadius: 5, background: "var(--accent)", color: "var(--accent-contrast)", fontSize: 11, fontWeight: 600, cursor: busy || !value ? "not-allowed" : "pointer", opacity: busy || !value ? 0.65 : 1 }}
         >
-          {mode === "rename" ? t("directoryPicker.rowRename") : t("directoryPicker.rowDelete")}
+          {t("directoryPicker.rowRename")}
         </button>
         <button
           type="button"
@@ -1432,10 +1471,11 @@ export function DirectoryPicker({ onCancel, onSelect, initialPath, busy = false,
         mode={rowManageMode}
         value={rowManageValue}
         busy={rowManageBusy}
+        deleteName={rowManagePath ? entryBasename(rowManagePath) : undefined}
         onChange={setRowManageValue}
         onSubmit={() => {
           if (rowManageMode === "rename") void rowManageFlow.submitRename(rowManageValue);
-          else void rowManageFlow.submitDelete(rowManageValue);
+          else void rowManageFlow.submitDelete();
         }}
         onCancel={() => rowManageFlow.cancel()}
       />

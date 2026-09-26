@@ -265,7 +265,7 @@ export const enLocale: LocalePlugin = {
     "directoryPicker.rowRename": "Rename",
     "directoryPicker.rowDelete": "Delete",
     "directoryPicker.rowRenamePrompt": "New directory name",
-    "directoryPicker.rowDeletePrompt": "Type the directory name to confirm deletion",
+    "directoryPicker.rowDeletePrompt": "Delete this directory? This cannot be undone:",
     "directoryPicker.fsManage.invalidBody": "Invalid request",
     "directoryPicker.fsManage.nonexistent": "Directory does not exist",
     "directoryPicker.fsManage.symlinkEntry": "Symbolic links cannot be renamed or deleted here",

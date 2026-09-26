@@ -923,7 +923,7 @@ test("the rename flow: a typed refusal maps its code to the i18n message in the 
 
 test("the delete flow: the request carries the typed confirm name; success refreshes the listing", async () => {
   const h = createManageHarness();
-  await h.flow.submitDelete("project");
+  await h.flow.submitDelete();
   assert.equal(h.requests.length, 1);
   assert.deepEqual(h.requests[0].body, {
     action: "delete",
@@ -958,29 +958,30 @@ test("the flows carry RAW names and confirmations — trim never corrupts the pa
   // space preserved in the payload).
   await flow.submitRename("renamed ");
   assert.equal(requests[0].nextPath, "/work/renamed ");
-  // The delete confirmation is compared EXACTLY: only the raw basename
-  // confirms; its trimmed form cannot (the server would refuse it).
-  await flow.submitDelete("project ");
+  // The delete confirmation is auto-derived from the entry's EXACT basename
+  // (the dialog is the human confirmation — wi pi#61): a whitespace-named
+  // directory deletes with its raw basename in the payload.
+  await flow.submitDelete();
   assert.equal(requests[1].confirm, "project ");
 });
 
 test("the delete flow: confirmMismatch renders the mapped message with the confirm step kept open", async () => {
   const h = createManageHarness({ response: { ok: false, reason: "confirmMismatch" } });
-  await h.flow.submitDelete("wrong");
+  await h.flow.submitDelete();
   assert.deepEqual(h.state.errors, ["directoryPicker.fsManage.confirmMismatch"]);
   assert.equal(h.state.closed, 0);
-  // RAW confirmations: a whitespace-only confirmation is SENT (it cannot
-  // match any basename, so the server refuses with confirmMismatch) —
-  // trimming here would make whitespace-named directories unconfirmable.
-  await h.flow.submitDelete("   ");
+  // The confirm dialog auto-carries the entry's exact basename (wi pi#61):
+  // a second delete attempt sends the CORRECT basename without the operator
+  // typing anything, and the dialog stays open on the canned refusal.
+  await h.flow.submitDelete();
   assert.equal(h.requests.length, 2);
-  assert.equal(h.requests[1].body.confirm, "   ");
+  assert.equal(h.requests[1].body.confirm, "project");
   assert.deepEqual(h.state.errors, ["directoryPicker.fsManage.confirmMismatch", "directoryPicker.fsManage.confirmMismatch"]);
 });
 
 test("a network failure degrades to the ioFailure message (no prose from the transport)", async () => {
   const h = createManageHarness({ reject: new Error("offline") });
-  await h.flow.submitDelete("project");
+  await h.flow.submitDelete();
   assert.deepEqual(h.state.errors, ["directoryPicker.fsManage.ioFailure"]);
   assert.equal(h.state.closed, 0);
 });
