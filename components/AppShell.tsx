@@ -290,8 +290,6 @@ export function AppShell() {
   const [sessionCatalogReported, setSessionCatalogReported] = useState(false);
   const handleSessionsChange = useCallback((sessions: SessionInfo[]) => {
     setSessionCatalog(sessions);
-  const handleSessionsChange = useCallback((sessions: SessionInfo[]) => {
-    setSessionCatalog(sessions);
     setSessionCatalogReported(true);
     // The sidebar hydrates metadata after the selected session has already
     // mounted. Merge that update into the active session without changing the

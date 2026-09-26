@@ -1515,14 +1515,6 @@ export function SessionSidebar({ selectedSessionId, highlightSessionId, followHi
   const mainFamilies = listSessionFamilies(
     filteredSessions.filter((session) => !groupedSessionIds.has(session.id)),
   );
-  // Worktree switcher visibility (upstream 234e19e, pi#56 merge): shown when
-  // the selected directory is the top level of a git repository.
-  const showWorktreeSwitcher = Boolean(
-    worktreeState?.isGit
-    && worktreeState.isTopLevel
-    && selectedCwd
-    && selectedProject?.key === worktreeState.projectKey
-  );
   // Per-group activity counts (running / unread), aggregated over the
   // directory's grouped sessions and keyed by the entry's normalized path
   // identity — the group keys, not the workspace keys the dropdown uses.

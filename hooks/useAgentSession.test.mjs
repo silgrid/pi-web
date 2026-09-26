@@ -169,6 +169,24 @@ test("sessions the user never overrode follow pi's configured defaultTools (#700
 });
 
 test("only the session-mount load probes disk for external appends", () => {
+  const loadSessionSource = source.slice(
+    source.indexOf("  const loadSession = useCallback"),
+    source.indexOf("  const loadContext = useCallback"),
+  );
+  const mountSource = source.slice(
+    source.indexOf("// Load session on mount"),
+    source.indexOf("sessionHookMountedRef.current = false"),
+  );
+  assert.match(loadSessionSource, /options\?: \{ force\?: boolean \}/);
+  assert.match(loadSessionSource, /if \(options\?\.force\) params\.set\("force", "1"\)/);
+  assert.match(loadSessionSource, /d\.wrapperRebuilt[\s\S]*?eventConnectionRef\.current\?\.close\(\)[\s\S]*?maintain\(sid\)/);
+  assert.match(mountSource, /loadSession\(session\.id, !cached, true, \{ force: true \}\)/);
+  assert.match(source, /await loadSession\(sid\)/);
+  // Fork (pi#56 merge): TWO forced probes are intentional — upstream's
+  // session-mount probe plus OUR guarded external-write reload
+  // (refreshFromDisk). Upstream's assertion expected exactly 1.
+  assert.equal([...source.matchAll(/\{ force: true \}/g)].length, 2);
+});
 
 test("only the mount load and the guarded external-write reload probe disk for external appends", () => {
   const loadSessionSource = source.slice(

@@ -336,13 +336,8 @@ test("does not expose disk-backed actions for transient sessions", () => {
 });
 
 test("hides subagent rows and aggregates their state into the main session row", () => {
-<<<<<<< HEAD
   assert.match(source, /listSessionFamilies\(\s*filteredSessions\.filter\(\(session\) => !groupedSessionIds\.has\(session\.id\)\)/);
   assert.match(source, /familySessions\.some\(\(session\) => session\.id === effectiveHighlightSessionId\)/);
-=======
-  assert.match(source, /const sessionFamilies = useMemo\(\(\) => listSessionFamilies\(filteredSessions\)/);
-  assert.match(source, /familySessions\.some\(\(session\) => session\.id === selectedSessionId\)/);
->>>>>>> piupstream/main
   assert.match(source, /familySessions\.some\(\(session\) => runningSessionIds\.has\(session\.id\)\)/);
   assert.doesNotMatch(source, /function SessionTreeItem/);
 });

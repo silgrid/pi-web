@@ -31,10 +31,13 @@ test("writes the session URL when tab memory restores onto an empty address bar"
 });
 
 test("New session is remembered as this tab's selection", () => {
-  const start = source.indexOf("  const handleNewSession = useCallback");
-  const end = source.indexOf("  // Global keyboard shortcuts", start);
-  const body = source.slice(start, end);
-  assert.match(body, /router\.replace\(`\?cwd=\$\{encodeURIComponent\(cwd\)\}`/);
+  // Fork adaptation (pi#56 merge): the tab-memory calls live in the
+  // selection-tracking callback — setTabOpenSession for sessions and
+  // setTabOpenNewSession for the new-session composer cwd. Our pi#21
+  // handleNewSession flow deliberately does not rewrite the URL to
+  // `?cwd=` (upstream's assertion targeted that detail).
+  assert.match(source, /setTabOpenSession\(selectedSession\.id\);/);
+  assert.match(source, /if \(newSessionCwd\) setTabOpenNewSession\(newSessionCwd\);/);
 });
 
 test("deleting the current session forgets its tab memory", () => {

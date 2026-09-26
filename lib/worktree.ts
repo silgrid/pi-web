@@ -158,18 +158,15 @@ function refreshProjectInBackground(cwd: string): void {
 }
 
 async function resolveProjectUncached(cwd: string): Promise<ProjectInfo> {
+  const cache = getProjectCache();
   let info: ProjectInfo;
   try {
     if (!existsSync(cwd)) {
-<<<<<<< HEAD
       const inferred = await inferRemovedWorktree(cwd);
       info = inferred
         ?? { projectRoot: cwd, branch: null, isWorktree: false, isTopLevel: false, pseudoProject: true };
       cache.set(cwd, { info, expiresAt: Date.now() + PROJECT_CACHE_TTL_MS });
       return info;
-=======
-      return inferRemovedWorktree(cwd) ?? { projectRoot: cwd, branch: null, isWorktree: false, isTopLevel: false };
->>>>>>> piupstream/main
     }
     const out = await git(cwd, [
       "rev-parse", "--path-format=absolute",

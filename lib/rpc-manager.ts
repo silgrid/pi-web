@@ -297,8 +297,6 @@ export class AgentSessionWrapper {
       terminal: (task) => this.emit({ type: "background_task_terminal", task }),
       update: (tasks) => this.emit({ type: "background_tasks_update", tasks }),
     });
-    this.installExactSystemPromptContinuation();
-    this.applyExactSystemPrompt();
   }
 
   /** Server-side background-tasks bridge for this session (null for chat-only). */

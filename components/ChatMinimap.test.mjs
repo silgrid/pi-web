@@ -74,6 +74,7 @@ test("minimap rail width is 24px and shared across ChatWindow and ChatInput", as
   assert.match(chatWindow, /right: isMobile \? 0 : MINIMAP_WIDTH/);
   // Composer right padding tracks the rail: 16px base + 24px rail = 40px.
   assert.match(chatInput, /paddingRight: compact \? 0 : isMobile \? 16 : 40, \/\/ desktop: 16px base \+ 24px for ChatMinimap alignment/);
+});
 
 test("counts tool calls per assistant reply, including replies that also answer", () => {
   // A reply can both answer and call tools, so counting text-less messages
