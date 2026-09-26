@@ -70,3 +70,51 @@ export function serializeHeaderRows(rows: readonly HeaderRow[]): Record<string, 
   }
   return Object.keys(headers).length ? headers : undefined;
 }
+
+/** The parts of models.json the rename tracking needs. */
+export interface ModelsConfigDraft {
+  providers?: Record<string, { models?: { id: string }[] }>;
+}
+
+/** Snapshot of the model ids models.json holds, by provider and slot. */
+export function savedModelIds(config: ModelsConfigDraft): Map<string, (string | null)[]> {
+  return new Map(Object.entries(config.providers ?? {}).map(([name, provider]) => [
+    name,
+    (provider.models ?? []).map((model) => model.id),
+  ]));
+}
+
+export function trackAddedModels(slots: Map<string, (string | null)[]>, providerName: string, count: number) {
+  if (count <= 0) return;
+  const existing = slots.get(providerName) ?? [];
+  slots.set(providerName, [...existing, ...Array.from({ length: count }, () => null)]);
+}
+
+/**
+ * Model ids that changed in place since the last save, as full references.
+ *
+ * `from` keeps the provider id the settings file still spells, so the server
+ * can rewrite the entry before it applies the provider renames.
+ */
+export function collectModelRenames(
+  config: ModelsConfigDraft,
+  slots: Map<string, (string | null)[]>,
+  providerRenames: Map<string, string>,
+): { from: string; to: string }[] {
+  const originalProvider = (name: string) => {
+    for (const [from, to] of providerRenames) if (to === name) return from;
+    return name;
+  };
+
+  const renames: { from: string; to: string }[] = [];
+  for (const [name, provider] of Object.entries(config.providers ?? {})) {
+    const saved = slots.get(name);
+    if (!saved) continue;
+    (provider.models ?? []).forEach((model, index) => {
+      const before = saved[index];
+      if (!before || !model.id || before === model.id) return;
+      renames.push({ from: `${originalProvider(name)}/${before}`, to: `${name}/${model.id}` });
+    });
+  }
+  return renames;
+}

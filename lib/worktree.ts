@@ -40,6 +40,8 @@ export interface WorktreeInfo {
 
 declare global {
   var __piProjectCache: Map<string, { info: ProjectInfo; expiresAt: number }> | undefined;
+  var __piProjectRefresh: Map<string, Promise<void>> | undefined;
+  var __piProjectCacheGeneration: number | undefined;
 }
 
 const PROJECT_CACHE_TTL_MS = 60_000;
@@ -51,6 +53,8 @@ function getProjectCache(): Map<string, { info: ProjectInfo; expiresAt: number }
 
 export function invalidateProjectCache(): void {
   globalThis.__piProjectCache?.clear();
+  globalThis.__piProjectCacheGeneration = (globalThis.__piProjectCacheGeneration ?? 0) + 1;
+  globalThis.__piProjectRefresh?.clear();
 }
 
 async function git(cwd: string, args: string[], timeoutMs = 10_000): Promise<string> {
@@ -108,11 +112,53 @@ function removedWorktreeProjectInfo(repoRoot: string, cwd: string): ProjectInfo 
   return { projectRoot: realPathOrSelf(repoRoot), branch: basename(cwd), isWorktree: true, isTopLevel: true };
 }
 
+/**
+ * Resolve a cwd's project identity with stale-while-revalidate caching.
+ *
+ * Within PROJECT_CACHE_TTL_MS the cached value is returned directly. After
+ * that the stale value is still returned immediately while a background
+ * refresh re-runs git; callers (chiefly the session list, which fans out over
+ * every project cwd) therefore never wait on git subprocesses once a cwd has
+ * been resolved once. Concurrent refreshes for the same cwd share one promise.
+ * add/removeWorktree invalidate eagerly via invalidateProjectCache().
+ */
 export async function resolveProject(cwd: string): Promise<ProjectInfo> {
   const cache = getProjectCache();
   const cached = cache.get(cwd);
-  if (cached && cached.expiresAt > Date.now()) return cached.info;
+  const now = Date.now();
+  if (cached && cached.expiresAt > now) return cached.info;
 
+  // Serve the stale entry now; refresh out of band.
+  if (cached) {
+    refreshProjectInBackground(cwd);
+    return cached.info;
+  }
+
+  const info = await resolveProjectUncached(cwd);
+  cache.set(cwd, { info, expiresAt: Date.now() + PROJECT_CACHE_TTL_MS });
+  return info;
+}
+
+function refreshProjectInBackground(cwd: string): void {
+  const inflight = (globalThis.__piProjectRefresh ??= new Map<string, Promise<void>>());
+  if (inflight.has(cwd)) return;
+  const generation = globalThis.__piProjectCacheGeneration ?? 0;
+  const task = resolveProjectUncached(cwd)
+    .then((info) => {
+      if ((globalThis.__piProjectCacheGeneration ?? 0) !== generation) return;
+      getProjectCache().set(cwd, { info, expiresAt: Date.now() + PROJECT_CACHE_TTL_MS });
+    })
+    .catch(() => {
+      // Keep the stale entry on refresh failure; the next TTL window retries.
+    })
+    .finally(() => {
+      if (inflight.get(cwd) === task) inflight.delete(cwd);
+    });
+  inflight.set(cwd, task);
+}
+
+async function resolveProjectUncached(cwd: string): Promise<ProjectInfo> {
+  const cache = getProjectCache();
   let info: ProjectInfo;
   try {
     if (!existsSync(cwd)) {
@@ -151,7 +197,6 @@ export async function resolveProject(cwd: string): Promise<ProjectInfo> {
     info = { projectRoot: cwd, branch: null, isWorktree: false, isTopLevel: false };
   }
 
-  cache.set(cwd, { info, expiresAt: Date.now() + PROJECT_CACHE_TTL_MS });
   return info;
 }
 

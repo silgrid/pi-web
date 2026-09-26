@@ -2,7 +2,7 @@ import {
   SessionManager,
   getAgentDir,
 } from "@earendil-works/pi-coding-agent";
-import { closeSync, type Dirent, fstatSync, openSync, readSync } from "fs";
+import { closeSync, type Dirent, fstatSync, openSync, readSync, statSync } from "fs";
 import { readdir } from "fs/promises";
 import { isAbsolute, join, normalize as normalizePath, relative, resolve as resolvePath, sep } from "path";
 import type { AgentMessage, ImageContent, SessionEntry, SessionHeader, SessionInfo, SessionContext } from "./types";
@@ -13,7 +13,7 @@ import { sessionPathKey } from "./session-path";
 import { MAX_TOOL_RESULT_IMAGE_BYTES, TOOL_RESULT_IMAGE_MIMES } from "./tool-result-images";
 import { resolveProject, type ProjectInfo } from "./worktree";
 import { readSubagentRun, SUBAGENT_META_TYPE } from "./subagents";
-import { listSessionsIncremental } from "./session-list-scanner";
+import { listSessionsIncremental, type ScannedSessionInfo } from "./session-list-scanner";
 import { ensureSessionWatcher } from "./session-watcher";
 
 export { getAgentDir };
@@ -185,42 +185,77 @@ export function mergeSessionLists(
   return [...byId.values()].sort((a, b) => b.modified.localeCompare(a.modified));
 }
 
-async function loadAllSessions(): Promise<SessionInfo[]> {
-  const scanned = await listSessionsIncremental();
-  const pathToId = new Map<string, string>();
-  for (const s of scanned) pathToId.set(sessionPathKey(s.path), s.id);
+type ScannedSubagent = NonNullable<ReturnType<typeof readSubagentRun>>;
 
-  const sessions = scanned.map((s) => {
-    cacheSessionPath(s.id, s.path);
-    const originSessionId = s.parentSessionPath ? pathToId.get(sessionPathKey(s.parentSessionPath)) : undefined;
-    let subagent = null;
-    if (s.parentSessionPath) {
-      try {
-        subagent = readSubagentRun(readSessionRelationEntries(s.path), s.id, s.path);
-      } catch { /* malformed or concurrently removed session */ }
-    }
-    return {
-      path: s.path,
-      id: s.id,
-      cwd: s.cwd,
-      name: s.name,
-      created: s.created.toISOString(),
-      modified: s.modified.toISOString(),
-      messageCount: s.messageCount,
-      firstMessage: s.firstMessage || "(no messages)",
-      parentSessionId: originSessionId,
-      ...(subagent
-        ? { relation: { kind: "subagent" as const, parentSessionId: subagent.parentSessionId, profile: subagent.profile, description: subagent.description, status: subagent.status } }
-        : s.parentSessionPath
-          ? { relation: { kind: "fork" as const, ...(originSessionId ? { originSessionId } : {}) } }
-          : {}),
-      transient: false,
-    };
-  });
-  return attachSessionProjectInfo(sessions);
+function resolveScannedSessionRelation(
+  scanned: ScannedSessionInfo,
+  pathToId: Map<string, string>,
+): { originSessionId?: string; subagent: ScannedSubagent | null } {
+  const originSessionId = scanned.parentSessionPath
+    ? pathToId.get(sessionPathKey(scanned.parentSessionPath))
+    : undefined;
+  if (!scanned.parentSessionPath) return { originSessionId, subagent: null };
+
+  try {
+    const subagent = readSubagentRun(readSessionRelationEntries(scanned.path), scanned.id, scanned.path);
+    return { originSessionId, subagent };
+  } catch {
+    // Malformed or concurrently removed session.
+    return { originSessionId, subagent: null };
+  }
 }
 
-export async function listAllSessions(options: { force?: boolean } = {}): Promise<SessionInfo[]> {
+function mapScannedSession(
+  scanned: ScannedSessionInfo,
+  pathToId: Map<string, string>,
+): SessionInfo {
+  cacheSessionPath(scanned.id, scanned.path);
+  const { originSessionId, subagent } = resolveScannedSessionRelation(scanned, pathToId);
+  const detailsPending = scanned.detailsPending === true;
+  return {
+    path: scanned.path,
+    id: scanned.id,
+    cwd: scanned.cwd,
+    name: scanned.name,
+    created: scanned.created.toISOString(),
+    modified: scanned.modified.toISOString(),
+    messageCount: scanned.messageCount,
+    // A pending row has no first message yet; the placeholder would read as a
+    // real "(no messages)" session until the details arrive.
+    firstMessage: detailsPending && !scanned.firstMessage
+      ? ""
+      : scanned.firstMessage || "(no messages)",
+    parentSessionId: originSessionId,
+    ...(subagent
+      ? { relation: { kind: "subagent" as const, parentSessionId: subagent.parentSessionId, profile: subagent.profile, description: subagent.description, status: subagent.status } }
+      : scanned.parentSessionPath
+        ? { relation: { kind: "fork" as const, ...(originSessionId ? { originSessionId } : {}) } }
+        : {}),
+    transient: false,
+    ...(detailsPending ? { detailsPending: true } : {}),
+  };
+}
+
+async function buildSessionList(scanned: ScannedSessionInfo[]): Promise<SessionInfo[]> {
+  const pathToId = new Map<string, string>();
+  for (const session of scanned) pathToId.set(sessionPathKey(session.path), session.id);
+  return attachSessionProjectInfo(scanned.map((session) => mapScannedSession(session, pathToId)));
+}
+
+async function loadAllSessions(): Promise<SessionInfo[]> {
+  return buildSessionList(await listSessionsIncremental());
+}
+
+/**
+ * Return a cheap catalogue for the first paint. Changed files contribute only
+ * header/stat metadata; a normal listAllSessions() call hydrates the exact
+ * counts, names, and first messages afterwards.
+ */
+export async function listSessionSummaries(): Promise<SessionInfo[]> {
+  return buildSessionList(await listSessionsIncremental({ deferDetails: true }));
+}
+
+export async function listAllSessions(options: { force?: boolean; allowStale?: boolean } = {}): Promise<SessionInfo[]> {
   if (options.force) invalidateSessionListCache();
   // Lazy fallback so direct route-module tests and any non-Next entry point
   // also get the external-write watcher; near-zero cost when already running.
@@ -233,8 +268,19 @@ export async function listAllSessions(options: { force?: boolean } = {}): Promis
 
   // Return cached result if still fresh (avoids re-scanning session files
   // and re-spawning git processes on every page load).
-  if (globalThis.__piSessionListCache && Date.now() - globalThis.__piSessionListCache.ts < SESSION_LIST_CACHE_TTL_MS) {
-    return globalThis.__piSessionListCache.data;
+  const cache = globalThis.__piSessionListCache;
+  if (cache && cache.generation === generation && Date.now() - cache.ts < SESSION_LIST_CACHE_TTL_MS) {
+    return cache.data;
+  }
+
+  // Callers that only need session metadata — mapping search hits onto sidebar
+  // rows, for example — can take the previous scan and let the rebuild happen in
+  // the background. A rebuild costs hundreds of milliseconds because it re-reads
+  // every forked and subagent session, and it is triggered by ordinary agent
+  // activity rather than by anything the caller did.
+  if (options.allowStale && cache) {
+    void listAllSessions().catch(() => undefined);
+    return cache.data;
   }
 
   // Coalescing dedup: concurrent callers share the same in-flight promise
@@ -250,7 +296,7 @@ export async function listAllSessions(options: { force?: boolean } = {}): Promis
     if ((globalThis.__piSessionListGeneration ?? 0) !== generation) {
       return listAllSessions();
     }
-    globalThis.__piSessionListCache = { data, ts: Date.now() };
+    globalThis.__piSessionListCache = { data, ts: Date.now(), generation };
     return data;
   });
   const trackedPromise = loadPromise.finally(() => {
@@ -274,7 +320,7 @@ declare global {
   var __piSessionListPromise: Promise<SessionInfo[]> | undefined;
   var __piSessionListPromiseGeneration: number | undefined;
   var __piSessionListGeneration: number | undefined;
-  var __piSessionListCache: { data: SessionInfo[]; ts: number } | undefined;
+  var __piSessionListCache: { data: SessionInfo[]; ts: number; generation: number } | undefined;
 }
 
 const SESSION_LIST_CACHE_TTL_MS = 30_000;
@@ -366,7 +412,9 @@ function findSessionIdByPath(filePath: string): string | undefined {
 
 export function invalidateSessionListCache(): void {
   globalThis.__piSessionListGeneration = (globalThis.__piSessionListGeneration ?? 0) + 1;
-  globalThis.__piSessionListCache = undefined;
+  // The previous scan is kept, not discarded: it is no longer fresh, but it is
+  // still a complete catalogue apart from sessions created moments ago. Callers
+  // that pass `allowStale` read it instead of paying for a rebuild.
 }
 
 export function getSessionListVersion(): number {
@@ -381,6 +429,126 @@ function getPathCache(): Map<string, string> {
 function getPathToIdCache(): Map<string, string> {
   if (!globalThis.__piPathToSessionIdCache) globalThis.__piPathToSessionIdCache = new Map();
   return globalThis.__piPathToSessionIdCache;
+}
+
+// ---------------------------------------------------------------------------
+// Read-only SessionManager cache.
+//
+// Opening a large session (SessionManager.open -> full JSONL parse + index
+// build) costs 150ms for a small session and ~1.1s for an 82MB one. Detail/
+// context/pagination routes re-open the same file on every request whenever no
+// live runtime wrapper exists, so a fingerprint-validated cache turns repeat
+// opens into ~1ms map hits.
+//
+// Budget: a count cap alone is not enough. Parsed entries retain roughly the
+// file's own size in heap (measured: an 82MB session holds ~94MB), so twelve
+// large sessions would pin ~1.1GB. Entries are therefore also capped by the
+// summed on-disk size of the cached files, and a single session larger than
+// SM_CACHE_LIMITS.maxFileBytes is served fresh instead of being cached — one
+// oversize session must not evict every useful entry.
+//
+// Safety: cached managers are READ-ONLY views. Any write path must go through
+// a live wrapper or SessionManager.open directly — call openSessionManager
+// with { mutable: true } (bypasses the cache) for those. The fingerprint
+// (size + mtimeMs) invalidates on external appends (TUI writes), and
+// invalidateSessionManagerCache(filePath) is called on delete/rename.
+// ---------------------------------------------------------------------------
+
+interface SmCacheEntry {
+  sm: unknown;
+  fingerprint: string;
+  /** On-disk size, the proxy for this entry's retained heap. */
+  bytes: number;
+}
+
+declare global {
+  var __piSmCache: Map<string, SmCacheEntry> | undefined;
+}
+
+/**
+ * Cache budget. Exported so tests can shrink it to values they can actually
+ * produce on disk; production never reassigns these.
+ */
+export const SM_CACHE_LIMITS = {
+  /** Most sessions held at once. */
+  maxEntries: 12,
+  /** Summed on-disk size of cached sessions. */
+  maxTotalBytes: 256 * 1024 * 1024,
+  /** A session larger than this is never cached — it would evict everything else. */
+  maxFileBytes: 64 * 1024 * 1024,
+};
+
+function getSmCache(): Map<string, SmCacheEntry> {
+  if (!globalThis.__piSmCache) globalThis.__piSmCache = new Map();
+  return globalThis.__piSmCache;
+}
+
+function sessionFileStats(filePath: string): { fingerprint: string; bytes: number } | null {
+  try {
+    const stats = statSync(filePath);
+    return { fingerprint: `${stats.size}:${stats.mtimeMs}`, bytes: stats.size };
+  } catch {
+    return null;
+  }
+}
+
+/** Evict least-recently-used entries until both the count and byte caps hold. */
+function evictSmCache(cache: Map<string, SmCacheEntry>): void {
+  let total = 0;
+  for (const entry of cache.values()) total += entry.bytes;
+  while (cache.size > SM_CACHE_LIMITS.maxEntries || total > SM_CACHE_LIMITS.maxTotalBytes) {
+    const oldestKey = cache.keys().next().value;
+    if (oldestKey === undefined) break;
+    total -= cache.get(oldestKey)?.bytes ?? 0;
+    cache.delete(oldestKey);
+  }
+}
+
+export function invalidateSessionManagerCache(filePath?: string): void {
+  const cache = getSmCache();
+  if (filePath === undefined) {
+    cache.clear();
+    return;
+  }
+  cache.delete(sessionPathKey(filePath));
+}
+
+/**
+ * Open a session file, reusing a cached read-only SessionManager when the
+ * on-disk fingerprint is unchanged. Pass { mutable: true } when the caller
+ * intends to append/branch/rewrite — that path always opens fresh.
+ */
+export function openSessionManager(
+  filePath: string,
+  options: { mutable?: boolean } = {},
+): SessionManager {
+  if (options.mutable) return SessionManager.open(filePath, undefined);
+
+  const cache = getSmCache();
+  const pathKey = sessionPathKey(filePath);
+  const stats = sessionFileStats(filePath);
+  if (stats === null) {
+    cache.delete(pathKey);
+    return SessionManager.open(filePath, undefined);
+  }
+
+  const cached = cache.get(pathKey);
+  if (cached && cached.fingerprint === stats.fingerprint) {
+    // LRU touch.
+    cache.delete(pathKey);
+    cache.set(pathKey, cached);
+    return cached.sm as SessionManager;
+  }
+
+  const sm = SessionManager.open(filePath, undefined);
+  if (stats.bytes > SM_CACHE_LIMITS.maxFileBytes) {
+    // Too large to hold: drop any stale entry for this path and serve fresh.
+    cache.delete(pathKey);
+    return sm;
+  }
+  cache.set(pathKey, { sm, fingerprint: stats.fingerprint, bytes: stats.bytes });
+  evictSmCache(cache);
+  return sm;
 }
 
 export async function resolveSessionPath(sessionId: string): Promise<string | null> {
@@ -458,7 +626,7 @@ export function readSessionHeader(filePath: string): SessionHeader | null {
 }
 
 export function getSessionEntries(filePath: string): SessionEntry[] {
-  const entries = SessionManager.open(filePath).getEntries();
+  const entries = openSessionManager(filePath).getEntries();
   return entries as unknown as SessionEntry[];
 }
 
@@ -684,6 +852,9 @@ function entryToUiMessage(
   // normalizeToolCalls is a secondary guard (returns non-assistant messages as-is).
   switch (entry.type) {
     case "message": {
+      // Transcript system messages carry the prompt and tool loadout (Pi >= 0.86).
+      // They are provider input, not conversation, so they never render.
+      if (entry.message.role === "system") return null;
       let message = options.deferToolResultImages
         ? deferToolResultBase64Images(normalizeToolCalls(entry.message), options.sessionId, entry.id)
         : normalizeToolCalls(entry.message);

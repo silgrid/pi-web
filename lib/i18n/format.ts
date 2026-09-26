@@ -58,3 +58,20 @@ export function formatRelativeTime(date: Date | string, locale: Locale, now = ne
   const value = Math.round(diffMs / divisor);
   return new Intl.RelativeTimeFormat(locale, { numeric: "always" }).format(value, unit as Intl.RelativeTimeFormatUnit);
 }
+
+/**
+ * 今天只显示时刻；更早的时间和会话列表一样用相对时间。
+ * @param timestamp 毫秒时间戳
+ * @param locale 当前语言
+ * @param now 用于测试或特殊场景的当前时间
+ * @returns 今天的时刻，或更早时间的相对时间文本
+ */
+export function formatUpdatedTime(timestamp: number, locale: Locale, now = new Date()): string {
+  const target = new Date(timestamp);
+  if (Number.isNaN(target.getTime())) return "";
+  const isToday = target.getFullYear() === now.getFullYear()
+    && target.getMonth() === now.getMonth()
+    && target.getDate() === now.getDate();
+  if (isToday) return target.toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit" });
+  return formatRelativeTime(target, locale, now);
+}

@@ -2,6 +2,7 @@ import coreWebVitals from "eslint-config-next/core-web-vitals";
 import typescript from "eslint-config-next/typescript";
 
 const eslintConfig = [
+  // demo/ (the static GitHub Pages demo) was removed in the upstream merge; nothing here references it anymore.
   ...coreWebVitals,
   ...typescript,
   {
