@@ -335,7 +335,17 @@ try {
       const older = (await response.json()).context;
       const firstMessage = older.messages.find((message) => message.role === "user")?.content;
       await page.getByText(firstMessage, { exact: true }).waitFor({ state: "attached" });
-      const anchoredOffset = await entryViewportOffset(before.firstRenderedEntryId);
+      // The prepend's scroll compensation runs in a layout effect right after
+      // the new page commits. On a slow runner the assertion can observe the
+      // DOM between commit and compensation, so poll until the anchor settles
+      // instead of measuring once (CI flake, pi#56).
+      let anchoredOffset: number | null = null;
+      const settleDeadline = Date.now() + 4000;
+      while (Date.now() < settleDeadline) {
+        anchoredOffset = await entryViewportOffset(before.firstRenderedEntryId);
+        if (anchoredOffset !== null && anchoredOffset >= 0 && anchoredOffset <= 96) break;
+        await delay(250);
+      }
       assert.ok(anchoredOffset !== null && anchoredOffset >= 0 && anchoredOffset <= 96,
         `viewport must stay anchored on ${before.firstRenderedEntryId} after the prepend (offset ${anchoredOffset})`);
       const anchored = await scrollState();
