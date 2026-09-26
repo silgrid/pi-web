@@ -265,7 +265,7 @@ export const zhCNLocale: LocalePlugin = {
     "directoryPicker.rowRename": "重命名",
     "directoryPicker.rowDelete": "删除",
     "directoryPicker.rowRenamePrompt": "新的目录名称",
-    "directoryPicker.rowDeletePrompt": "输入目录名称以确认删除",
+    "directoryPicker.rowDeletePrompt": "确认删除该目录？此操作不可撤销：",
     "directoryPicker.fsManage.invalidBody": "请求无效",
     "directoryPicker.fsManage.nonexistent": "目录不存在",
     "directoryPicker.fsManage.symlinkEntry": "无法在此重命名或删除符号链接",
