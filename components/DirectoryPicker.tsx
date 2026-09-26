@@ -606,11 +606,169 @@ export function PickerRowCreatePanel({
   );
 }
 
+/** Typed refusal codes the fs-manage API answers with (wi pi#59); every
+ *  code has an i18n message under directoryPicker.fsManage.<code>. */
+export const FS_MANAGE_REFUSAL_CODES = [
+  "invalidBody",
+  "nonexistent",
+  "symlinkEntry",
+  "notDirectory",
+  "outsideRegistrationPrefix",
+  "pathInUse",
+  "confirmMismatch",
+  "targetExists",
+  "ioFailure",
+] as const;
+
+export type FsManageRequestOutcome = { ok: true; path: string } | { ok: false; reason: string };
+
+/** One fs-manage POST. The typed outcome contract is body-driven: HTTP 200
+ *  carries { ok: true, path } or { ok: false, reason }; anything else —
+ *  network failure, unparsable body — degrades to the ioFailure code so a
+ *  refusal message always renders. Never throws, never returns prose. */
+async function runFsManageRequest(
+  fetchFn: typeof fetch | undefined,
+  body: { action: "rename" | "delete"; path: string; nextPath?: string; confirm?: string },
+): Promise<FsManageRequestOutcome> {
+  try {
+    const response = await (fetchFn ?? fetch)("/api/fs-manage", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const data = await response.json().catch(() => null) as { ok?: unknown; path?: unknown; reason?: unknown } | null;
+    if (data && data.ok === true && typeof data.path === "string") return { ok: true, path: data.path };
+    if (data && data.ok === false && typeof data.reason === "string") return { ok: false, reason: data.reason };
+    return { ok: false, reason: "ioFailure" };
+  } catch {
+    return { ok: false, reason: "ioFailure" };
+  }
+}
+
+/** The sibling path a browse-row rename targets: the row's own parent plus
+ *  the new name (browser-side; the server independently re-derives and
+ *  cross-checks it, so this is only the request payload). */
+function siblingPathUnder(directoryPath: string, name: string): string {
+  const separator = directoryPath.includes("\\") ? "\\" : "/";
+  const withoutTrailing = directoryPath.replace(/[\\/]+$/, "");
+  const cut = withoutTrailing.lastIndexOf(separator);
+  if (cut === 0) return "/" + name; // POSIX root child
+  if (cut < 0) return withoutTrailing + separator + name; // drive root child ("C:")
+  return withoutTrailing.slice(0, cut) + separator + name;
+}
+
+/**
+ * Browse-row fs-manage flow (wi pi#59), as ONE production-used seam so
+ * tests drive the real rules without a DOM —
+ *
+ * - `submitRename` closes the editor CLIENT-side with zero requests when
+ *   the name is unchanged (or empty), matching the server's no
+ *   same-identity exemption,
+ * - a committed rename posts { action: "rename", path, nextPath: sibling },
+ * - a committed delete posts { action: "delete", path, confirm },
+ * - a typed refusal maps its code to the i18n message via the shared ranked
+ *   error area and KEEPS the editor/confirm open,
+ * - success closes the editor and refreshes the listing by re-running the
+ *   current browse request — never a navigation, never a dialog close,
+ * - `cancel` is a no-op while a submission is pending, so a mid-flight
+ *   cancel can never swallow the eventual refusal message.
+ */
+export function createBrowseRowManageFlow(deps: {
+  t: Translate;
+  fetchFn?: typeof fetch;
+  /** The managed row's directory path (re-read at submit time). */
+  rowPath: () => string;
+  /** The managed row's ORIGINAL name (re-read at submit time). */
+  rowName: () => string;
+  /** Closes the editor/confirm (mode → null, value → ""). */
+  close: () => void;
+  setBusy: (busy: boolean) => void;
+  onManageStart: () => void;
+  onManageError: (message: string) => void;
+  refetchCurrent: () => void;
+}) {
+  let pending = false;
+  return {
+    isPending: () => pending,
+    cancel() {
+      // An idle editor hides; a pending one STAYS visible so the in-flight
+      // request's eventual refusal is not swallowed.
+      if (pending) return;
+      deps.close();
+    },
+    async submitRename(rawValue: string) {
+      if (pending) return;
+      const path = deps.rowPath();
+      // RAW name semantics (review r2 B3, pi#60): the unchanged-name check
+      // and the payload both use the raw value — a directory named
+      // "project " must be renamable to "project" and only "project "
+      // counts as unchanged. Trimming would silently corrupt both.
+      const name = rawValue;
+      // Unchanged-name commits are prevented CLIENT-side: zero requests.
+      if (!name || name === deps.rowName()) {
+        deps.close();
+        return;
+      }
+      pending = true;
+      deps.setBusy(true);
+      deps.onManageStart();
+      try {
+        const outcome = await runFsManageRequest(deps.fetchFn, {
+          action: "rename",
+          path,
+          nextPath: siblingPathUnder(path, name),
+        });
+        if (outcome.ok) {
+          deps.close();
+          deps.refetchCurrent();
+        } else {
+          deps.onManageError(deps.t(`directoryPicker.fsManage.${outcome.reason}`));
+        }
+      } finally {
+        pending = false;
+        deps.setBusy(false);
+      }
+    },
+    async submitDelete(rawValue: string) {
+      if (pending) return;
+      const path = deps.rowPath();
+      // RAW confirmation (review r2 B3, pi#60): the server compares
+      // basename(path) exactly, so trimming here would make a directory
+      // named "project " unconfirmable and let "project" confirm it.
+      const confirm = rawValue;
+      if (!confirm) return; // nothing typed: nothing requested
+      pending = true;
+      deps.setBusy(true);
+      deps.onManageStart();
+      try {
+        const outcome = await runFsManageRequest(deps.fetchFn, {
+          action: "delete",
+          path,
+          confirm,
+        });
+        if (outcome.ok) {
+          deps.close();
+          deps.refetchCurrent();
+        } else {
+          deps.onManageError(deps.t(`directoryPicker.fsManage.${outcome.reason}`));
+        }
+      } finally {
+        pending = false;
+        deps.setBusy(false);
+      }
+    },
+  };
+}
+
 /**
  * One browsed-directory row (props-only presentational export): a row
  * CONTAINER holding the navigation button and — only when the store owner
- * provided a pin callback — a pin button as a SIBLING (never nested, so
- * clicking pin cannot trigger row navigation).
+ * provided the callbacks — the pin and “New” affordances plus the
+ * hover-revealed manage affordances (pencil rename / trash delete, wi
+ * pi#59) as SIBLINGS of the navigation button (never nested, so clicking
+ * them cannot trigger row navigation). The manage buttons carry the
+ * `.directory-picker-row-manage` class and NO inline display style — the
+ * stylesheet alone owns their hover/focus/coarse-pointer reveal.
  */
 export function PickerBrowseRow({
   entry,
@@ -618,6 +776,8 @@ export function PickerBrowseRow({
   onNavigate,
   onPin,
   onNew,
+  onRename,
+  onDelete,
 }: {
   entry: BrowseDirectoryEntry;
   t: Translate;
@@ -626,6 +786,11 @@ export function PickerBrowseRow({
   /** Row-scoped create (wi pi#49 R3): opens the inline create form for THIS
    *  row's directory. Only directory rows receive it — drive rows never do. */
   onNew?: (path: string) => void;
+  /** Browse-row rename (wi pi#59): opens the inline editor prefilled with
+   *  the directory NAME. */
+  onRename?: (path: string, name: string) => void;
+  /** Browse-row delete (wi pi#59): opens the typed-name confirm step. */
+  onDelete?: (path: string, name: string) => void;
 }) {
   return (
     <div className="directory-picker-row" style={{ display: "flex", alignItems: "stretch" }}>
@@ -653,6 +818,34 @@ export function PickerBrowseRow({
           <PlusIcon />
         </button>
       )}
+      {onRename && (
+        <button
+          className="directory-picker-row-manage directory-picker-row-rename"
+          type="button"
+          onClick={() => onRename(entry.path, entry.name)}
+          title={t("directoryPicker.rowRename")}
+          aria-label={t("directoryPicker.rowRename")}
+          style={{ width: 30, flexShrink: 0, alignItems: "center", justifyContent: "center", padding: 0, border: 0, borderRadius: 5, background: "none", color: "var(--text-dim)", cursor: "pointer" }}
+          onMouseEnter={(event) => { event.currentTarget.style.color = "var(--accent)"; }}
+          onMouseLeave={(event) => { event.currentTarget.style.color = "var(--text-dim)"; }}
+        >
+          <PencilIcon />
+        </button>
+      )}
+      {onDelete && (
+        <button
+          className="directory-picker-row-manage directory-picker-row-delete"
+          type="button"
+          onClick={() => onDelete(entry.path, entry.name)}
+          title={t("directoryPicker.rowDelete")}
+          aria-label={t("directoryPicker.rowDelete")}
+          style={{ width: 30, flexShrink: 0, alignItems: "center", justifyContent: "center", padding: 0, border: 0, borderRadius: 5, background: "none", color: "var(--text-dim)", cursor: "pointer" }}
+          onMouseEnter={(event) => { event.currentTarget.style.color = "#ef4444"; }}
+          onMouseLeave={(event) => { event.currentTarget.style.color = "var(--text-dim)"; }}
+        >
+          <TrashIcon />
+        </button>
+      )}
       {onPin && (
         <button
           className="directory-picker-pin"
@@ -671,7 +864,68 @@ export function PickerBrowseRow({
   );
 }
 
-/** Windows drive row (props-only): navigation only, never a pin affordance. */
+/**
+ * Inline row-scoped manage panel (wi pi#59, props-only presentational
+ * export): the browse-row rename editor (prefilled with the directory NAME)
+ * or the typed-name delete confirm, expanded in place under the row whose
+ * pencil/trash button was activated. Enter commits / Escape cancels through
+ * the shared createPickerFieldKeyDown seam; typed refusals render in the
+ * dialog's shared ranked error area, so this panel carries no error prop.
+ */
+export function PickerRowManagePanel({
+  t,
+  mode,
+  value,
+  busy,
+  onChange,
+  onSubmit,
+  onCancel,
+}: {
+  t: Translate;
+  mode: "rename" | "delete";
+  value: string;
+  busy?: boolean;
+  onChange: (value: string) => void;
+  onSubmit: () => void;
+  onCancel: () => void;
+}) {
+  return (
+    <div className="directory-picker-row-manage-panel" style={{ display: "flex", flexDirection: "column", gap: 6, flexShrink: 0, padding: "4px 8px 8px 30px" }}>
+      {mode === "delete" && (
+        <div style={{ color: "var(--text-dim)", fontSize: 11, lineHeight: 1.35 }}>{t("directoryPicker.rowDeletePrompt")}</div>
+      )}
+      <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
+        <input
+          type="text"
+          value={value}
+          autoFocus
+          placeholder={mode === "rename" ? t("directoryPicker.rowRenamePrompt") : t("directoryPicker.rowDeletePrompt")}
+          onChange={(event) => onChange(event.target.value)}
+          onKeyDown={createPickerFieldKeyDown({ submit: onSubmit, cancel: onCancel })}
+          style={{ minWidth: 0, flex: 1, height: 28, padding: "0 8px", border: "1px solid var(--accent)", borderRadius: 5, outline: "none", background: "var(--bg-panel)", color: "var(--text)", fontFamily: "var(--font-mono)", fontSize: 11, boxSizing: "border-box" }}
+        />
+        <button
+          type="button"
+          onClick={onSubmit}
+          disabled={busy || !value}
+          style={{ padding: "5px 12px", border: 0, borderRadius: 5, background: "var(--accent)", color: "var(--accent-contrast)", fontSize: 11, fontWeight: 600, cursor: busy || !value ? "not-allowed" : "pointer", opacity: busy || !value ? 0.65 : 1 }}
+        >
+          {mode === "rename" ? t("directoryPicker.rowRename") : t("directoryPicker.rowDelete")}
+        </button>
+        <button
+          type="button"
+          onClick={onCancel}
+          style={{ padding: "5px 12px", border: "1px solid var(--border)", borderRadius: 5, background: "var(--bg-hover)", color: "var(--text-muted)", fontSize: 11, cursor: "pointer" }}
+        >
+          {t("i18n.cancel")}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Windows drive row (props-only): navigation only, never a pin affordance. */
 export function PickerDriveRow({
   entry,
   onNavigate,
@@ -1126,6 +1380,68 @@ export function DirectoryPicker({ onCancel, onSelect, initialPath, busy = false,
     ) : null
   ), [t, rowCreateOpenFor, rowCreateKind, rowCreateName, rowCreateBusy, rowCreateError, handleRowCreateSubmit, handleRowCreateCancel]);
 
+  // Browse-row fs manage (wi pi#59): one inline editor/confirm at a time,
+  // scoped to the row whose pencil/trash was activated. The row's path and
+  // ORIGINAL name are re-read at submit time through refs, so a stale flow
+  // closure can never retarget a mutation. A typed refusal maps its code to
+  // the i18n message in the shared ranked error area and keeps the editor
+  // open; success closes it and refreshes the displayed listing by
+  // re-running the current browse request — never a navigation.
+  const [rowManageMode, setRowManageMode] = useState<"rename" | "delete" | null>(null);
+  const [rowManagePath, setRowManagePath] = useState("");
+  const [rowManageName, setRowManageName] = useState("");
+  const [rowManageValue, setRowManageValue] = useState("");
+  const [rowManageBusy, setRowManageBusy] = useState(false);
+  const rowManagePathRef = useRef("");
+  rowManagePathRef.current = rowManagePath;
+  const rowManageNameRef = useRef("");
+  rowManageNameRef.current = rowManageName;
+
+  const closeRowManage = useCallback(() => {
+    setRowManageMode(null);
+    setRowManageValue("");
+  }, []);
+
+  const rowManageFlow = useMemo(() => createBrowseRowManageFlow({
+    t,
+    rowPath: () => rowManagePathRef.current,
+    rowName: () => rowManageNameRef.current,
+    close: closeRowManage,
+    setBusy: setRowManageBusy,
+    onManageStart: () => pickerErrors.onManageStart(),
+    onManageError: (message) => pickerErrors.onManageError(message),
+    refetchCurrent: () => void controllerRef.current.refetchCurrent(),
+  }), [t, closeRowManage, pickerErrors]);
+
+  const openRowManage = useCallback((mode: "rename" | "delete", path: string, name: string) => {
+    if (rowManageFlow.isPending()) return; // no replacement while a submission is in flight
+    // A fresh browse-row manage action resets stale errors first.
+    pickerErrors.onManageStart();
+    setRowManageMode(mode);
+    setRowManagePath(path);
+    setRowManageName(name);
+    // The rename editor prefills the directory NAME; the delete confirm
+    // starts EMPTY — prefilling it would defeat the typed confirmation.
+    setRowManageValue(mode === "rename" ? name : "");
+  }, [rowManageFlow, pickerErrors]);
+
+  const renderRowManagePanel = useCallback((path: string): ReactNode => (
+    rowManageMode !== null && rowManagePath === path ? (
+      <PickerRowManagePanel
+        t={t}
+        mode={rowManageMode}
+        value={rowManageValue}
+        busy={rowManageBusy}
+        onChange={setRowManageValue}
+        onSubmit={() => {
+          if (rowManageMode === "rename") void rowManageFlow.submitRename(rowManageValue);
+          else void rowManageFlow.submitDelete(rowManageValue);
+        }}
+        onCancel={() => rowManageFlow.cancel()}
+      />
+    ) : null
+  ), [t, rowManageMode, rowManagePath, rowManageValue, rowManageBusy, rowManageFlow]);
+
   if (!portalTarget) return null;
 
   return createPortal(
@@ -1232,8 +1548,11 @@ export function DirectoryPicker({ onCancel, onSelect, initialPath, busy = false,
                   onNavigate={(path) => navigateTo(path)}
                   onPin={handleRowPin ? (path) => void handleRowPin(path) : undefined}
                   onNew={(path) => openRowCreate("browse", path)}
+                  onRename={(path, name) => openRowManage("rename", path, name)}
+                  onDelete={(path, name) => openRowManage("delete", path, name)}
                 />
                 {renderRowCreatePanel("browse", entry.path)}
+                {renderRowManagePanel(entry.path)}
               </Fragment>
             ))
           ) : (

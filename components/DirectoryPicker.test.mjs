@@ -16,6 +16,7 @@ const {
   PickerManagePanel,
   ManagedEntryRow,
   PickerRowCreatePanel,
+  PickerRowManagePanel,
   createRowPinHandler,
   createPickerErrorState,
   createPickerFieldKeyDown,
@@ -24,6 +25,8 @@ const {
   createCreateFlow,
   createRowCreateFlow,
   createRowPathEdit,
+  createBrowseRowManageFlow,
+  FS_MANAGE_REFUSAL_CODES,
 } = await jiti.import("./DirectoryPicker.tsx");
 
 const source = await readFile(new URL("./DirectoryPicker.tsx", import.meta.url), "utf8");
@@ -763,4 +766,280 @@ test("no create-toolbar row remains above the browse list and no trigger mounts 
   );
   assert.doesNotMatch(toolbarArea, /PickerShowHiddenToggle/);
   assert.doesNotMatch(toolbarArea, /borderBottom/);
+});
+
+// ---------------------------------------------------------------------------
+// Browse-row manage affordances (wi pi#59): hover-revealed pencil/trash
+// siblings, the inline rename editor (NAME prefill, unchanged-name client
+// close), the typed-name delete confirm, and the i18n surface.
+// ---------------------------------------------------------------------------
+
+test("browse rows render hover-revealed rename/delete affordances as siblings of the navigation button", () => {
+  const entry = { name: "project", path: "/work/project" };
+  const markup = html(React.createElement(PickerBrowseRow, {
+    entry,
+    t,
+    onNavigate: () => {},
+    onRename: () => {},
+    onDelete: () => {},
+  }));
+  assert.match(markup, /directory-picker-row-manage/);
+  assert.match(markup, /directoryPicker\.rowRename/);
+  assert.match(markup, /directoryPicker\.rowDelete/);
+  // SIBLINGS of the navigation button, never nested inside it — clicking
+  // manage can never navigate.
+  const navStart = markup.indexOf("<button");
+  const navEnd = markup.indexOf("</button>", navStart);
+  assert.ok(
+    markup.indexOf("directory-picker-row-manage") > navEnd,
+    "the manage buttons must not be nested in the navigation button",
+  );
+  // The manage buttons carry NO inline display style: the stylesheet alone
+  // owns their hover/focus/coarse-pointer reveal.
+  const manageBlock = markup.slice(markup.indexOf('class="directory-picker-row-manage'));
+  assert.ok(manageBlock.includes('class="directory-picker-row-manage directory-picker-row-rename"'));
+  assert.ok(manageBlock.includes('class="directory-picker-row-manage directory-picker-row-delete"'));
+  assert.doesNotMatch(
+    manageBlock.slice(0, manageBlock.indexOf('class="directory-picker-pin') > -1 ? manageBlock.indexOf('class="directory-picker-pin') : manageBlock.length),
+    /display:/,
+  );
+  // Absent callbacks → absent affordances (a plain row stays a single
+  // navigation button).
+  const plain = html(React.createElement(PickerBrowseRow, { entry, t, onNavigate: () => {} }));
+  assert.doesNotMatch(plain, /directory-picker-row-manage/);
+  assert.equal((plain.match(/<button/g) ?? []).length, 1);
+});
+
+test("the stylesheet owns the reveal: hidden by default, hover + focus-within, always on coarse pointers", async () => {
+  const css = await readFile(new URL("../app/globals.css", import.meta.url), "utf8");
+  assert.match(css, /\.directory-picker-row-manage\s*\{\s*display:\s*none\s*;?\s*\}/);
+  assert.match(
+    css,
+    /\.directory-picker-row:hover \.directory-picker-row-manage,\s*\.directory-picker-row:focus-within \.directory-picker-row-manage\s*\{\s*display:\s*inline-flex\s*;?\s*\}/,
+  );
+  assert.match(
+    css,
+    /@media \(pointer: coarse\)\s*\{\s*\.directory-picker-row-manage\s*\{\s*display:\s*inline-flex\s*;?\s*\}/,
+  );
+});
+
+test("the inline manage panel: rename prefills the NAME, delete shows the typed-name prompt, Enter/Escape ride the shared keydown seam", () => {
+  const rename = html(React.createElement(PickerRowManagePanel, {
+    t,
+    mode: "rename",
+    value: "project",
+    busy: false,
+    onChange: () => {},
+    onSubmit: () => {},
+    onCancel: () => {},
+  }));
+  assert.match(rename, /value="project"/);
+  assert.match(rename, /directoryPicker\.rowRenamePrompt/);
+  assert.match(rename, /directoryPicker\.rowRename/);
+  const del = html(React.createElement(PickerRowManagePanel, {
+    t,
+    mode: "delete",
+    value: "",
+    busy: false,
+    onChange: () => {},
+    onSubmit: () => {},
+    onCancel: () => {},
+  }));
+  assert.match(del, /directoryPicker\.rowDeletePrompt/);
+  assert.match(del, /directoryPicker\.rowDelete/);
+  assert.doesNotMatch(del, /value="project"/, "the delete confirm never prefills the name");
+  // The panel's input commits on Enter / cancels on Escape through the SAME
+  // production keydown seam the create form uses.
+  const managePanelSource = source.slice(
+    source.indexOf("export function PickerRowManagePanel"),
+    source.indexOf("export function PickerDriveRow"),
+  );
+  assert.match(managePanelSource, /createPickerFieldKeyDown\(\{ submit: onSubmit, cancel: onCancel \}\)/);
+});
+
+function createManageHarness(options = {}) {
+  const requests = [];
+  const state = { closed: 0, refetched: 0, errors: [] };
+  const row = { path: "/work/project", name: "project" };
+  const flow = createBrowseRowManageFlow({
+    t,
+    fetchFn: async (url, init) => {
+      requests.push({ url, init, body: JSON.parse(init.body) });
+      if (options.reject) throw options.reject;
+      return new Response(JSON.stringify(options.response ?? { ok: true, path: "/work/renamed" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    },
+    rowPath: () => row.path,
+    rowName: () => row.name,
+    close: () => { state.closed += 1; },
+    setBusy: () => {},
+    onManageStart: () => {},
+    onManageError: (message) => state.errors.push(message),
+    refetchCurrent: () => { state.refetched += 1; },
+  });
+  return { flow, requests, state };
+}
+
+test("the rename flow: an unchanged name closes the editor CLIENT-side with zero requests; a whitespace-only rename is a REAL rename now (raw names, r2 B3)", async () => {
+  const h = createManageHarness();
+  await h.flow.submitRename("project"); // unchanged
+  assert.deepEqual(h.requests, []);
+  assert.equal(h.state.closed, 1);
+  assert.equal(h.state.refetched, 0);
+  await h.flow.submitRename(""); // nothing typed: zero requests
+  assert.deepEqual(h.requests, []);
+  assert.equal(h.state.closed, 2);
+  // RAW names (r2 B3, pi#60): a whitespace-only name is a valid POSIX name
+  // and is submitted AS TYPED — no trim, no client-side close.
+  await h.flow.submitRename("   ");
+  assert.equal(h.requests.length, 1);
+  assert.equal(h.requests[0].body.nextPath, "/work/   ");
+});
+
+test("the rename flow: a commit posts the sibling nextPath and refreshes the listing on success", async () => {
+  const h = createManageHarness();
+  await h.flow.submitRename("renamed");
+  assert.equal(h.requests.length, 1);
+  assert.equal(h.requests[0].url, "/api/fs-manage");
+  assert.deepEqual(h.requests[0].body, {
+    action: "rename",
+    path: "/work/project",
+    nextPath: "/work/renamed",
+  });
+  assert.equal(h.state.closed, 1);
+  assert.equal(h.state.refetched, 1);
+  assert.deepEqual(h.state.errors, []);
+});
+
+test("the rename flow: a typed refusal maps its code to the i18n message in the shared error area and keeps the editor open", async () => {
+  const h = createManageHarness({ response: { ok: false, reason: "targetExists" } });
+  await h.flow.submitRename("renamed");
+  assert.equal(h.state.closed, 0, "the editor stays open on refusal");
+  assert.equal(h.state.refetched, 0);
+  assert.deepEqual(h.state.errors, ["directoryPicker.fsManage.targetExists"]);
+});
+
+test("the delete flow: the request carries the typed confirm name; success refreshes the listing", async () => {
+  const h = createManageHarness();
+  await h.flow.submitDelete("project");
+  assert.equal(h.requests.length, 1);
+  assert.deepEqual(h.requests[0].body, {
+    action: "delete",
+    path: "/work/project",
+    confirm: "project",
+  });
+  assert.equal(h.state.closed, 1);
+  assert.equal(h.state.refetched, 1);
+});
+
+test("the flows carry RAW names and confirmations — trim never corrupts the payload (r2 B3, pi#60)", async () => {
+  const row = { path: "/work/project ", name: "project " }; // note the trailing space
+  const requests = [];
+  const flow = createBrowseRowManageFlow({
+    t,
+    fetchFn: async (url, init) => {
+      requests.push(JSON.parse(init.body));
+      return new Response(JSON.stringify({ ok: true, path: row.path }), { status: 200, headers: { "Content-Type": "application/json" } });
+    },
+    rowPath: () => row.path,
+    rowName: () => row.name,
+    close: () => {},
+    setBusy: () => {},
+    onManageStart: () => {},
+    onManageError: () => {},
+    refetchCurrent: () => {},
+  });
+  // The UNCHANGED check is raw: "project " === rowName, zero requests...
+  await flow.submitRename("project ");
+  assert.deepEqual(requests, []);
+  // ...while a genuinely different raw name submits verbatim (trailing
+  // space preserved in the payload).
+  await flow.submitRename("renamed ");
+  assert.equal(requests[0].nextPath, "/work/renamed ");
+  // The delete confirmation is compared EXACTLY: only the raw basename
+  // confirms; its trimmed form cannot (the server would refuse it).
+  await flow.submitDelete("project ");
+  assert.equal(requests[1].confirm, "project ");
+});
+
+test("the delete flow: confirmMismatch renders the mapped message with the confirm step kept open", async () => {
+  const h = createManageHarness({ response: { ok: false, reason: "confirmMismatch" } });
+  await h.flow.submitDelete("wrong");
+  assert.deepEqual(h.state.errors, ["directoryPicker.fsManage.confirmMismatch"]);
+  assert.equal(h.state.closed, 0);
+  // RAW confirmations: a whitespace-only confirmation is SENT (it cannot
+  // match any basename, so the server refuses with confirmMismatch) —
+  // trimming here would make whitespace-named directories unconfirmable.
+  await h.flow.submitDelete("   ");
+  assert.equal(h.requests.length, 2);
+  assert.equal(h.requests[1].body.confirm, "   ");
+  assert.deepEqual(h.state.errors, ["directoryPicker.fsManage.confirmMismatch", "directoryPicker.fsManage.confirmMismatch"]);
+});
+
+test("a network failure degrades to the ioFailure message (no prose from the transport)", async () => {
+  const h = createManageHarness({ reject: new Error("offline") });
+  await h.flow.submitDelete("project");
+  assert.deepEqual(h.state.errors, ["directoryPicker.fsManage.ioFailure"]);
+  assert.equal(h.state.closed, 0);
+});
+
+test("the dialog wires the flow: browse rows carry the affordances, refusals land in the shared ranked error area", async () => {
+  // The full picker wires pencil/trash to the flow for every browse row.
+  assert.match(source, /onRename=\{\(path, name\) => openRowManage\("rename", path, name\)\}/);
+  assert.match(source, /onDelete=\{\(path, name\) => openRowManage\("delete", path, name\)\}/);
+  assert.match(source, /createBrowseRowManageFlow\(\{/);
+  // The rename editor prefills the NAME; the delete confirm starts empty.
+  assert.match(source, /setRowManageValue\(mode === "rename" \? name : ""\)/);
+  // Refusals map their code to the i18n family and ride the shared manage
+  // error slot (pickerErrorMessage precedence).
+  assert.match(source, /directoryPicker\.fsManage\.\$\{outcome\.reason\}/);
+  assert.match(source, /onManageError: \(message\) => pickerErrors\.onManageError\(message\)/);
+  // Success refreshes the CURRENT listing — never a navigation.
+  assert.match(source, /refetchCurrent: \(\) => void controllerRef\.current\.refetchCurrent\(\)/);
+  // The flow component itself is the only fs-manage request issuer, and the
+  // request surface is the typed /api/fs-manage endpoint.
+  assert.match(source, /"\/api\/fs-manage"/);
+});
+
+test("every new manage string and all nine refusal codes are translated in all three locales", async () => {
+  const keys = [
+    "directoryPicker.rowRename",
+    "directoryPicker.rowDelete",
+    "directoryPicker.rowRenamePrompt",
+    "directoryPicker.rowDeletePrompt",
+    ...FS_MANAGE_REFUSAL_CODES.map((code) => `directoryPicker.fsManage.${code}`),
+  ];
+  assert.equal(FS_MANAGE_REFUSAL_CODES.length, 9);
+  for (const file of ["../lib/i18n/messages/en.ts", "../lib/i18n/messages/zh-CN.ts", "../lib/i18n/messages/zh-TW.ts"]) {
+    const localeSource = await readFile(new URL(file, import.meta.url), "utf8");
+    for (const key of keys) {
+      assert.match(localeSource, new RegExp(`"${key}": "[^"]+"`), `${file} must carry ${key}`);
+    }
+  }
+});
+
+test("managed rows and drive rows keep exactly their existing affordances (wi#59 scope discipline)", () => {
+  // Drive rows: navigation only.
+  const drive = html(React.createElement(PickerDriveRow, { entry: { name: "C:", path: "C:\\" }, onNavigate: () => {} }));
+  assert.equal((drive.match(/<button/g) ?? []).length, 1);
+  assert.doesNotMatch(drive, /directory-picker-row-manage/);
+  assert.doesNotMatch(drive, /directoryPicker\.rowRename/);
+  // Managed rows: the existing path-rename/remove/new affordances only — no
+  // hover-reveal class, no browse-row manage affordances, no fs-manage flow.
+  const managed = html(React.createElement(ManagedEntryRow, {
+    entry: { path: "/work/alpha" },
+    t,
+    onRename: () => ({ ok: true }),
+    onRemove: () => ({ ok: true }),
+    onNew: () => {},
+  }));
+  assert.match(managed, /directoryPicker\.renameEntry/);
+  assert.match(managed, /directoryPicker\.removeEntry/);
+  assert.match(managed, /directoryPicker\.rowNew/);
+  assert.doesNotMatch(managed, /directory-picker-row-manage/);
+  assert.doesNotMatch(managed, /directoryPicker\.rowRename"/);
+  assert.doesNotMatch(managed, /directoryPicker\.rowDelete"/);
+  assert.doesNotMatch(managed, /fsManage/);
 });
