@@ -13,15 +13,18 @@ try {
 
 const nextConfig: NextConfig = {
   outputFileTracingRoot: configDir,
-  // Serve HTML and static responses UNCOMPRESSED. Self-hosted deployments
-  // sit behind an edge reverse proxy (Caddy in our deploy) that compresses
-  // on the way out, and LAN deployments don't need server-side gzip — the
-  // browser negotiates its own content-encoding in every other setup.
-  // (This setting was originally turned off to work around a since-removed
-  // mobile shell's HTML proxy, pi#40; it stays off because re-enabling would
-  // change deployed behavior for no measured gain — recorded as that
-  // decision.)
-  compress: false,
+  // Compress HTML and static responses with Next's built-in gzip. Direct
+  // clients that bypass the edge reverse proxy — the Electron desktop shell
+  // currently targets the raw IP:port — would otherwise pull several MB of
+  // uncompressed JS chunks on a slow link (measured 2026-09-27: a 1.1 MB
+  // static chunk serves as ~380 KB gzipped, -67%). Clients reaching the
+  // server through Caddy are unaffected: Caddy passes through responses that
+  // already carry content-encoding, so its own `encode zstd gzip` layer
+  // keeps serving domain clients and nothing is double-compressed.
+  // (Compress was disabled in pi#40 to work around a since-removed mobile
+  // shell's HTML proxy and kept off as an unneeded behavior change; the
+  // direct-IP gap was measured on 2026-09-27 and it is re-enabled here.)
+  compress: true,
   experimental: {
     // proxy.ts matches /api/:path*, and Next buffers the request body whenever
     // a proxy is present, capped at 10 MB by default. The upload route accepts
