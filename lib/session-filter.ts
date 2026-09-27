@@ -132,6 +132,49 @@ export function isSessionFiltered(
   return false;
 }
 
+/** Hidden-count affordance (wi pi#65): how many of `sessions` the active
+ *  patterns would hide — the badge count. Zero patterns (hiding
+ *  disabled) yields 0 by construction; the caller decides visibility. */
+export function countFilteredSessions(
+  sessions: readonly (Pick<SessionInfo, "id" | "name" | "firstMessage">)[],
+  patterns: readonly string[],
+): number {
+  let count = 0;
+  for (const session of sessions) {
+    if (isSessionFiltered(session, patterns)) count += 1;
+  }
+  return count;
+}
+
+/** Reveal-mode marking (wi pi#65): ids of exactly the sessions the active
+ *  patterns hide — the marking predicate's data. Per-session; the sidebar
+ *  derives the per-ROW marking from this via {@link isFamilyRowFiltered}. */
+export function computeFilteredSessionIds(
+  sessions: readonly (Pick<SessionInfo, "id" | "name" | "firstMessage">)[],
+  patterns: readonly string[],
+): ReadonlySet<string> {
+  const ids = new Set<string>();
+  for (const session of sessions) {
+    if (isSessionFiltered(session, patterns)) ids.add(session.id);
+  }
+  return ids;
+}
+
+/** Reveal-mode marking predicate (wi pi#65 review r1 P2): whether ONE
+ *  rendered session family row should carry the "filtered" marker. A
+ *  family's rendered title, selection state and click target are all the
+ *  ROOT's — so the row is marked only when the ROOT id itself is in the
+ *  filtered-id set, never merely because a subagent buried under a
+ *  non-matching root happens to match. `filteredSessionIds` is `null` when
+ *  marking is off (reveal toggle off, or no active patterns): the row is
+ *  then never marked, matching current (pre-wi) behavior exactly. */
+export function isFamilyRowFiltered(
+  rootId: string,
+  filteredSessionIds: ReadonlySet<string> | null,
+): boolean {
+  return filteredSessionIds !== null && filteredSessionIds.has(rootId);
+}
+
 /**
  * Live store (review B1): the sidebar and the Settings editor share ONE
  * in-memory state, persisted best-effort on every write and fanned out to
