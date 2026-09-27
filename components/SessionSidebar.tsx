@@ -27,9 +27,13 @@ import {
 } from "@/lib/custom-directory-manage";
 import { buildExplorerRoots } from "@/lib/explorer-roots";
 import {
+  computeFilteredSessionIds,
+  countFilteredSessions,
   getServerSessionFilterState,
   getSessionFilterState,
+  isFamilyRowFiltered,
   isSessionFiltered,
+  setShowFilteredSessions,
   subscribeSessionFilter,
 } from "@/lib/session-filter";
 import {
@@ -1487,6 +1491,30 @@ export function SessionSidebar({ selectedSessionId, highlightSessionId, followHi
       : allSessions.filter((session) => !isSessionFiltered(session, sessionFilterPatterns)),
     [allSessions, showFilteredSessions, sessionFilterPatterns],
   );
+  // Hidden-count affordance (wi pi#65): the exact number of sessions the
+  // active patterns hide, computed over allSessions — independent of the
+  // reveal toggle so the badge stays live in both states (clicking it
+  // flips the toggle through the shared store, so Settings updates too).
+  // Zero patterns (hiding disabled) reads as 0 and renders no badge.
+  const hiddenSessionCount = useMemo(
+    () => sessionFilterPatterns.length > 0
+      ? countFilteredSessions(allSessions, sessionFilterPatterns)
+      : 0,
+    [allSessions, sessionFilterPatterns],
+  );
+  // Reveal-mode marking (wi pi#65): ids of exactly the sessions the
+  // patterns hide. Computed only when the reveal toggle is ON and patterns
+  // exist; null otherwise so the marking stays off and rows render exactly
+  // as before. A family row is marked only when its ROOT is in the set —
+  // the rendered title, click target and identity are the root's, so a
+  // subagent-only match must not label a non-hidden root row "filtered"
+  // (review r1 P2: family-wide matching falsely marked non-matching roots).
+  const filteredSessionIds = useMemo(
+    () => showFilteredSessions && sessionFilterPatterns.length > 0
+      ? computeFilteredSessionIds(allSessions, sessionFilterPatterns)
+      : null,
+    [allSessions, showFilteredSessions, sessionFilterPatterns],
+  );
   // The main list below the listed groups keeps its existing filtering
   // rules, minus the sessions grouped under a listed directory — those
   // render only inside their group, so a listed directory's sessions never
@@ -1617,6 +1645,11 @@ export function SessionSidebar({ selectedSessionId, highlightSessionId, followHi
   // selection behavior — the effective cwd moves to the session's worktree.
   const renderSessionRow = (family: SessionFamily) => {
     const familySessions = [family.root, ...family.subagents];
+    // Marking is keyed on the ROOT id only (review r1 P2): the row's title,
+    // selection target and click target are all the root's, so marking it
+    // "filtered" must mean the root itself matches the active patterns —
+    // never a subagent buried under a non-matching root.
+    const familyIsFiltered = isFamilyRowFiltered(family.root.id, filteredSessionIds);
     const displaySession = family.latestModified === family.root.modified
       ? family.root
       : { ...family.root, modified: family.latestModified };
@@ -1626,6 +1659,7 @@ export function SessionSidebar({ selectedSessionId, highlightSessionId, followHi
         isSelected={familySessions.some((session) => session.id === effectiveHighlightSessionId)}
         isRunning={familySessions.some((session) => runningSessionIds.has(session.id))}
         isUnread={familySessions.some((session) => unreadSessionIds.has(session.id))}
+        isFiltered={familyIsFiltered}
         onClick={() => handleSelectSessionFromList(family.root)}
         onRenamed={loadSessions}
         onDeleted={(id) => {
@@ -1840,6 +1874,51 @@ export function SessionSidebar({ selectedSessionId, highlightSessionId, followHi
         }}
       >
         <SessionSearch open={sessionSearchOpen} query={sessionSearchQuery} selectedSessionId={selectedSessionId} onSelectSession={handleSelectSessionFromList}>
+        {/* Hidden-count badge (wi pi#65): the only visible affordance that
+            rows are being hidden. Clicking it toggles the reveal switch
+            through the shared live store (setShowFilteredSessions), so the
+            sidebar list and the Settings toggle stay in sync instantly. */}
+        {hiddenSessionCount > 0 && (
+          <button
+            type="button"
+            onClick={() => setShowFilteredSessions(!showFilteredSessions)}
+            title={t(showFilteredSessions ? "sidebar.hiddenByFilterShownTitle" : "sidebar.hiddenByFilterTitle")}
+            aria-pressed={showFilteredSessions}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 5,
+              margin: "4px 14px 0",
+              padding: "3px 8px",
+              flexShrink: 0,
+              width: "fit-content",
+              fontSize: 11,
+              lineHeight: 1.4,
+              color: "var(--text-muted)",
+              background: "var(--bg-hover)",
+              border: "1px solid var(--border)",
+              borderRadius: 6,
+              cursor: "pointer",
+            }}
+          >
+            {showFilteredSessions ? (
+              // Open eye (reveal ON): the filtered sessions are showing, not hidden.
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+                <path d="M1 12s3-8 11-8 11 8 11 8-3 8-11 8-11-8-11-8Z" />
+                <circle cx="12" cy="12" r="3" />
+              </svg>
+            ) : (
+              // Crossed eye (reveal OFF): the matching sessions are hidden.
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+                <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-10-8-10-8a18.45 18.45 0 0 1 5.06-5.94" />
+                <path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 10 8 10 8a18.5 18.5 0 0 1-2.16 3.19" />
+                <path d="M14.12 14.12a3 3 0 1 1-4.24-4.24" />
+                <line x1="1" y1="1" x2="23" y2="23" />
+              </svg>
+            )}
+            {t(showFilteredSessions ? "sidebar.hiddenByFilterShown" : "sidebar.hiddenByFilter", { count: hiddenSessionCount })}
+          </button>
+        )}
         <div
           ref={listScrollRef}
           onScroll={handleListScroll}
@@ -2282,6 +2361,7 @@ function SessionItem({
   isSelected,
   isRunning,
   isUnread,
+  isFiltered = false,
   onClick,
   onRenamed,
   onDeleted,
@@ -2294,6 +2374,10 @@ function SessionItem({
   isSelected: boolean;
   isRunning?: boolean;
   isUnread?: boolean;
+  /** Reveal-mode marking (wi pi#65): the row matches the active session
+   *  filter and is visible only because the reveal toggle is ON — rendered
+   *  muted/italic with a marker chip instead of blending in. */
+  isFiltered?: boolean;
   onClick: () => void;
   onRenamed?: () => void;
   onDeleted?: (id: string) => void;
@@ -2509,13 +2593,33 @@ function SessionItem({
                 fontSize: 12,
                 fontWeight: isSelected ? 500 : 400,
                 lineHeight: 1.4,
-                color: "var(--text)",
+                color: isFiltered ? "var(--text-dim)" : "var(--text)",
+                fontStyle: isFiltered ? "italic" : "normal",
               }}
               title={title}
             >
               <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>
                 {title}
               </span>
+              {isFiltered && (
+                <span
+                  title={t("sidebar.filteredMarker")}
+                  style={{
+                    flexShrink: 0,
+                    fontSize: 10,
+                    lineHeight: 1.4,
+                    padding: "0 5px",
+                    color: "var(--text-dim)",
+                    background: "var(--bg-hover)",
+                    border: "1px solid var(--border)",
+                    borderRadius: 4,
+                    fontStyle: "normal",
+                    textTransform: "lowercase",
+                  }}
+                >
+                  {t("sidebar.filteredMarker")}
+                </span>
+              )}
             </div>
             <div style={{ marginTop: 2, display: "flex", alignItems: "center", gap: 8, color: "var(--text-dim)", fontSize: 11, minWidth: 0 }}>
               {isRunning ? (

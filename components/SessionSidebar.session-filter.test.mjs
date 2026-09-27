@@ -39,8 +39,28 @@ function session(overrides = {}) {
 test("the sidebar reads the filter through the shared lib and derives visibleSessions from allSessions", () => {
   // The wiring goes through the production store seam (review B1): a LIVE
   // useSyncExternalStore subscription so a Settings edit updates the rendered
-  // sidebar in the same window — never a mount-time one-shot read.
-  assert.match(source, /import \{\s*getServerSessionFilterState,\s*getSessionFilterState,\s*isSessionFiltered,\s*subscribeSessionFilter,(\s|\n)*\} from "@\/lib\/session-filter";/);
+  // sidebar in the same window — never a mount-time one-shot read. The
+  // import block also carries the pi#65 hidden-count/marking helpers
+  // (computeFilteredSessionIds, countFilteredSessions, setShowFilteredSessions,
+  // isFamilyRowFiltered); assert the seam names are present rather than
+  // pinning the exact member list, so a later addition to that block does
+  // not have to touch this unrelated wiring assertion.
+  const sessionFilterImportBlock = source.match(
+    /import \{([\s\S]*?)\} from "@\/lib\/session-filter";/,
+  );
+  assert.ok(sessionFilterImportBlock, "SessionSidebar.tsx must import from @/lib/session-filter");
+  for (const name of [
+    "getServerSessionFilterState",
+    "getSessionFilterState",
+    "isSessionFiltered",
+    "subscribeSessionFilter",
+  ]) {
+    assert.match(
+      sessionFilterImportBlock[1],
+      new RegExp(`\\b${name}\\b`),
+      `session-filter import block must carry ${name}`,
+    );
+  }
   // SSR: useSyncExternalStore carries a stable getServerSnapshot (React 19
   // server-rendered client components require it).
   assert.match(source, /useSyncExternalStore\(subscribeSessionFilter, getSessionFilterState, getServerSessionFilterState\)/);
