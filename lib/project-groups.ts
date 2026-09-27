@@ -71,9 +71,7 @@ export function sessionsForProject(
 /**
  * Loose client-side path containment (browser-safe, no node:path):
  * case-insensitive, backslashes normalized to forward slashes, trailing
- * separators trimmed — the same normalization spirit as
- * isSameExplorerPath in lib/default-cwd-shortcut.ts. A path equal to the
- * root counts as inside it.
+ * separators trimmed. A path equal to the root counts as inside it.
  */
 function normalizeDirectoryPath(path: string): string {
   return path.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();

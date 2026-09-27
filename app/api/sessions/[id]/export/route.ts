@@ -1,14 +1,11 @@
 import { randomUUID } from "crypto";
-import { execFile } from "child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { basename, dirname, join } from "path";
-import { promisify } from "util";
 import { fileURLToPath, pathToFileURL } from "url";
 import { NextResponse } from "next/server";
+import { execFileAsync } from "@/lib/exec-file";
 import { resolveSessionPath } from "@/lib/session-reader";
-
-const execFileAsync = promisify(execFile);
 
 export const runtime = "nodejs";
 

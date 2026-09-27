@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { jsonResponse } from "@/lib/json-response";
+import { trimSessionListFirstMessages } from "@/lib/session-list-payload";
 import {
   attachSessionProjectInfo,
   getSessionListVersion,
@@ -35,7 +36,9 @@ export async function GET(req: Request) {
       attachSessionProjectInfo(getRpcSessionInfos()),
     ]);
     perf?.span("scan+projects");
-    const sessions = mergeSessionLists(persistedSessions, runtimeSessions);
+    // Trim at the RESPONSE layer only — the reader's view cache and the
+    // detail endpoint keep full text.
+    const sessions = trimSessionListFirstMessages(mergeSessionLists(persistedSessions, runtimeSessions));
     return perf?.attach(jsonResponse(
       req,
       {

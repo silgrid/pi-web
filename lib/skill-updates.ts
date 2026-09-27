@@ -1,17 +1,15 @@
-import { execFile } from "child_process";
 import { mkdtemp, rm } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
-import { promisify } from "util";
 import type {
   SkillInstallInfo,
   SkillUpdateResult,
 } from "@/lib/api-types";
+import { execFileAsync } from "./exec-file";
 
 const CHECK_TIMEOUT_MS = 15_000;
 const GIT_CHECK_TIMEOUT_MS = 30_000;
 const DEFAULT_SKILLS_API_BASE = process.env.SKILLS_API_URL || "https://skills.sh";
-const execFileAsync = promisify(execFile);
 
 type Fetcher = (input: string, init?: RequestInit) => Promise<Response>;
 type GitTreeResolver = (install: SkillInstallInfo) => Promise<string>;

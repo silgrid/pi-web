@@ -46,11 +46,18 @@ test("the sidebar reads the filter through the shared lib and derives visibleSes
   assert.match(source, /useSyncExternalStore\(subscribeSessionFilter, getSessionFilterState, getServerSessionFilterState\)/);
   assert.doesNotMatch(source, /loadSessionFilterPatterns\(sessionFilterStorage\(\)\)/);
   assert.doesNotMatch(source, /loadShowFilteredSessions\(sessionFilterStorage\(\)\)/);
-  // visibleSessions is derived ONCE from allSessions, before grouping.
+  // visibleSessions is derived ONCE from allSessions, before grouping. Local
+  // matching covers names and the first-message preview; the server-side
+  // full-text match (review r1) adds ids whose only match sits beyond the
+  // preview cut, without restoring the oversized list payload.
   assert.match(
     source,
-    /const visibleSessions = useMemo\(\s*\(\) => showFilteredSessions \|\| sessionFilterPatterns\.length === 0\s*\? allSessions\s*: allSessions\.filter\(\(session\) => !isSessionFiltered\(session, sessionFilterPatterns\)\),/,
+    /const visibleSessions = useMemo\(\s*\(\) => showFilteredSessions \|\| sessionFilterPatterns\.length === 0\s*\? allSessions\s*: allSessions\.filter\(\(session\) => \(\s*!isSessionFiltered\(session, sessionFilterPatterns\)\s*&& !serverFilterMatchedIds\.has\(session\.id\)\s*\)\),/,
   );
+  // The server match is fetched against the pattern list it is applied to,
+  // and a response from older patterns never leaks into newer ones.
+  assert.match(source, /fetch\(`\/api\/sessions\/filter-match\?patterns=\$\{encodeURIComponent\(JSON\.stringify\(sessionFilterPatterns\)\)\}`/);
+  assert.match(source, /serverFilterMatch\.key === sessionFilterPatternsKey\s*\?\s*serverFilterMatch\.ids\s*:\s*EMPTY_SERVER_FILTER_MATCH/);
 });
 
 test("every rendered list is fed visibleSessions, never allSessions", () => {

@@ -1,10 +1,11 @@
 import { NextResponse } from "next/server";
 import { runNpx } from "@/lib/npx";
 import type { SkillSearchResult } from "@/lib/api-types";
+import { validatePositionalCliArgument } from "@/lib/skills-cli-args";
+import { stripAnsi } from "@/lib/ansi";
 
 export const dynamic = "force-dynamic";
 
-const ANSI_RE = /\x1B\[[0-9;]*m/g;
 const DEFAULT_LIMIT = 50;
 const MIN_LIMIT = 1;
 const MAX_LIMIT = 50;
@@ -35,7 +36,7 @@ function formatInstalls(count?: number): string {
 }
 
 function parseSearchOutput(raw: string): SkillSearchResult[] {
-  const clean = raw.replace(ANSI_RE, "");
+  const clean = stripAnsi(raw);
   const results: SkillSearchResult[] = [];
   const lines = clean.split("\n");
   for (let i = 0; i < lines.length; i++) {
@@ -91,14 +92,19 @@ function parseInstallCount(installs: string): number {
 export async function POST(req: Request) {
   try {
     const { query, limit: rawLimit } = await req.json() as { query?: string; limit?: unknown };
-    if (!query?.trim()) return NextResponse.json({ error: "query required" }, { status: 400 });
+    if (typeof query !== "string" || !query.trim()) return NextResponse.json({ error: "query required" }, { status: 400 });
+    // Audit S7: the bundled skills CLI parses leading-dash strings as options
+    // (e.g. `--owner=<x>` becomes a filter instead of query text) and does not
+    // honor `--`, so refuse them before they reach argv.
+    const queryArgument = validatePositionalCliArgument(query);
+    if (!queryArgument.ok) return NextResponse.json({ error: queryArgument.reason }, { status: 400 });
     const limit = parseLimit(rawLimit);
 
     try {
-      const results = await searchSkillsApi(query.trim(), limit);
+      const results = await searchSkillsApi(queryArgument.value, limit);
       return NextResponse.json({ results });
     } catch {
-      const { stdout, stderr } = await runNpx(["skills", "find", query.trim()], {
+      const { stdout, stderr } = await runNpx(["skills", "find", queryArgument.value], {
         timeout: 20000,
         env: { ...process.env, FORCE_COLOR: "0" },
       });

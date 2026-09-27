@@ -1,14 +1,20 @@
 import { NextResponse } from "next/server";
 import { resolveModelDiscoveryAuth } from "@/lib/model-discovery-auth";
 import { buildModelsListUrl, parseDiscoveredModels } from "@/lib/model-discovery";
+import {
+  getConfiguredProviderBaseUrl,
+  getConfiguredProviderCredentials,
+  isConfigExpression,
+  resolveModelDiscoveryCredentialDecision,
+  validateModelDiscoveryProvider,
+  verifyConfigExpressionsAreConfigured,
+} from "@/lib/model-discovery-guards";
+import { readModelsConfig } from "@/lib/models-config-store";
+import { hasJsonContentType, isApiRequestAllowed } from "@/lib/request-security";
 
 export const dynamic = "force-dynamic";
 
 const DISCOVERY_TIMEOUT_MS = 20_000;
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function hasHeader(headers: Headers, name: string): boolean {
   return headers.has(name);
@@ -31,33 +37,82 @@ function buildHeaders(api: string, apiKey: string | undefined, configured: Recor
 }
 
 export async function POST(req: Request) {
-  try {
-    const body = await req.json() as { providerName?: unknown; provider?: unknown };
-    const providerName = typeof body.providerName === "string" ? body.providerName.trim() : "";
-    if (!providerName) return NextResponse.json({ error: "providerName is required" }, { status: 400 });
-    if (!isRecord(body.provider)) return NextResponse.json({ error: "provider is required" }, { status: 400 });
+  if (!isApiRequestAllowed(req)) {
+    return NextResponse.json({ error: "Untrusted API request" }, { status: 403 });
+  }
+  if (!hasJsonContentType(req)) {
+    return NextResponse.json({ error: "Content-Type must be application/json" }, { status: 415 });
+  }
 
-    const baseUrl = typeof body.provider.baseUrl === "string" ? body.provider.baseUrl.trim() : "";
-    if (!baseUrl) return NextResponse.json({ error: "Base URL is required" }, { status: 400 });
-    const api = typeof body.provider.api === "string" && body.provider.api
-      ? body.provider.api
-      : "openai-completions";
+  try {
+    const body = await req.json().catch(() => null);
+    const validated = validateModelDiscoveryProvider(body);
+    if (!validated.ok) {
+      return NextResponse.json({ error: validated.reason }, { status: 400 });
+    }
+    const { providerName, provider } = validated;
 
     let endpoint: URL;
     try {
-      endpoint = buildModelsListUrl(baseUrl, api);
+      endpoint = buildModelsListUrl(provider.baseUrl, provider.api);
     } catch {
-      return NextResponse.json({ error: "Base URL is invalid" }, { status: 400 });
+      return NextResponse.json({ error: "invalidBaseUrl" }, { status: 400 });
     }
 
-    const auth = await resolveModelDiscoveryAuth(providerName, body.provider);
-    if (typeof body.provider.apiKey === "string" && body.provider.apiKey.trim() && !auth.apiKey) {
-      return NextResponse.json({ error: `No API key found for "${providerName}"` }, { status: 400 });
+    const modelsConfig = readModelsConfig();
+
+    // review r2: an expression apiKey/header ("$VAR", "!command") is refused
+    // unless it exactly matches what the operator already persisted for this
+    // provider name — an attacker can replay an authorized expression, never
+    // forge a new one (see lib/model-discovery-guards.ts module doc).
+    const configExpressionCheck = verifyConfigExpressionsAreConfigured(
+      provider,
+      getConfiguredProviderCredentials(providerName, modelsConfig),
+    );
+    if (!configExpressionCheck.ok) {
+      return NextResponse.json({ error: configExpressionCheck.reason }, { status: 403 });
     }
+    // An expression apiKey is never a portable "request-chosen" literal, even
+    // once verified authentic — it is resolved exclusively through the
+    // configured path below, so it still requires the configured-base-URL
+    // gate to pass.
+    const literalApiKey = provider.apiKey && !isConfigExpression(provider.apiKey) ? provider.apiKey : undefined;
+
+    // Audit S2: a credential resolved from the operator's stored config may
+    // only be attached to the provider's configured base URL; a key the
+    // request itself supplies may go where the request says — as a LITERAL:
+    // the request-key path never runs SDK auth resolution, so the operator's
+    // stored credential for a colliding provider id cannot be swapped in.
+    const decision = resolveModelDiscoveryCredentialDecision({
+      baseUrl: provider.baseUrl,
+      ...(literalApiKey ? { requestApiKey: literalApiKey } : {}),
+      configuredBaseUrl: getConfiguredProviderBaseUrl(providerName, modelsConfig),
+    });
+    if (!decision.attach) {
+      return NextResponse.json({ error: decision.reason }, { status: 403 });
+    }
+
+    const providerEntry: Record<string, unknown> = {
+      baseUrl: provider.baseUrl,
+      api: provider.api,
+      ...(provider.apiKey ? { apiKey: provider.apiKey } : {}),
+      ...(Object.keys(provider.headers).length > 0 ? { headers: provider.headers } : {}),
+      ...provider.extra,
+    };
+    // Request-key path: the literal goes out untouched — resolveModelDiscoveryAuth
+    // (SDK auth resolution) is only consulted on the stored/verified-expression
+    // path, where the destination gate above already pinned the operator's
+    // configured URL.
+    const auth = literalApiKey
+      ? { apiKey: literalApiKey, headers: provider.headers }
+      : await resolveModelDiscoveryAuth(providerName, providerEntry);
 
     const response = await fetch(endpoint, {
       cache: "no-store",
-      headers: buildHeaders(api, auth.apiKey, auth.headers),
+      // Audit S2: a redirect would be a second exfil hop for whatever
+      // credential the headers carry.
+      redirect: "error",
+      headers: buildHeaders(provider.api, auth.apiKey, auth.headers),
       signal: AbortSignal.timeout(DISCOVERY_TIMEOUT_MS),
     });
     const responseText = await response.text();

@@ -9,6 +9,7 @@ import { isExistingPathWithinRoots } from "./path-security";
 import { disabledBuiltInSubagents } from "./subagent-settings";
 import { PRESET_READ_ONLY } from "./tool-presets";
 import type { SessionEntry, SubagentSessionStatus } from "./types";
+import { isRecord } from "./type-guards";
 
 export const SUBAGENT_META_TYPE = "pi-web:subagent";
 export const SUBAGENT_STATUS_TYPE = "pi-web:subagent-status";
@@ -81,11 +82,6 @@ export interface SubagentResultMetadata {
   result?: string;
   error?: string;
   worktreeCleanupError?: string;
-}
-
-export interface SubagentStatusMetadata {
-  version: 1;
-  status: Extract<SubagentStatus, "queued" | "running">;
 }
 
 export interface SubagentRunInfo {
@@ -494,10 +490,6 @@ export function saveProjectSubagentProfile(cwd: string, profile: Omit<SubagentPr
 
 export function deleteProjectSubagentProfile(cwd: string, name: string): void {
   deleteSubagentProfile(cwd, "project", name);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 type ValidSubagentMetadataData = Record<string, unknown> & {

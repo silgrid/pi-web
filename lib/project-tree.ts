@@ -1,4 +1,5 @@
 import type { BranchPreview } from "@/lib/types";
+import { isRecord } from "./type-guards";
 
 // BranchNavigator still traverses recursively, so keep the response tree shallow.
 export const MAX_PROJECTED_TREE_DEPTH = 200;
@@ -76,10 +77,6 @@ type ProjectableTreeNode<T> = {
   compressedEntryIds?: string[];
   branchPreview?: BranchPreview;
 };
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function appendPreviewText(current: string, value: unknown): string {
   if (typeof value !== "string" || current.length > MAX_BRANCH_PREVIEW_LENGTH) return current;

@@ -1,5 +1,11 @@
 import { NextResponse } from "next/server";
-import { ModelsConfigReadError, readModelsConfig, writeModelsConfig } from "@/lib/models-config-store";
+import {
+  ModelsConfigReadError,
+  readModelsConfig,
+  validateModelsConfigPayload,
+  writeModelsConfig,
+} from "@/lib/models-config-store";
+import { hasJsonContentType, isApiRequestAllowed } from "@/lib/request-security";
 
 export const dynamic = "force-dynamic";
 
@@ -15,9 +21,21 @@ export async function GET() {
 }
 
 export async function PUT(req: Request) {
+  if (!isApiRequestAllowed(req)) {
+    return NextResponse.json({ error: "Untrusted API request" }, { status: 403 });
+  }
+  if (!hasJsonContentType(req)) {
+    return NextResponse.json({ error: "Content-Type must be application/json" }, { status: 415 });
+  }
   try {
-    const body = await req.json() as Record<string, unknown>;
-    writeModelsConfig(body);
+    const body = await req.json().catch(() => null);
+    // Audit S8: schema-gate the payload instead of writing an unrestricted
+    // record to models.json.
+    const validated = validateModelsConfigPayload(body);
+    if (!validated.ok) {
+      return NextResponse.json({ error: validated.reason }, { status: 400 });
+    }
+    writeModelsConfig(validated.data);
     return NextResponse.json({ success: true });
   } catch (error) {
     if (error instanceof ModelsConfigReadError) {

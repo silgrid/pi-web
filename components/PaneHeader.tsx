@@ -18,8 +18,6 @@ interface PaneHeaderProps {
   onClose: () => void;
 }
 
-export const PANE_HEADER_HEIGHT_PX = PANE_HEADER_HEIGHT;
-
 export function PaneHeader({ id, label, running, hasBadge, focused, onClick, onClose }: PaneHeaderProps) {
   return (
     <button

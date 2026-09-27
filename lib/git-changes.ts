@@ -1,7 +1,6 @@
-import { execFile } from "child_process";
 import fs from "fs";
 import path from "path";
-import { promisify } from "util";
+import { runGit } from "./exec-file";
 import { TEXT_PREVIEW_MAX_BYTES } from "./file-types";
 import type {
   GitFileDiffResponse,
@@ -14,22 +13,11 @@ import {
   type GitPorcelainEntry,
 } from "./git-status";
 
-const execFileAsync = promisify(execFile);
-const GIT_TIMEOUT_MS = 10_000;
 const GIT_STATUS_MAX_BUFFER = 8 * 1024 * 1024;
-
-async function git(cwd: string, args: string[], maxBuffer = GIT_STATUS_MAX_BUFFER): Promise<string> {
-  const { stdout } = await execFileAsync("git", ["-C", cwd, ...args], {
-    timeout: GIT_TIMEOUT_MS,
-    maxBuffer,
-    env: { ...process.env, LC_ALL: "C" },
-  });
-  return stdout;
-}
 
 async function findRepositoryRoot(cwd: string): Promise<string | null> {
   try {
-    return (await git(cwd, ["rev-parse", "--show-toplevel"])).trim() || null;
+    return (await runGit(cwd, ["rev-parse", "--show-toplevel"], { maxBuffer: GIT_STATUS_MAX_BUFFER })).trim() || null;
   } catch {
     return null;
   }
@@ -45,12 +33,12 @@ function toGitPath(filePath: string): string {
 }
 
 async function readStatusEntries(repositoryRoot: string): Promise<GitPorcelainEntry[]> {
-  const output = await git(repositoryRoot, [
+  const output = await runGit(repositoryRoot, [
     "status",
     "--porcelain=v1",
     "-z",
     "--untracked-files=all",
-  ]);
+  ], { maxBuffer: GIT_STATUS_MAX_BUFFER });
   return parseGitPorcelainV1(output);
 }
 
@@ -61,7 +49,7 @@ async function readTrackedLineStats(
   const relativeCwd = toGitPath(path.relative(repositoryRoot, cwd));
   const pathspec = relativeCwd || ".";
   try {
-    const output = await git(repositoryRoot, [
+    const output = await runGit(repositoryRoot, [
       "diff",
       "--no-color",
       "--no-ext-diff",
@@ -69,7 +57,7 @@ async function readTrackedLineStats(
       "HEAD",
       "--",
       pathspec,
-    ]);
+    ], { maxBuffer: GIT_STATUS_MAX_BUFFER });
     let additions = 0;
     let deletions = 0;
     for (const line of output.split(/\r?\n/)) {
@@ -171,7 +159,7 @@ async function createTrackedFilePatch(
     ? [originalPath, relativePath]
     : [relativePath];
   try {
-    return await git(repositoryRoot, [
+    return await runGit(repositoryRoot, [
       "diff",
       "--no-color",
       "--no-ext-diff",
@@ -179,7 +167,7 @@ async function createTrackedFilePatch(
       "HEAD",
       "--",
       ...paths,
-    ], TEXT_PREVIEW_MAX_BYTES * 4);
+    ], { maxBuffer: TEXT_PREVIEW_MAX_BYTES * 4 });
   } catch {
     return null;
   }

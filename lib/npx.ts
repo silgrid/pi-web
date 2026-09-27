@@ -1,8 +1,5 @@
-import { execFile } from "child_process";
-import { promisify } from "util";
 import { nodeCliInvocation } from "./node-cli";
-
-const execFileAsync = promisify(execFile);
+import { execFileAsync } from "./exec-file";
 
 export interface RunNpxOptions {
   timeout?: number;
