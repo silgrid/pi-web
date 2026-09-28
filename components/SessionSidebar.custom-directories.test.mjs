@@ -87,7 +87,7 @@ test("the Add button moved into the top toolbar row, level with refresh and sear
   // Exactly ONE Add trigger remains, and it lives in the toolbar row after
   // the refresh and search buttons — not as a standalone full-width button.
   assert.equal((source.match(/setAddDirectoryOpen\(true\)/g) ?? []).length, 1);
-  const refreshAt = source.indexOf('title={t("sidebar.refresh")}');
+  const refreshAt = source.indexOf('title={sidebarRefreshing ? t("sidebar.refreshing") : t("sidebar.refresh")}');
   const searchAt = source.indexOf('title={t("sidebar.toggleSessionSearch")}');
   const addAt = source.indexOf('onClick={() => setAddDirectoryOpen(true)}');
   assert.ok(refreshAt !== -1 && searchAt !== -1 && addAt !== -1);

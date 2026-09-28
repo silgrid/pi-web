@@ -307,14 +307,40 @@ test("lifecycle refreshes bypass the cache while cross-window polling reuses it"
 
 test("the sidebar header offers a manual forced refresh and pull-to-refresh fires once", () => {
   // Refresh button in the header (all form factors) forces a cache-bypassing scan.
-  assert.match(source, /title=\{t\("sidebar\.refresh"\)\}/);
-  assert.match(source, /aria-label=\{t\("sidebar\.refresh"\)\}/);
-  assert.match(source, /onClick=\{\(\) => \{\s*void loadSessions\(false, true\);\s*\}\}/);
+  assert.match(source, /title=\{sidebarRefreshing \? t\("sidebar\.refreshing"\) : t\("sidebar\.refresh"\)\}/);
+  assert.match(source, /aria-label=\{sidebarRefreshing \? t\("sidebar\.refreshing"\) : t\("sidebar\.refresh"\)\}/);
   // Pull-to-refresh on the touch list: armed at the top, fired exactly once
   // per gesture past the 64px threshold, disarmed on release.
   assert.match(source, /if \(!el \|\| el\.scrollTop > 0\) return;[\s\S]*?pullFiredRef\.current = false;/);
   assert.match(source, /if \(startY == null \|\| pullFiredRef\.current\) return;/);
   assert.match(source, /if \(deltaY > 64\) \{\s*pullFiredRef\.current = true;\s*void loadSessions\(false, true\);\s*\}/);
+});
+
+test("the manual refresh button shows spinner feedback and guards double-clicks (pi#69)", () => {
+  // A dedicated transient state drives the spinner so the forced rescan's
+  // showLoading=false (kept for the list-replacing loading state) no longer
+  // leaves the click with zero visual feedback when disk content is unchanged.
+  assert.match(source, /const \[sidebarRefreshing, setSidebarRefreshing\] = useState\(false\);/);
+  assert.match(source, /const sidebarRefreshInFlightRef = useRef\(false\);/);
+  const refreshButtonStart = source.indexOf('title={sidebarRefreshing ? t("sidebar.refreshing")');
+  const refreshButtonBlock = source.slice(source.lastIndexOf("<button", refreshButtonStart), refreshButtonStart);
+  // Double-click guard: a second click while a refresh is in flight is a
+  // no-op, checked synchronously against the ref (state updates are async).
+  assert.match(refreshButtonBlock, /if \(sidebarRefreshInFlightRef\.current\) return;/);
+  assert.match(refreshButtonBlock, /sidebarRefreshInFlightRef\.current = true;/);
+  assert.match(refreshButtonBlock, /setSidebarRefreshing\(true\);/);
+  // Force semantics are unchanged — still loadSessions(false, true) — and
+  // the in-flight flag plus the spinner state are always cleared, success or
+  // failure, via `finally`.
+  assert.match(
+    refreshButtonBlock,
+    /void loadSessions\(false, true\)\.finally\(\(\) => \{\s*sidebarRefreshInFlightRef\.current = false;\s*setSidebarRefreshing\(false\);\s*\}\);/,
+  );
+  assert.match(source, /disabled=\{sidebarRefreshing\}/);
+  assert.match(source, /aria-busy=\{sidebarRefreshing\}/);
+  // The icon spins via the same animate-spin convention used elsewhere
+  // (AgentSessionPanel, AppShell) rather than a bespoke animation.
+  assert.match(source, /<svg className=\{sidebarRefreshing \? "animate-spin" : undefined\}/);
 });
 
 test("a rising external-write generation on the selected session notifies the app", () => {
