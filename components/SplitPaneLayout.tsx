@@ -228,6 +228,13 @@ function SplitPaneLayoutInner(
               onDrop={dragHandlers.onDrop}
               onDragEnd={dragHandlers.onDragEnd}
               reorderRoleDescription={t("tabs.reorderRoleDescription")}
+              onSearch={() => {
+                // pi#80: the pane's ChatWindow listens for this event and
+                // raises its in-tab search bar (event bus instead of prop
+                // plumbing through renderPane's owner).
+                window.dispatchEvent(new CustomEvent("pi-web:open-tab-search", { detail: tab.sessionId }));
+              }}
+              searchLabel={t("tabSearch.openButton")}
             />
             {/* The pane's tabpanel: the embedded header's controlled region.
                 A flex column so the pane content (ChatWindow) keeps its

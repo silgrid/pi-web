@@ -29,6 +29,14 @@ import { parseUnifiedPatch } from "@/lib/patch";
 import type { GitFileDiffResponse } from "@/lib/git-types";
 import { useI18n } from "@/hooks/useI18n";
 import {
+  buildSearchMatcher,
+  collectTextMatches,
+  paintSearchHighlights,
+  scrollRangeToCenter,
+} from "@/lib/tab-search";
+import type { FileSearchMatch } from "@/lib/file-search";
+import { TabSearchBar } from "./TabSearchBar";
+import {
   resolveInitialFileDisplayMode,
   type FileViewerDisplayMode as DisplayMode,
   type FileViewerState,
@@ -213,7 +221,7 @@ function SourceCodeRenderer({ rows, stylesheet, useInlineStyles, wrapLines }: So
 
 function getFileApiUrl(
   filePath: string,
-  type: "read" | "download" | "meta" | "preview" | "watch",
+  type: "read" | "download" | "meta" | "preview" | "watch" | "search",
   sourceSessionId?: string | null,
   params: Record<string, string | number | undefined> = {},
 ): string {
@@ -1386,6 +1394,8 @@ function TextFileViewer({
 
   const viewerContent = data?.content ?? "";
   const sourceLines = useMemo(() => viewerContent.split("\n"), [viewerContent]);
+
+
   const language = data?.language ?? "text";
   const isHtml = language === "html";
   const isMarkdown = language === "markdown";
@@ -1434,6 +1444,66 @@ function TextFileViewer({
     ),
     [isDark, language, viewerContent, wrapLines],
   );
+  // In-file search (pi#80): local ranges over the loaded preview, plus a
+  // server pass over the file's unloaded tail ("search rest of file").
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchCase, setSearchCase] = useState(false);
+  const [searchRegex, setSearchRegex] = useState(false);
+  const [searchRanges, setSearchRanges] = useState<Range[]>([]);
+  const [searchIndex, setSearchIndex] = useState(-1);
+  const [restMatches, setRestMatches] = useState<FileSearchMatch[] | null>(null);
+  const [restTruncated, setRestTruncated] = useState(false);
+  const [searchingRest, setSearchingRest] = useState(false);
+  const searchMatcher = useMemo(
+    () => buildSearchMatcher(searchQuery, { caseSensitive: searchCase, regex: searchRegex }),
+    [searchQuery, searchCase, searchRegex],
+  );
+  useEffect(() => {
+    if (!searchOpen || !searchMatcher) {
+      setSearchRanges([]);
+      setSearchIndex(-1);
+      setRestMatches(null);
+      return;
+    }
+    const handle = setTimeout(() => {
+      const ranges = collectTextMatches(contentRef.current, searchMatcher);
+      setSearchRanges(ranges);
+      setSearchIndex(ranges.length > 0 ? 0 : -1);
+    }, 200);
+    return () => clearTimeout(handle);
+  }, [searchOpen, searchMatcher, viewerContent, effectiveDisplayMode, wrapLines]);
+  useEffect(() => {
+    if (!searchOpen) {
+      paintSearchHighlights([], null);
+      return;
+    }
+    const current = searchIndex >= 0 && searchIndex < searchRanges.length ? searchRanges[searchIndex] : null;
+    paintSearchHighlights(searchRanges, current);
+    if (current) scrollRangeToCenter(current, contentRef.current);
+  }, [searchOpen, searchRanges, searchIndex]);
+  useEffect(() => () => paintSearchHighlights([], null), []);
+  const searchRestOfFile = useCallback(() => {
+    if (!data?.truncated || !searchQuery.trim()) return;
+    setSearchingRest(true);
+    const params: Record<string, string | undefined> = { q: searchQuery.trim() };
+    if (data.nextOffset) params.offset = String(data.nextOffset);
+    if (searchCase) params.case = "1";
+    if (searchRegex) params.regex = "1";
+    fetch(getFileApiUrl(filePath, "search", sourceSessionId, params))
+      .then(async (response) => {
+        if (response.status === 415) return null; // binary: nothing further to search
+        if (!response.ok) throw new Error(String(response.status));
+        return (await response.json()) as { matches: FileSearchMatch[]; truncated: boolean };
+      })
+      .then((parsed) => {
+        setRestMatches(parsed?.matches ?? []);
+        setRestTruncated(Boolean(parsed?.truncated));
+      })
+      .catch(() => setRestMatches(null))
+      .finally(() => setSearchingRest(false));
+  }, [data, searchQuery, searchCase, searchRegex, filePath, sourceSessionId]);
+
   const lightweightSourceLines = useMemo(
     () => useLightweightSource ? sourceLines.map((line, lineIndex) => (
       <span
@@ -1689,6 +1759,26 @@ function TextFileViewer({
               <>
                 <button
                   type="button"
+                  onClick={() => {
+                    setSearchOpen((open) => !open);
+                    if (searchOpen) paintSearchHighlights([], null);
+                  }}
+                  title={t("tabSearch.openButton")}
+                  aria-label={t("tabSearch.openButton")}
+                  aria-pressed={searchOpen}
+                  className="file-viewer-icon-button"
+                  style={{
+                    background: searchOpen ? "var(--bg-selected)" : "transparent",
+                    color: searchOpen ? "var(--text)" : "var(--text-muted)",
+                  }}
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true" style={{ display: "block" }}>
+                    <circle cx="11" cy="11" r="6.5" stroke="currentColor" strokeWidth="2" />
+                    <path d="M16 16 L21 21" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+                  </svg>
+                </button>
+                <button
+                  type="button"
                   onClick={toggleWrapLines}
                   title={wrapLines ? t("i18n.disableWrap") : t("i18n.enableWrap")}
                   aria-label={wrapLines ? t("i18n.disableWrap") : t("i18n.enableWrap")}
@@ -1713,6 +1803,55 @@ function TextFileViewer({
           {!isDeletedDiff && <DownloadLink filePath={filePath} sourceSessionId={sourceSessionId} />}
         </div>
       </div>
+
+      {searchOpen && (
+        <div style={{ position: "relative", padding: "2px 8px", borderBottom: "1px solid var(--border)" }}>
+          <TabSearchBar
+            value={searchQuery}
+            onChange={setSearchQuery}
+            caseSensitive={searchCase}
+            regexEnabled={searchRegex}
+            onToggleCase={() => setSearchCase((value) => !value)}
+            onToggleRegex={() => setSearchRegex((value) => !value)}
+            current={searchIndex >= 0 ? searchIndex + 1 : 0}
+            total={searchRanges.length + (restMatches?.length ?? 0)}
+            localCount={searchRanges.length}
+            earlierCount={0}
+            loadingEarlier={searchingRest}
+            hasEarlierHistory={false}
+            onPrevious={() => setSearchIndex((index) => Math.max(0, index - 1))}
+            onNext={() => setSearchIndex((index) => Math.min(index + 1, searchRanges.length - 1))}
+            onClose={() => {
+              setSearchOpen(false);
+              paintSearchHighlights([], null);
+            }}
+            extraAction={data?.truncated ? {
+              label: t("tabSearch.searchRestOfFile"),
+              onClick: searchRestOfFile,
+              busy: searchingRest,
+            } : undefined}
+          />
+          <style>{`
+            .file-viewer-shell .tab-search-bar { position: static; box-shadow: none; border: none; padding: 0; background: transparent; }
+            .file-viewer-shell .tab-search-earlier-note { display: none; }
+          `}</style>
+          {restMatches && (
+            <div className="file-search-rest" style={{ maxHeight: 180, overflow: "auto", fontSize: 11, color: "var(--text-muted)", padding: "4px 2px", fontFamily: "var(--font-mono)" }}>
+              {restMatches.length === 0 && <div>{t("tabSearch.noMatches")}</div>}
+              {restMatches.map((match) => (
+                <div
+                  key={`${match.line}-${match.byteOffset}`}
+                  style={{ padding: "1px 4px", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}
+                  title={match.snippet}
+                >
+                  L{match.line}: {match.snippet}
+                </div>
+              ))}
+              {restTruncated && <div style={{ padding: "2px 4px", color: "var(--text-dim)" }}>{t("tabSearch.fileMatchesTruncated")}</div>}
+            </div>
+          )}
+        </div>
+      )}
 
       {data?.truncated && (
         <div

@@ -1,5 +1,7 @@
 "use client";
 import { registerAbortHandler } from "@/hooks/useKeyboardShortcuts";
+import { useTabSearch } from "@/hooks/useTabSearch";
+import { TabSearchBar } from "./TabSearchBar";
 import Image from "next/image";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
@@ -954,6 +956,52 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
     />
   );
 
+  // In-tab search (pi#80): Ctrl/Cmd+F over the active pane, local DOM
+  // highlight plus earlier-history matches via the per-session search API.
+  // Must sit after messageContentRef/visibleCount above and before the
+  // loading/error early returns below (hook order is unconditional).
+  const tabSearch = useTabSearch({
+    enabled: isActivePane && Boolean(session?.id),
+    contentRef: messageContentRef,
+    scrollContainerRef,
+    sessionId: session?.id ?? null,
+    activeLeafId,
+    loadContext,
+    loadedEntryIds: entryIds,
+    historyCursor,
+    hasEarlierMessages,
+    repaintKey: `${entryIds.length}:${messages.length}:${visibleCount}:${streamState.streamingMessage ? "s" : "i"}`,
+  });
+  const sessionIdentity = session?.id;
+  // openBar is a stable useCallback inside the hook; pulling it out keeps the
+  // listener subscriptions from re-attaching on every render.
+  const openTabSearchBar = tabSearch.openBar;
+  useEffect(() => {
+    if (!isActivePane || !sessionIdentity) return;
+    const openForThisPane = (event: Event) => {
+      const detail = (event as CustomEvent<string>).detail;
+      if (detail === sessionIdentity) openTabSearchBar();
+    };
+    window.addEventListener("pi-web:open-tab-search", openForThisPane);
+    return () => window.removeEventListener("pi-web:open-tab-search", openForThisPane);
+  }, [isActivePane, sessionIdentity, openTabSearchBar]);
+  useEffect(() => {
+    if (!isActivePane || !sessionIdentity) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && !event.altKey && event.key.toLowerCase() === "f") {
+        const target = event.target;
+        if (
+          target instanceof Node
+          && (target.parentElement?.closest("[role='dialog'], .settings-general, .tab-search-bar") ?? null)
+        ) return; // native find stays native inside modals and the bar itself
+        event.preventDefault();
+        openTabSearchBar();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [isActivePane, sessionIdentity, openTabSearchBar]);
+
   if (loading) {
     return (
       <div className="flex h-full items-center justify-center text-text-muted">
@@ -979,6 +1027,25 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
     >
+      {tabSearch.open && (
+        <TabSearchBar
+          value={tabSearch.query}
+          onChange={tabSearch.setQuery}
+          caseSensitive={tabSearch.caseSensitive}
+          regexEnabled={tabSearch.regexEnabled}
+          onToggleCase={tabSearch.toggleCase}
+          onToggleRegex={tabSearch.toggleRegex}
+          current={tabSearch.current}
+          total={tabSearch.total}
+          localCount={tabSearch.localCount}
+          earlierCount={tabSearch.earlierCount}
+          loadingEarlier={tabSearch.loadingEarlier}
+          hasEarlierHistory={hasEarlierMessages}
+          onPrevious={tabSearch.goPrevious}
+          onNext={tabSearch.goNext}
+          onClose={tabSearch.closeBar}
+        />
+      )}
       {isDragOver && (
         <div className="pointer-events-none absolute inset-0 z-50 flex animate-[drop-zone-in_0.15s_ease_both] items-center justify-center bg-[rgba(37,99,235,0.06)] backdrop-blur-[1px]">
           <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
