@@ -1614,6 +1614,7 @@ export function AppShell() {
         onCwdChange={handleCwdChange}
         onOpenFile={handleOpenFile}
         onOpenTerminal={handleOpenTerminal}
+        activeFilePath={activeFileTab?.filePath ?? null}
         explorerRefreshKey={explorerRefreshKey}
         onExplorerRefresh={handleExplorerRefresh}
         onAtMention={handleAtMention}

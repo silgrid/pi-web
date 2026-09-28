@@ -47,6 +47,12 @@ interface Props {
   onChangesCountChange?: (count: number) => void;
   fileSearchOpen?: boolean;
   onFileSearchOpenChange?: (open: boolean) => void;
+  /** Full path of the file currently shown in the editor/preview pane (the
+   *  real active file-tab identity from AppShell), for the "currently
+   *  open" row highlight. This root's tree only highlights a row when one
+   *  of its own nodes matches; a path belonging to another root highlights
+   *  nothing here. */
+  activeFilePath?: string | null;
 }
 
 export interface FileExplorerHandle {
@@ -272,7 +278,6 @@ function TreeNode({
   gitStatusByPath,
   changedDirectoryPaths,
   activeFilePath,
-  onActivateFile,
   t,
 }: {
   node: FileNode;
@@ -286,16 +291,19 @@ function TreeNode({
   highlightedPaths: Set<string>;
   gitStatusByPath: Map<string, GitFileStatus>;
   changedDirectoryPaths: Set<string>;
-  /** Full path of the file currently shown in the editor/preview pane, for
-   *  the "currently open" row highlight (distinct from hover). */
+  /** Full path of the file currently shown in the editor/preview pane (the
+   *  real active file-tab identity threaded down from AppShell), for the
+   *  "currently open" row highlight (distinct from hover). Compared through
+   *  normalizeFilePathSlashes, same as the git-status lookup below, since
+   *  git emits POSIX separators even on Windows. */
   activeFilePath?: string | null;
-  onActivateFile?: (fullPath: string) => void;
   t: Translate;
 }) {
   const open = expandedPaths.has(node.fullPath);
   const highlighted = highlightedPaths.has(node.fullPath);
-  const active = !node.isDir && activeFilePath === node.fullPath;
   const normalizedPath = normalizeFilePathSlashes(node.fullPath);
+  const active = !node.isDir && activeFilePath != null
+    && normalizeFilePathSlashes(activeFilePath) === normalizedPath;
   const gitStatus = gitStatusByPath.get(normalizedPath);
   const containsGitChanges = node.isDir && (
     gitStatus !== undefined || changedDirectoryPaths.has(normalizedPath)
@@ -338,10 +346,9 @@ function TreeNode({
       onToggleExpanded(node.fullPath, next);
       if (next && !loaded) loadChildren();
     } else {
-      onActivateFile?.(node.fullPath);
       onOpenFile(node.fullPath, node.name);
     }
-  }, [node.isDir, node.fullPath, node.name, loaded, open, loadChildren, onActivateFile, onOpenFile, onToggleExpanded]);
+  }, [node.isDir, node.fullPath, node.name, loaded, open, loadChildren, onOpenFile, onToggleExpanded]);
 
   return (
     <div>
@@ -521,7 +528,6 @@ function TreeNode({
               gitStatusByPath={gitStatusByPath}
               changedDirectoryPaths={changedDirectoryPaths}
               activeFilePath={activeFilePath}
-              onActivateFile={onActivateFile}
               t={t}
             />
           ))}
@@ -547,7 +553,6 @@ function ChangeRow({
   onOpenFile,
   onAtMention,
   active,
-  onActivateFile,
   t,
 }: {
   status: GitFileStatus;
@@ -555,7 +560,6 @@ function ChangeRow({
   onOpenFile: OpenFileHandler;
   onAtMention?: (relativePath: string, isDir: boolean) => void;
   active?: boolean;
-  onActivateFile?: (fullPath: string) => void;
   t: Translate;
 }) {
   const [hovered, setHovered] = useState(false);
@@ -567,7 +571,7 @@ function ChangeRow({
   const baseName = lastSlash >= 0 ? rel.slice(lastSlash + 1) : rel;
   return (
     <div
-      onClick={() => { onActivateFile?.(status.filePath); onOpenFile(status.filePath, name, { modeHint: "diff" }); }}
+      onClick={() => onOpenFile(status.filePath, name, { modeHint: "diff" })}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
       title={status.filePath}
@@ -674,6 +678,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
   onChangesCountChange,
   fileSearchOpen = false,
   onFileSearchOpenChange,
+  activeFilePath = null,
 }, ref) {
   const { t } = useI18n();
   const [roots, setRoots] = useState<FileNode[]>([]);
@@ -682,12 +687,6 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
   const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set());
   const [treeRefreshKey, setTreeRefreshKey] = useState(0);
   const [highlightedPaths, setHighlightedPaths] = useState<Set<string>>(new Set());
-  // The most recently activated (clicked) file row, purely a local visual
-  // record — clicking a file already opens it immediately (existing
-  // interaction model), so this just remembers which one for the
-  // "currently open / selected" row highlight. No new behavior: it does
-  // not change what onOpenFile receives or when it fires.
-  const [activeFilePath, setActiveFilePath] = useState<string | null>(null);
   const [gitFiles, setGitFiles] = useState<GitFileStatus[]>([]);
   const [gitLineStats, setGitLineStats] = useState({ additions: 0, deletions: 0 });
   const [uploadPhase, setUploadPhase] = useState<UploadPhase>("idle");
@@ -933,7 +932,6 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
       setUploadSummary(null);
       setPendingConflict(null);
       setUploadError(null);
-      setActiveFilePath(null);
     }
 
     setLoading(cwdChanged);
@@ -1158,7 +1156,6 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
                     gitStatusByPath={gitStatusByPath}
                     changedDirectoryPaths={changedDirectoryPaths}
                     activeFilePath={activeFilePath}
-                    onActivateFile={setActiveFilePath}
                     t={t}
                   />
                 ))}
@@ -1192,8 +1189,8 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
               cwd={cwd}
               onOpenFile={onOpenFile}
               onAtMention={onAtMention}
-              active={activeFilePath === status.filePath}
-              onActivateFile={setActiveFilePath}
+              active={activeFilePath != null
+                && normalizeFilePathSlashes(activeFilePath) === normalizeFilePathSlashes(status.filePath)}
               t={t}
             />
           ))}
@@ -1222,7 +1219,6 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
                 gitStatusByPath={gitStatusByPath}
                 changedDirectoryPaths={changedDirectoryPaths}
                 activeFilePath={activeFilePath}
-                onActivateFile={setActiveFilePath}
                 t={t}
               />
             ))

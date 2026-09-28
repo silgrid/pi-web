@@ -49,6 +49,12 @@ interface Props {
   onOpenFile: (filePath: string, fileName: string, options?: { sourceSessionId?: string | null; modeHint?: "diff" }) => void;
   onAtMention?: (relativePath: string, isDir: boolean) => void;
   onAtMentions?: (relativePaths: string[]) => void;
+  /** Full path of the file currently shown in the editor/preview pane. The
+   *  active file lives in exactly one root's tree, so the same value is
+   *  handed to every mounted section — each FileExplorer only highlights a
+   *  row when one of its own nodes matches, so non-owning roots naturally
+   *  highlight nothing. */
+  activeFilePath?: string | null;
   changesCollapsed: boolean;
   /** Aggregate changes count summed across all mounted sections. */
   onChangesCountChange?: (count: number) => void;
@@ -74,6 +80,7 @@ export const MultiRootFileExplorer = forwardRef<MultiRootFileExplorerHandle, Pro
     onOpenFile,
     onAtMention,
     onAtMentions,
+    activeFilePath,
     changesCollapsed,
     onChangesCountChange,
     onUploadBusyChange,
@@ -330,6 +337,7 @@ export const MultiRootFileExplorer = forwardRef<MultiRootFileExplorerHandle, Pro
                   refreshKey={refreshKey}
                   onAtMention={onAtMention}
                   onAtMentions={onAtMentions}
+                  activeFilePath={activeFilePath}
                   onUploadBusyChange={handleSectionUploadBusy(root.key)}
                   changesCollapsed={changesCollapsed}
                   onChangesCountChange={handleSectionChanges(root.key)}
