@@ -47,3 +47,22 @@ export function readTextPreviewChunk(
     truncated: nextOffset < fileSize,
   };
 }
+
+export const BINARY_SNIFF_MAX_BYTES = 8192;
+
+/**
+ * Git's standard binary heuristic: a NUL byte anywhere in the leading window
+ * marks the file as binary. UTF-16 text contains NULs and is reported binary
+ * too — the same tradeoff git accepts. Empty files are text.
+ */
+export function fileLooksBinary(filePath: string): boolean {
+  const buffer = Buffer.alloc(BINARY_SNIFF_MAX_BYTES);
+  const descriptor = fs.openSync(filePath, "r");
+  let bytesRead: number;
+  try {
+    bytesRead = fs.readSync(descriptor, buffer, 0, BINARY_SNIFF_MAX_BYTES, 0);
+  } finally {
+    fs.closeSync(descriptor);
+  }
+  return buffer.subarray(0, bytesRead).includes(0);
+}
