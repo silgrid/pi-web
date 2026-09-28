@@ -810,16 +810,21 @@ test("browse rows render hover-revealed rename/delete affordances as siblings of
   assert.equal((plain.match(/<button/g) ?? []).length, 1);
 });
 
-test("the stylesheet owns the reveal: hidden by default, hover + focus-within, always on coarse pointers", async () => {
+test("row manage buttons are always visible (pi#76: hover-reveal removed)", async () => {
   const css = await readFile(new URL("../app/globals.css", import.meta.url), "utf8");
-  assert.match(css, /\.directory-picker-row-manage\s*\{\s*display:\s*none\s*;?\s*\}/);
-  assert.match(
+  const block = css.match(/\.directory-picker-row-manage\s*\{[^}]*\}/);
+  assert.ok(block, ".directory-picker-row-manage rule must exist");
+  assert.match(block[0], /display:\s*inline-flex/);
+  assert.doesNotMatch(block[0], /display:\s*none/);
+  assert.doesNotMatch(
     css,
-    /\.directory-picker-row:hover \.directory-picker-row-manage,\s*\.directory-picker-row:focus-within \.directory-picker-row-manage\s*\{\s*display:\s*inline-flex\s*;?\s*\}/,
+    /\.directory-picker-row:hover \.directory-picker-row-manage[^}]*display/,
+    "the hover-reveal override must be gone",
   );
-  assert.match(
+  assert.doesNotMatch(
     css,
-    /@media \(pointer: coarse\)\s*\{\s*\.directory-picker-row-manage\s*\{\s*display:\s*inline-flex\s*;?\s*\}/,
+    /@media \(pointer: coarse\)\s*\{\s*\.directory-picker-row-manage/,
+    "the coarse-pointer override is redundant once buttons are always visible",
   );
 });
 
