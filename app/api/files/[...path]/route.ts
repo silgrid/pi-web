@@ -67,6 +67,19 @@ const EXT_TO_LANGUAGE: Record<string, string> = {
   dockerfile: "dockerfile", tf: "hcl", hcl: "hcl",
   env: "bash", gitignore: "bash", txt: "text",
   pdf: "pdf", docx: "word",
+  // Expanded coverage (pi#71): these previously fell through to "text" and
+  // rendered unhighlighted. react-syntax-highlighter's async full-registry
+  // build (PrismAsyncLight) loads any of these on demand, so widening this
+  // map is now just a detection question, not a bundle-size one.
+  php: "php", phtml: "php", lua: "lua", ini: "ini", cfg: "ini",
+  pl: "perl", pm: "perl", r: "r",
+  ps1: "powershell", psm1: "powershell",
+  scala: "scala", groovy: "groovy", gradle: "groovy",
+  hs: "haskell", ex: "elixir", exs: "elixir",
+  clj: "clojure", cljs: "clojure", cljc: "clojure",
+  vim: "vim", proto: "protobuf", diff: "diff", patch: "diff",
+  bat: "batch", cmd: "batch", properties: "properties",
+  dart: "dart", fs: "fsharp", fsx: "fsharp", zig: "zig", elm: "elm",
 };
 
 function getLanguage(filePath: string): string {
