@@ -664,6 +664,14 @@ export function SessionSidebar({ selectedSessionId, highlightSessionId, followHi
   const [sessionsLoadSettled, setSessionsLoadSettled] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // Manual-refresh button feedback (pi#69): the forced rescan passes
+  // showLoading=false so the list-replacing `loading` state above stays out
+  // of it — a spinner on the button icon is the only visual signal a click
+  // landed, especially when the disk content turns out unchanged. The ref is
+  // the double-click guard (checked synchronously in the click handler); the
+  // state drives the spin animation and is always cleared in `finally`.
+  const [sidebarRefreshing, setSidebarRefreshing] = useState(false);
+  const sidebarRefreshInFlightRef = useRef(false);
   // Pull-to-refresh tracking: fires the force scan when the list is pulled
   // down past PULL_TO_REFRESH_THRESHOLD_PX while already scrolled to the top.
   const pullStartYRef = useRef<number | null>(null);
@@ -1845,15 +1853,23 @@ export function SessionSidebar({ selectedSessionId, highlightSessionId, followHi
             <button
               type="button"
               onClick={() => {
-                void loadSessions(false, true);
+                if (sidebarRefreshInFlightRef.current) return;
+                sidebarRefreshInFlightRef.current = true;
+                setSidebarRefreshing(true);
+                void loadSessions(false, true).finally(() => {
+                  sidebarRefreshInFlightRef.current = false;
+                  setSidebarRefreshing(false);
+                });
               }}
-              title={t("sidebar.refresh")}
-              aria-label={t("sidebar.refresh")}
-              className="flex h-[32px] w-[32px] shrink-0 cursor-pointer items-center justify-center rounded-[7px] border border-border bg-bg-hover text-text-muted hover:bg-bg-selected focus-visible:outline-2 focus-visible:outline-accent"
+              disabled={sidebarRefreshing}
+              aria-busy={sidebarRefreshing}
+              title={sidebarRefreshing ? t("sidebar.refreshing") : t("sidebar.refresh")}
+              aria-label={sidebarRefreshing ? t("sidebar.refreshing") : t("sidebar.refresh")}
+              className="flex h-[32px] w-[32px] shrink-0 cursor-pointer items-center justify-center rounded-[7px] border border-border bg-bg-hover text-text-muted hover:bg-bg-selected focus-visible:outline-2 focus-visible:outline-accent disabled:cursor-default"
               onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-selected)"; e.currentTarget.style.color = "var(--text)"; }}
               onMouseLeave={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; e.currentTarget.style.color = "var(--text-muted)"; }}
             >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <svg className={sidebarRefreshing ? "animate-spin" : undefined} width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                 <path d="M21 12a9 9 0 1 1-2.64-6.36L21 8" />
                 <path d="M21 3v5h-5" />
               </svg>

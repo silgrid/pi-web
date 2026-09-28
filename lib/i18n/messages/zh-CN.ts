@@ -217,6 +217,7 @@ export const zhCNLocale: LocalePlugin = {
     "sidebar.new": "新建",
     "sidebar.newSessionTitle": "在 {path} 中新建会话",
     "sidebar.refresh": "刷新",
+    "sidebar.refreshing": "正在刷新…",
     "sidebar.unpinProject": "从目录列表移除",
     "sidebar.pinnedProjectMissing": "目录已不存在",
     "sidebar.pinnedGroupExpand": "显示 {path} 的会话",

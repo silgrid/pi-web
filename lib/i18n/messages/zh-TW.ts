@@ -217,6 +217,7 @@ export const zhTWLocale: LocalePlugin = {
     "sidebar.new": "新增",
     "sidebar.newSessionTitle": "在 {path} 中新增工作階段",
     "sidebar.refresh": "重新整理",
+    "sidebar.refreshing": "重新整理中…",
     "sidebar.unpinProject": "從目錄列表移除",
     "sidebar.pinnedProjectMissing": "目錄已不存在",
     "sidebar.pinnedGroupExpand": "顯示 {path} 的工作階段",

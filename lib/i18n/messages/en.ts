@@ -217,6 +217,7 @@ export const enLocale: LocalePlugin = {
     "sidebar.new": "New",
     "sidebar.newSessionTitle": "New session in {path}",
     "sidebar.refresh": "Refresh",
+    "sidebar.refreshing": "Refreshing…",
     "sidebar.unpinProject": "Remove from directory list",
     "sidebar.pinnedProjectMissing": "Directory no longer exists on disk",
     "sidebar.pinnedGroupExpand": "Show sessions for {path}",
