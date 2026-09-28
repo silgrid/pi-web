@@ -23,6 +23,25 @@ export const SESSION_FILTER_PATTERNS_STORAGE_KEY = "pi-web:session-filter-patter
 /** localStorage key of the persisted show-filtered toggle. */
 export const SHOW_FILTERED_SESSIONS_STORAGE_KEY = "pi-web:show-filtered-sessions";
 
+/** localStorage key of the persisted session-age filter (pi#82): only
+ *  sessions modified within the last N days are listed; 0 disables the
+ *  filter entirely. */
+export const SESSION_AGE_FILTER_DAYS_STORAGE_KEY = "pi-web:session-age-filter-days";
+
+/** Default age window when the storage key is absent or unreadable
+ *  (pi#82): the owner's "最近几天" reading of the sidebar. */
+export const DEFAULT_SESSION_AGE_FILTER_DAYS = 7;
+
+/** Accepted range for the age window; 0 (show all) through a year. */
+export const SESSION_AGE_FILTER_DAYS_MIN = 0;
+export const SESSION_AGE_FILTER_DAYS_MAX = 365;
+
+export function clampSessionAgeFilterDays(value: unknown): number {
+  const days = Math.round(Number(value));
+  if (!Number.isFinite(days)) return DEFAULT_SESSION_AGE_FILTER_DAYS;
+  return Math.max(SESSION_AGE_FILTER_DAYS_MIN, Math.min(SESSION_AGE_FILTER_DAYS_MAX, days));
+}
+
 /** Default patterns when the storage key is absent or unreadable: the
  *  workflow-invocation marker pi-web's own orchestrator produces. */
 export const DEFAULT_SESSION_FILTER_PATTERNS: readonly string[] = ["Execute the pinned skill entry"];
@@ -113,6 +132,61 @@ export function saveShowFilteredSessions(
   }
 }
 
+/** Reads the persisted age window (pi#82). Absent key → the default;
+ *  a non-numeric or out-of-range payload is corrupt, not user-edited, and
+ *  falls back to the default the same way the pattern list does. */
+export function loadSessionAgeFilterDays(
+  storage: SessionFilterStorage | null,
+): number {
+  const raw = safeGetItem(storage, SESSION_AGE_FILTER_DAYS_STORAGE_KEY);
+  if (raw === null) return DEFAULT_SESSION_AGE_FILTER_DAYS;
+  if (!/^\d+$/.test(raw.trim())) return DEFAULT_SESSION_AGE_FILTER_DAYS;
+  return clampSessionAgeFilterDays(raw);
+}
+
+/** Persists the age window (best-effort, clamped). */
+export function saveSessionAgeFilterDays(
+  storage: SessionFilterStorage | null,
+  days: number,
+): void {
+  if (!storage) return;
+  try {
+    storage.setItem(SESSION_AGE_FILTER_DAYS_STORAGE_KEY, String(clampSessionAgeFilterDays(days)));
+  } catch {
+    // Best-effort persistence.
+  }
+}
+
+/** Whether one session falls outside the age window (pi#82): kept when the
+ *  window is disabled (days <= 0) or its age cannot be judged — a filter
+ *  never hides what it cannot evaluate. */
+export function isSessionOutsideAgeWindow(
+  session: Pick<SessionInfo, "modified">,
+  days: number,
+  now: number = Date.now(),
+): boolean {
+  if (!Number.isFinite(days) || days <= 0) return false;
+  // `modified` is typed Date but arrives as a JSON string at runtime; both
+  // shapes must work (a Date-like getTime or a parseable string).
+  const rawModified: unknown = session.modified;
+  const modified = rawModified instanceof Date
+    ? rawModified.getTime()
+    : typeof rawModified === "string" ? Date.parse(rawModified) : Number(rawModified);
+  if (!Number.isFinite(modified)) return false;
+  return now - modified >= days * 24 * 60 * 60 * 1000;
+}
+
+/** Age-window filter over a session list (pi#82). `days <= 0` returns the
+ *  input unchanged (same array reference) so callers can memoize cheaply. */
+export function filterSessionsByAge<T extends Pick<SessionInfo, "modified">>(
+  sessions: readonly T[],
+  days: number,
+  now: number = Date.now(),
+): readonly T[] {
+  if (!Number.isFinite(days) || days <= 0) return sessions;
+  return sessions.filter((session) => !isSessionOutsideAgeWindow(session, days, now));
+}
+
 /** Whether one session matches any of the filter patterns: a
  *  case-insensitive substring hit on the session's stored name OR its first
  *  message. Whitespace-only patterns never match; an empty pattern list
@@ -186,6 +260,8 @@ export function isFamilyRowFiltered(
 export interface SessionFilterState {
   readonly patterns: readonly string[];
   readonly showFiltered: boolean;
+  /** Age window in days (pi#82); 0 = show every session. */
+  readonly ageFilterDays: number;
 }
 
 let storeState: SessionFilterState | null = null;
@@ -196,6 +272,7 @@ function ensureStoreState(): SessionFilterState {
     storeState = {
       patterns: loadSessionFilterPatterns(sessionFilterStorage()),
       showFiltered: loadShowFilteredSessions(sessionFilterStorage()),
+      ageFilterDays: loadSessionAgeFilterDays(sessionFilterStorage()),
     };
   }
   return storeState;
@@ -208,6 +285,12 @@ export function getSessionFilterState(): SessionFilterState {
 export function setSessionFilterPatterns(patterns: readonly string[]): void {
   storeState = { ...ensureStoreState(), patterns: [...patterns] };
   saveSessionFilterPatterns(sessionFilterStorage(), patterns);
+  storeListeners.forEach((listener) => listener());
+}
+
+export function setSessionAgeFilterDays(days: number): void {
+  storeState = { ...ensureStoreState(), ageFilterDays: clampSessionAgeFilterDays(days) };
+  saveSessionAgeFilterDays(sessionFilterStorage(), storeState.ageFilterDays);
   storeListeners.forEach((listener) => listener());
 }
 
@@ -228,6 +311,7 @@ export function subscribeSessionFilter(listener: () => void): () => void {
 const SERVER_SESSION_FILTER_STATE: SessionFilterState = {
   patterns: [...DEFAULT_SESSION_FILTER_PATTERNS],
   showFiltered: false,
+  ageFilterDays: DEFAULT_SESSION_AGE_FILTER_DAYS,
 };
 
 export function getServerSessionFilterState(): SessionFilterState {

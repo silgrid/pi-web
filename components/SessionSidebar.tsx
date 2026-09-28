@@ -32,6 +32,7 @@ import {
   getServerSessionFilterState,
   getSessionFilterState,
   isFamilyRowFiltered,
+  filterSessionsByAge,
   isSessionFiltered,
   setShowFilteredSessions,
   subscribeSessionFilter,
@@ -708,6 +709,7 @@ export function SessionSidebar({ selectedSessionId, highlightSessionId, followHi
   const sessionFilter = useSyncExternalStore(subscribeSessionFilter, getSessionFilterState, getServerSessionFilterState);
   const sessionFilterPatterns = sessionFilter.patterns;
   const showFilteredSessions = sessionFilter.showFiltered;
+  const sessionAgeFilterDays = sessionFilter.ageFilterDays;
   // Server-side full-text filter matching (review r1 on the list payload
   // slim-down): the LIST payload carries only a firstMessage preview, so a
   // pattern whose only match sits beyond the preview boundary is matched
@@ -1556,14 +1558,20 @@ export function SessionSidebar({ selectedSessionId, highlightSessionId, followHi
   // initial-project restore, recent-project selection) keep operating on
   // allSessions. The reveal toggle disables the filtering entirely, so a
   // re-revealed session renders with no visual difference.
+  // pi#82: the age window composes AFTER the worker filter. day-granularity
+  // means a stale `now` inside a cached memo never moves a boundary visibly;
+  // the memo recomputes whenever the list or the setting changes.
   const visibleSessions = useMemo(
-    () => showFilteredSessions || sessionFilterPatterns.length === 0
-      ? allSessions
-      : allSessions.filter((session) => (
-        !isSessionFiltered(session, sessionFilterPatterns)
-        && !serverFilterMatchedIds.has(session.id)
-      )),
-    [allSessions, showFilteredSessions, sessionFilterPatterns, serverFilterMatchedIds],
+    () => filterSessionsByAge(
+      showFilteredSessions || sessionFilterPatterns.length === 0
+        ? allSessions
+        : allSessions.filter((session) => (
+          !isSessionFiltered(session, sessionFilterPatterns)
+          && !serverFilterMatchedIds.has(session.id)
+        )),
+      sessionAgeFilterDays,
+    ),
+    [allSessions, showFilteredSessions, sessionFilterPatterns, serverFilterMatchedIds, sessionAgeFilterDays],
   );
   // Hidden-count affordance (wi pi#65): the exact number of sessions the
   // active patterns hide, computed over allSessions — independent of the
