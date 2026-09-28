@@ -21,6 +21,14 @@ test("chat content keeps the existing 820px default behind one shared variable",
   assert.doesNotMatch(chatInput, /maxWidth: 820/);
 });
 
+test("the width slider floors at 600 but keeps the 820 default (pi#78)", () => {
+  assert.equal(clampChatContentWidth(600), 600);
+  assert.equal(clampChatContentWidth(590), 600, "values below the floor clamp up to the minimum");
+  assert.equal(clampChatContentWidth(820), 820);
+  assert.match(chatAppearanceHook, /CHAT_CONTENT_WIDTH_MIN = 600;/);
+  assert.match(chatAppearanceHook, /CHAT_CONTENT_WIDTH_DEFAULT = 820;/);
+});
+
 test("General chat settings own the chat width preference", () => {
   assert.match(chatInput, /useChatAppearance\(\)/);
   assert.match(settingsPanel, /useChatAppearance\(\)/);
@@ -35,7 +43,8 @@ test("General chat settings own the chat width preference", () => {
 test("chat width validation preserves the default and supported range", () => {
   assert.equal(clampChatContentWidth(undefined), 820);
   assert.equal(clampChatContentWidth("invalid"), 820);
-  assert.equal(clampChatContentWidth(700), 820);
+  assert.equal(clampChatContentWidth(500), 600, "below the 600 floor clamps up");
+  assert.equal(clampChatContentWidth(700), 700, "700 is inside the 600-floor range now (pi#78)");
   assert.equal(clampChatContentWidth(1104), 1104);
   assert.equal(clampChatContentWidth(2400), 2000);
 });
