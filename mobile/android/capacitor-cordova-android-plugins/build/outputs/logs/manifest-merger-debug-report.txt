@@ -1,0 +1,22 @@
+-- Merging decision tree log ---
+manifest
+ADDED from /root/code/aicoding/osp-ws/.repo/pi-web/mobile/android/capacitor-cordova-android-plugins/src/main/AndroidManifest.xml:2:1-8:12
+INJECTED from /root/code/aicoding/osp-ws/.repo/pi-web/mobile/android/capacitor-cordova-android-plugins/src/main/AndroidManifest.xml:2:1-8:12
+	package
+		INJECTED from /root/code/aicoding/osp-ws/.repo/pi-web/mobile/android/capacitor-cordova-android-plugins/src/main/AndroidManifest.xml
+	xmlns:amazon
+		ADDED from /root/code/aicoding/osp-ws/.repo/pi-web/mobile/android/capacitor-cordova-android-plugins/src/main/AndroidManifest.xml:3:1-57
+	xmlns:android
+		ADDED from /root/code/aicoding/osp-ws/.repo/pi-web/mobile/android/capacitor-cordova-android-plugins/src/main/AndroidManifest.xml:2:11-69
+application
+ADDED from /root/code/aicoding/osp-ws/.repo/pi-web/mobile/android/capacitor-cordova-android-plugins/src/main/AndroidManifest.xml:4:1-6:15
+	android:usesCleartextTraffic
+		ADDED from /root/code/aicoding/osp-ws/.repo/pi-web/mobile/android/capacitor-cordova-android-plugins/src/main/AndroidManifest.xml:4:15-50
+uses-sdk
+INJECTED from /root/code/aicoding/osp-ws/.repo/pi-web/mobile/android/capacitor-cordova-android-plugins/src/main/AndroidManifest.xml reason: use-sdk injection requested
+INJECTED from /root/code/aicoding/osp-ws/.repo/pi-web/mobile/android/capacitor-cordova-android-plugins/src/main/AndroidManifest.xml
+INJECTED from /root/code/aicoding/osp-ws/.repo/pi-web/mobile/android/capacitor-cordova-android-plugins/src/main/AndroidManifest.xml
+	android:targetSdkVersion
+		INJECTED from /root/code/aicoding/osp-ws/.repo/pi-web/mobile/android/capacitor-cordova-android-plugins/src/main/AndroidManifest.xml
+	android:minSdkVersion
+		INJECTED from /root/code/aicoding/osp-ws/.repo/pi-web/mobile/android/capacitor-cordova-android-plugins/src/main/AndroidManifest.xml

@@ -9,6 +9,8 @@ import {
 import { vs } from "react-syntax-highlighter/dist/cjs/styles/prism";
 import { vscDarkPlus } from "react-syntax-highlighter/dist/cjs/styles/prism";
 import { resolveHighlightLanguage } from "@/lib/prism-language";
+import { EDIT_MAX_BYTES } from "@/lib/file-types";
+import { FileEditorOverlay } from "./FileEditorOverlay";
 import ReactMarkdown from "react-markdown";
 import { useTheme } from "@/hooks/useTheme";
 import {
@@ -67,6 +69,8 @@ interface FileData {
   size: number;
   nextOffset: number;
   truncated: boolean;
+  /** Anchors the edit mode's lost-update guard (pi#81). */
+  mtimeMs?: number;
 }
 
 const SOURCE_HIGHLIGHT_MAX_LINES = 1_000;
@@ -221,7 +225,7 @@ function SourceCodeRenderer({ rows, stylesheet, useInlineStyles, wrapLines }: So
 
 function getFileApiUrl(
   filePath: string,
-  type: "read" | "download" | "meta" | "preview" | "watch" | "search",
+  type: "read" | "download" | "meta" | "preview" | "watch" | "search" | "save",
   sourceSessionId?: string | null,
   params: Record<string, string | number | undefined> = {},
 ): string {
@@ -1395,6 +1399,115 @@ function TextFileViewer({
   const viewerContent = data?.content ?? "";
   const sourceLines = useMemo(() => viewerContent.split("\n"), [viewerContent]);
 
+  // Edit mode (pi#81): whole-file overwrite with a lost-update guard.
+  // Only fully-loaded text files within the owner-approved 512KB ceiling
+  // are editable; a truncated preview means only part of the file is in
+  // hand, so entering edit first loads the remaining chunks.
+  const [editMode, setEditMode] = useState(false);
+  const [draft, setDraft] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [saveState, setSaveState] = useState<
+    | { kind: "conflict"; currentMtimeMs: number; expectedMtimeMs: number }
+    | { kind: "error"; detail: string }
+    | { kind: "saved" }
+    | null
+  >(null);
+  const [confirmExit, setConfirmExit] = useState<null | { redirectTo?: DisplayMode }>(null);
+  const draftCacheRef = useRef(new Map<string, string>());
+  const editable =
+    !isDeletedDiff
+    && !binaryInfo
+    && Boolean(data)
+    && data!.size <= EDIT_MAX_BYTES
+    && (!data!.truncated || data!.size <= EDIT_MAX_BYTES);
+  const editDisabledReason = binaryInfo
+    ? t("fileEdit.binaryBlocked")
+    : data && data.size > EDIT_MAX_BYTES
+      ? t("fileEdit.tooLarge")
+      : null;
+  const dirty = editMode && draft !== viewerContent;
+
+  const enterEdit = useCallback(async () => {
+    if (!editable || !data) return;
+    setSaveState(null);
+    setConfirmExit(null);
+    // A truncated-but-small file: fetch the remaining chunks so the draft
+    // covers the WHOLE file before any save (edits always overwrite whole).
+    let current = data;
+    while (current.truncated && current.size <= EDIT_MAX_BYTES) {
+      const next = await fetchContent(filePath, current.nextOffset);
+      if (!next || !next.truncated || next.nextOffset === current.nextOffset) break;
+      current = next;
+    }
+    setDraft(draftCacheRef.current.get(filePath) ?? current.content);
+    setEditMode(true);
+  }, [editable, data, fetchContent, filePath]);
+
+  const saveDraft = useCallback(async () => {
+    if (!data || saving) return;
+    setSaving(true);
+    setSaveState(null);
+    try {
+      const response = await fetch(getFileApiUrl(filePath, "save", sourceSessionId), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content: draft, expectedMtimeMs: data.mtimeMs ?? 0 }),
+      });
+      if (response.ok) {
+        const saved = (await response.json()) as { mtimeMs: number };
+        draftCacheRef.current.delete(filePath);
+        setData((current) => (
+          current ? { ...current, content: draft, truncated: false, nextOffset: current.size, mtimeMs: saved.mtimeMs } : current
+        ));
+        setEditMode(false);
+        setSaveState({ kind: "saved" });
+        setTimeout(() => setSaveState(null), 2000);
+        return;
+      }
+      const body = await response.json().catch(() => ({})) as { error?: string; currentMtimeMs?: number };
+      if (response.status === 409 && typeof body.currentMtimeMs === "number") {
+        // Never blind-overwrite: offer reload-or-stay only (owner-approved).
+        setSaveState({
+          kind: "conflict",
+          currentMtimeMs: body.currentMtimeMs,
+          expectedMtimeMs: data.mtimeMs ?? 0,
+        });
+      } else if (response.status === 413) {
+        setSaveState({ kind: "error", detail: t("fileEdit.tooLarge") });
+      } else if (response.status === 415) {
+        setSaveState({ kind: "error", detail: t("fileEdit.binaryBlocked") });
+      } else {
+        setSaveState({ kind: "error", detail: body.error ?? String(response.status) });
+      }
+    } catch (error) {
+      setSaveState({ kind: "error", detail: String(error) });
+    } finally {
+      setSaving(false);
+    }
+  }, [data, saving, filePath, sourceSessionId, draft, t]);
+
+  const exitEdit = useCallback((redirectTo?: DisplayMode) => {
+    if (dirty) {
+      setConfirmExit({ redirectTo });
+      return;
+    }
+    setEditMode(false);
+    setSaveState(null);
+    if (redirectTo) updateDisplayMode(redirectTo);
+  }, [dirty, updateDisplayMode]);
+
+  // Switching files parks the dirty draft per-path (no data loss) and
+  // leaves edit mode for the new file.
+  const lastFilePathRef = useRef(filePath);
+  useEffect(() => {
+    if (lastFilePathRef.current !== filePath) {
+      if (editMode && dirty) draftCacheRef.current.set(lastFilePathRef.current, draft);
+      setEditMode(false);
+      setConfirmExit(null);
+      setSaveState(null);
+      lastFilePathRef.current = filePath;
+    }
+  }, [filePath, editMode, dirty, draft]);
 
   const language = data?.language ?? "text";
   const isHtml = language === "html";
@@ -1686,8 +1799,12 @@ function TextFileViewer({
           flexShrink: 0,
         }}
       >
-        <span className="file-viewer-path" style={{ fontFamily: "var(--font-mono)" }} title={filePath}>
-          {getRelativeFilePath(filePath, cwd)}
+        <span
+          className="file-viewer-path"
+          style={{ fontFamily: "var(--font-mono)", color: dirty ? "var(--accent)" : undefined }}
+          title={dirty ? t("fileEdit.unsaved") : filePath}
+        >
+          {dirty ? "● " : ""}{getRelativeFilePath(filePath, cwd)}
         </span>
 
         <span className="file-viewer-meta" title={metadata}>{metadata}</span>
@@ -1712,7 +1829,11 @@ function TextFileViewer({
                   <button
                     key={mode}
                     type="button"
-                    onClick={() => updateDisplayMode(mode)}
+                    onClick={() => {
+                      // Dirty drafts confirm before any mode leaves the editor (pi#81).
+                      if (editMode && dirty) setConfirmExit({ redirectTo: mode });
+                      else updateDisplayMode(mode);
+                    }}
                     title={mode === "diff" ? t("i18n.compareHead") : undefined}
                     aria-pressed={active}
                     className="file-viewer-mode-button"
@@ -1757,6 +1878,54 @@ function TextFileViewer({
             )}
             {effectiveDisplayMode === "source" && (
               <>
+                {editable || editMode ? (
+                  <button
+                    type="button"
+                    onClick={() => (editMode ? exitEdit() : void enterEdit())}
+                    title={editMode ? t("fileEdit.exit") : editDisabledReason ?? t("fileEdit.edit")}
+                    aria-label={editMode ? t("fileEdit.exit") : t("fileEdit.edit")}
+                    aria-pressed={editMode}
+                    disabled={!editMode && !editable}
+                    className="file-viewer-icon-button"
+                    style={{
+                      background: editMode ? "var(--bg-selected)" : "transparent",
+                      color: editMode ? "var(--text)" : "var(--text-muted)",
+                    }}
+                  >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ display: "block" }}>
+                      <path d="M12 20h9" />
+                      <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" />
+                    </svg>
+                  </button>
+                ) : (
+                  <span
+                    title={editDisabledReason ?? t("fileEdit.edit")}
+                    aria-label={editDisabledReason ?? t("fileEdit.edit")}
+                    style={{ display: "inline-flex", width: 22, height: 22, alignItems: "center", justifyContent: "center", color: "var(--text-dim)", opacity: 0.5 }}
+                  >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ display: "block" }}>
+                      <path d="M12 20h9" />
+                      <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" />
+                    </svg>
+                  </span>
+                )}
+                {editMode && (
+                  <button
+                    type="button"
+                    onClick={() => void saveDraft()}
+                    disabled={saving || !dirty}
+                    title={t("fileEdit.saveButton")}
+                    aria-label={t("fileEdit.saveButton")}
+                    className="file-viewer-mode-button"
+                    style={{
+                      background: dirty ? "var(--accent)" : "transparent",
+                      color: dirty ? "#fff" : "var(--text-muted)",
+                      fontSize: 11,
+                    }}
+                  >
+                    {saving ? t("fileEdit.saving") : t("fileEdit.saveButton")}
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={() => {
@@ -1853,6 +2022,81 @@ function TextFileViewer({
         </div>
       )}
 
+      {(editMode || saveState || confirmExit) && (
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            flexWrap: "wrap",
+            gap: 8,
+            padding: "4px 12px",
+            borderBottom: "1px solid var(--border)",
+            background: "var(--bg-panel)",
+            color: "var(--text-muted)",
+            fontSize: 11,
+            flexShrink: 0,
+          }}
+          data-testid="file-edit-bar"
+        >
+          {confirmExit ? (
+            <>
+              <span>{t("fileEdit.unsaved")}</span>
+              <button type="button" className="file-viewer-mode-button" onClick={() => void (async () => { await saveDraft(); const target = confirmExit; setConfirmExit(null); setEditMode(false); if (target?.redirectTo) updateDisplayMode(target.redirectTo); })()}>
+                {t("fileEdit.save")}
+              </button>
+              <button
+                type="button"
+                className="file-viewer-mode-button"
+                onClick={() => {
+                  draftCacheRef.current.delete(filePath);
+                  const target = confirmExit;
+                  setConfirmExit(null);
+                  setEditMode(false);
+                  setSaveState(null);
+                  if (target?.redirectTo) updateDisplayMode(target.redirectTo);
+                }}
+              >
+                {t("fileEdit.discard")}
+              </button>
+              <button type="button" className="file-viewer-mode-button" onClick={() => setConfirmExit(null)}>
+                {t("fileEdit.stay")}
+              </button>
+            </>
+          ) : saveState?.kind === "conflict" ? (
+            <>
+              <span style={{ color: "#f59e0b" }}>{t("fileEdit.conflict")}</span>
+              <span title={`${t("fileEdit.conflictExpected")}: ${new Date(saveState.expectedMtimeMs).toISOString()}
+${t("fileEdit.conflictCurrent")}: ${new Date(saveState.currentMtimeMs).toISOString()}`}>
+                {t("fileEdit.conflictDetail")}
+              </span>
+              <button
+                type="button"
+                className="file-viewer-mode-button"
+                onClick={() => {
+                  // Reload from disk: the on-disk version wins, the draft is gone.
+                  draftCacheRef.current.delete(filePath);
+                  setDraft("");
+                  setEditMode(false);
+                  setSaveState(null);
+                  void fetchContent(filePath).finally(() => setLoadingMore(false));
+                }}
+              >
+                {t("fileEdit.reload")}
+              </button>
+              <button type="button" className="file-viewer-mode-button" onClick={() => setSaveState(null)}>
+                {t("fileEdit.stay")}
+              </button>
+            </>
+          ) : saveState?.kind === "error" ? (
+            <span style={{ color: "#ef4444" }}>{t("fileEdit.saveFailed")}: {saveState.detail}</span>
+          ) : saveState?.kind === "saved" ? (
+            <span style={{ color: "#4ade80" }}>{t("fileEdit.saved")}</span>
+          ) : (
+            <span>{t("fileEdit.editingLabel")}</span>
+          )}
+        </div>
+      )}
+
       {data?.truncated && (
         <div
           className="file-viewer-load-more"
@@ -1890,6 +2134,20 @@ function TextFileViewer({
         onScroll={(event) => {
           viewerStateRef.current.scrollTop = event.currentTarget.scrollTop;
           viewerStateRef.current.scrollLeft = event.currentTarget.scrollLeft;
+        }}
+        onKeyDown={(event) => {
+          // Ctrl/Cmd+E enters edit from any source-view focus (pi#81).
+          if (
+            (event.metaKey || event.ctrlKey)
+            && !event.altKey
+            && event.key.toLowerCase() === "e"
+            && !editMode
+            && editable
+            && effectiveDisplayMode === "source"
+          ) {
+            event.preventDefault();
+            void enterEdit();
+          }
         }}
         style={{ flex: 1, overflow: "auto", background: "var(--bg)", paddingBottom: data?.truncated ? 48 : undefined }}
       >
@@ -1980,6 +2238,28 @@ function TextFileViewer({
             }}
           >
             {lightweightSourceLines}
+          </div>
+        ) : editMode ? (
+          <div style={{ minHeight: "100%", background: "var(--bg)", ...FILE_CODE_STYLE }}>
+            <FileEditorOverlay
+              value={draft}
+              onChange={setDraft}
+              language={language}
+              isDark={isDark}
+              wrapLines={wrapLines}
+              onKeyDown={(event) => {
+                if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "s") {
+                  event.preventDefault();
+                  void saveDraft();
+                } else if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "e") {
+                  event.preventDefault();
+                  exitEdit();
+                } else if (event.key === "Escape") {
+                  event.preventDefault();
+                  exitEdit();
+                }
+              }}
+            />
           </div>
         ) : (
           highlightedSource

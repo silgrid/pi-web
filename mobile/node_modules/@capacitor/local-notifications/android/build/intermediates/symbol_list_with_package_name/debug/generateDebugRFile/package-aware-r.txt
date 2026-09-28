@@ -1,0 +1,2 @@
+com.capacitorjs.plugins.localnotifications
+drawable ic_transparent

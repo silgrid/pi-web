@@ -30,6 +30,7 @@ import { parseFormDataWithinLimit, RequestBodyTooLargeError } from "@/lib/bounde
 import { filePathFromApiSegments, samePath } from "@/lib/paths";
 import { fileLooksBinary, readTextPreviewChunk } from "@/lib/text-preview";
 import { searchFileText } from "@/lib/file-search";
+import { EDIT_MAX_BYTES, saveTextFileSafely } from "@/lib/file-edit";
 
 const IGNORED_NAMES = new Set([
   "node_modules", ".git", ".next", "__pycache__",
@@ -138,10 +139,62 @@ export async function POST(
 
   try {
     const { path: segments } = await params;
+    const type = request.nextUrl.searchParams.get("type") ?? "upload";
+
+    if (type === "save") {
+      // Edit-mode save (pi#81): overwrite an EXISTING text file with JSON
+      // body { content, expectedMtimeMs }. Same trust gate as every POST
+      // (isApiRequestAllowed above); the path must resolve to an existing
+      // regular file inside an allowed root with BOTH sides realpath-checked
+      // (isExistingFilePathAllowed), mirroring the audit-P1 upload chain.
+      const filePath = filePathFromApiSegments(segments);
+      const allowedRoots = await getAllowedFileRoots();
+      let stat: fs.Stats;
+      try {
+        stat = fs.statSync(filePath);
+      } catch {
+        return NextResponse.json({ error: "File not found" }, { status: 404 });
+      }
+      if (!stat.isFile()) {
+        return NextResponse.json({ error: "Not a file" }, { status: 400 });
+      }
+      if (!isExistingFilePathAllowed(filePath, allowedRoots)) {
+        return NextResponse.json({ error: "Access denied" }, { status: 403 });
+      }
+      if (stat.size > EDIT_MAX_BYTES) {
+        return NextResponse.json({ error: "File too large to edit (>512KB)" }, { status: 413 });
+      }
+      const body = await request.json().catch(() => null) as
+        | { content?: unknown; expectedMtimeMs?: unknown }
+        | null;
+      if (typeof body?.content !== "string" || typeof body?.expectedMtimeMs !== "number") {
+        return NextResponse.json(
+          { error: "Body must be { content: string, expectedMtimeMs: number }" },
+          { status: 400 },
+        );
+      }
+      const result = saveTextFileSafely(filePath, body.content, body.expectedMtimeMs);
+      if (result.status === "saved") {
+        return NextResponse.json({ mtimeMs: result.mtimeMs });
+      }
+      if (result.status === "conflict") {
+        return NextResponse.json(
+          { error: "fileChangedOnDisk", currentMtimeMs: result.currentMtimeMs },
+          { status: 409 },
+        );
+      }
+      if (result.status === "too-large") {
+        return NextResponse.json({ error: "File too large to edit (>512KB)" }, { status: 413 });
+      }
+      if (result.status === "binary") {
+        return NextResponse.json({ error: "binaryContent" }, { status: 415 });
+      }
+      return NextResponse.json({ error: "File not found" }, { status: 404 });
+    }
+
     const uploadDirectory = await getUploadDirectory(segments);
     if ("response" in uploadDirectory) return uploadDirectory.response;
     const { directory } = uploadDirectory;
-    const type = request.nextUrl.searchParams.get("type") ?? "upload";
 
     if (type === "upload-check") {
       const body = await request.json().catch(() => null) as { fileNames?: unknown } | null;
@@ -571,7 +624,8 @@ export async function GET(
       }
       const chunk = readTextPreviewChunk(filePath, stat.size, offset);
       const language = getLanguage(filePath);
-      return NextResponse.json({ ...chunk, language, size: stat.size });
+      // mtimeMs anchors the edit mode's lost-update guard (pi#81).
+      return NextResponse.json({ ...chunk, language, size: stat.size, mtimeMs: stat.mtimeMs });
     }
 
     if (type === "search") {

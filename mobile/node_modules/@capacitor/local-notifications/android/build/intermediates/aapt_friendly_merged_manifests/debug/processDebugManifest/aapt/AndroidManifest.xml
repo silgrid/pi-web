@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.capacitorjs.plugins.localnotifications" >
+
+    <uses-sdk android:minSdkVersion="23" />
+
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <application>
+        <receiver android:name="com.capacitorjs.plugins.localnotifications.TimedNotificationPublisher" />
+        <receiver android:name="com.capacitorjs.plugins.localnotifications.NotificationDismissReceiver" />
+        <receiver
+            android:name="com.capacitorjs.plugins.localnotifications.LocalNotificationRestoreReceiver"
+            android:directBootAware="true"
+            android:exported="false" >
+            <intent-filter>
+                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+            </intent-filter>
+        </receiver>
+    </application>
+
+</manifest>

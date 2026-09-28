@@ -1,0 +1,25 @@
+{
+	"appId": "app.piweb.mobile",
+	"appName": "pi-web",
+	"webDir": "src/pages",
+	"android": {
+		"adjustMarginsForEdgeToEdge": "auto"
+	},
+	"server": {
+		"errorPath": "connection-error.html",
+		"cleartext": true,
+		"hostname": "app.piweb.mobile",
+		"androidScheme": "https",
+		"iosScheme": "capacitor"
+	},
+	"plugins": {
+		"Keyboard": {
+			"resize": "native",
+			"resizeOnFullScreen": true
+		},
+		"LocalNotifications": {
+			"smallIcon": "ic_launcher",
+			"iconColor": "#3ddc84"
+		}
+	}
+}

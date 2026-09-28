@@ -1,0 +1,134 @@
+[
+    {
+        "merged": "app.piweb.mobile.app-debug-34:/mipmap-xxhdpi_ic_launcher_round.png.flat",
+        "source": "app.piweb.mobile.app-main-36:/mipmap-xxhdpi/ic_launcher_round.png"
+    },
+    {
+        "merged": "app.piweb.mobile.app-debug-34:/xml_config.xml.flat",
+        "source": "app.piweb.mobile.app-main-36:/xml/config.xml"
+    },
+    {
+        "merged": "app.piweb.mobile.app-debug-34:/mipmap-hdpi_ic_launcher_foreground.png.flat",
+        "source": "app.piweb.mobile.app-main-36:/mipmap-hdpi/ic_launcher_foreground.png"
+    },
+    {
+        "merged": "app.piweb.mobile.app-debug-34:/mipmap-mdpi_ic_launcher_foreground.png.flat",
+        "source": "app.piweb.mobile.app-main-36:/mipmap-mdpi/ic_launcher_foreground.png"
+    },
+    {
+        "merged": "app.piweb.mobile.app-debug-34:/layout_activity_main.xml.flat",
+        "source": "app.piweb.mobile.app-main-36:/layout/activity_main.xml"
+    },
+    {
+        "merged": "app.piweb.mobile.app-debug-34:/mipmap-anydpi-v26_ic_launcher.xml.flat",
+        "source": "app.piweb.mobile.app-main-36:/mipmap-anydpi-v26/ic_launcher.xml"
+    },
+    {
+        "merged": "app.piweb.mobile.app-debug-34:/drawable-land-xxxhdpi_splash.png.flat",
+        "source": "app.piweb.mobile.app-main-36:/drawable-land-xxxhdpi/splash.png"
+    },
+    {
+        "merged": "app.piweb.mobile.app-debug-34:/mipmap-xxhdpi_ic_launcher.png.flat",
+        "source": "app.piweb.mobile.app-main-36:/mipmap-xxhdpi/ic_launcher.png"
+    },
+    {
+        "merged": "app.piweb.mobile.app-debug-34:/drawable-anydpi-v24_ic_launcher_foreground.xml.flat",
+        "source": "app.piweb.mobile.app-pngs-30:/drawable-anydpi-v24/ic_launcher_foreground.xml"
+    },
+    {
+        "merged": "app.piweb.mobile.app-debug-34:/mipmap-xxxhdpi_ic_launcher_foreground.png.flat",
+        "source": "app.piweb.mobile.app-main-36:/mipmap-xxxhdpi/ic_launcher_foreground.png"
+    },
+    {
+        "merged": "app.piweb.mobile.app-debug-34:/mipmap-hdpi_ic_launcher.png.flat",
+        "source": "app.piweb.mobile.app-main-36:/mipmap-hdpi/ic_launcher.png"
+    },
+    {
+        "merged": "app.piweb.mobile.app-debug-34:/drawable-port-xhdpi_splash.png.flat",
+        "source": "app.piweb.mobile.app-main-36:/drawable-port-xhdpi/splash.png"
+    },
+    {
+        "merged": "app.piweb.mobile.app-debug-34:/mipmap-xhdpi_ic_launcher_round.png.flat",
+        "source": "app.piweb.mobile.app-main-36:/mipmap-xhdpi/ic_launcher_round.png"
+    },
+    {
+        "merged": "app.piweb.mobile.app-debug-34:/mipmap-xxxhdpi_ic_launcher.png.flat",
+        "source": "app.piweb.mobile.app-main-36:/mipmap-xxxhdpi/ic_launcher.png"
+    },
+    {
+        "merged": "app.piweb.mobile.app-debug-34:/mipmap-xhdpi_ic_launcher.png.flat",
+        "source": "app.piweb.mobile.app-main-36:/mipmap-xhdpi/ic_launcher.png"
+    },
+    {
+        "merged": "app.piweb.mobile.app-debug-34:/drawable-land-xhdpi_splash.png.flat",
+        "source": "app.piweb.mobile.app-main-36:/drawable-land-xhdpi/splash.png"
+    },
+    {
+        "merged": "app.piweb.mobile.app-debug-34:/drawable-port-xxhdpi_splash.png.flat",
+        "source": "app.piweb.mobile.app-main-36:/drawable-port-xxhdpi/splash.png"
+    },
+    {
+        "merged": "app.piweb.mobile.app-debug-34:/drawable_ic_launcher_background.xml.flat",
+        "source": "app.piweb.mobile.app-main-36:/drawable/ic_launcher_background.xml"
+    },
+    {
+        "merged": "app.piweb.mobile.app-debug-34:/mipmap-mdpi_ic_launcher_round.png.flat",
+        "source": "app.piweb.mobile.app-main-36:/mipmap-mdpi/ic_launcher_round.png"
+    },
+    {
+        "merged": "app.piweb.mobile.app-debug-34:/drawable-land-hdpi_splash.png.flat",
+        "source": "app.piweb.mobile.app-main-36:/drawable-land-hdpi/splash.png"
+    },
+    {
+        "merged": "app.piweb.mobile.app-debug-34:/drawable-land-xxhdpi_splash.png.flat",
+        "source": "app.piweb.mobile.app-main-36:/drawable-land-xxhdpi/splash.png"
+    },
+    {
+        "merged": "app.piweb.mobile.app-debug-34:/mipmap-xhdpi_ic_launcher_foreground.png.flat",
+        "source": "app.piweb.mobile.app-main-36:/mipmap-xhdpi/ic_launcher_foreground.png"
+    },
+    {
+        "merged": "app.piweb.mobile.app-debug-34:/drawable_splash.png.flat",
+        "source": "app.piweb.mobile.app-main-36:/drawable/splash.png"
+    },
+    {
+        "merged": "app.piweb.mobile.app-debug-34:/xml_file_paths.xml.flat",
+        "source": "app.piweb.mobile.app-main-36:/xml/file_paths.xml"
+    },
+    {
+        "merged": "app.piweb.mobile.app-debug-34:/mipmap-xxxhdpi_ic_launcher_round.png.flat",
+        "source": "app.piweb.mobile.app-main-36:/mipmap-xxxhdpi/ic_launcher_round.png"
+    },
+    {
+        "merged": "app.piweb.mobile.app-debug-34:/mipmap-mdpi_ic_launcher.png.flat",
+        "source": "app.piweb.mobile.app-main-36:/mipmap-mdpi/ic_launcher.png"
+    },
+    {
+        "merged": "app.piweb.mobile.app-debug-34:/mipmap-xxhdpi_ic_launcher_foreground.png.flat",
+        "source": "app.piweb.mobile.app-main-36:/mipmap-xxhdpi/ic_launcher_foreground.png"
+    },
+    {
+        "merged": "app.piweb.mobile.app-debug-34:/mipmap-anydpi-v26_ic_launcher_round.xml.flat",
+        "source": "app.piweb.mobile.app-main-36:/mipmap-anydpi-v26/ic_launcher_round.xml"
+    },
+    {
+        "merged": "app.piweb.mobile.app-debug-34:/drawable-port-mdpi_splash.png.flat",
+        "source": "app.piweb.mobile.app-main-36:/drawable-port-mdpi/splash.png"
+    },
+    {
+        "merged": "app.piweb.mobile.app-debug-34:/mipmap-hdpi_ic_launcher_round.png.flat",
+        "source": "app.piweb.mobile.app-main-36:/mipmap-hdpi/ic_launcher_round.png"
+    },
+    {
+        "merged": "app.piweb.mobile.app-debug-34:/drawable-port-hdpi_splash.png.flat",
+        "source": "app.piweb.mobile.app-main-36:/drawable-port-hdpi/splash.png"
+    },
+    {
+        "merged": "app.piweb.mobile.app-debug-34:/drawable-port-xxxhdpi_splash.png.flat",
+        "source": "app.piweb.mobile.app-main-36:/drawable-port-xxxhdpi/splash.png"
+    },
+    {
+        "merged": "app.piweb.mobile.app-debug-34:/drawable-land-mdpi_splash.png.flat",
+        "source": "app.piweb.mobile.app-main-36:/drawable-land-mdpi/splash.png"
+    }
+]
