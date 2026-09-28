@@ -213,6 +213,7 @@ export const enLocale: LocalePlugin = {
     "tabs.new": "New",
     "tabs.newSession": "New session",
     "tabs.openPanes": "Open panes",
+    "tabs.reorderRoleDescription": "reorderable tab, drag to reorder",
     "layout.resizeHeightHint": "Drag vertically to resize. Double-click or press Enter to reset.",
     "sidebar.new": "New",
     "sidebar.newSessionTitle": "New session in {path}",

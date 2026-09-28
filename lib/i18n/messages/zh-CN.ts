@@ -213,6 +213,7 @@ export const zhCNLocale: LocalePlugin = {
     "tabs.new": "新建",
     "tabs.newSession": "新建会话",
     "tabs.openPanes": "打开窗格列表",
+    "tabs.reorderRoleDescription": "可拖拽排序的标签页",
     "layout.resizeHeightHint": "上下拖动调整高度。双击或按 Enter 恢复默认值。",
     "sidebar.new": "新建",
     "sidebar.newSessionTitle": "在 {path} 中新建会话",
