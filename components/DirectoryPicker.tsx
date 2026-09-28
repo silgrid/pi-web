@@ -775,11 +775,11 @@ export function createBrowseRowManageFlow(deps: {
  * One browsed-directory row (props-only presentational export): a row
  * CONTAINER holding the navigation button and — only when the store owner
  * provided the callbacks — the pin and “New” affordances plus the
- * hover-revealed manage affordances (pencil rename / trash delete, wi
- * pi#59) as SIBLINGS of the navigation button (never nested, so clicking
- * them cannot trigger row navigation). The manage buttons carry the
- * `.directory-picker-row-manage` class and NO inline display style — the
- * stylesheet alone owns their hover/focus/coarse-pointer reveal.
+ * always-visible manage affordances (pencil rename / trash delete, wi
+   * pi#59; always-visible since pi#76) as SIBLINGS of the navigation button
+   * (never nested, so clicking them cannot trigger row navigation). The
+   * manage buttons carry the `.directory-picker-row-manage` class — the
+   * stylesheet keeps them visible in every pointer mode.
  */
 export function PickerBrowseRow({
   entry,
@@ -1573,8 +1573,9 @@ export function DirectoryPicker({ onCancel, onSelect, initialPath, busy = false,
                 className="directory-picker-entry"
                 type="button"
                 onClick={() => navigateTo(parentDirectory ?? undefined)}
+                disabled={loading || !canNavigateUp}
                 title={t("directoryPicker.goToParent")}
-                style={{ flex: 1, minWidth: 0, minHeight: 30, display: "flex", alignItems: "center", gap: 7, padding: "5px 8px", border: 0, borderRadius: 5, background: "none", color: "var(--text-muted)", cursor: "pointer", textAlign: "left", fontFamily: "var(--font-mono)", fontSize: 11 }}
+                style={{ flex: 1, minWidth: 0, minHeight: 30, display: "flex", alignItems: "center", gap: 7, padding: "5px 8px", border: 0, borderRadius: 5, background: "none", color: "var(--text-muted)", cursor: loading || !canNavigateUp ? "default" : "pointer", textAlign: "left", fontFamily: "var(--font-mono)", fontSize: 11, opacity: loading || !canNavigateUp ? 0.45 : 1 }}
               >
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                   <path d="m18 15-6-6-6 6" />

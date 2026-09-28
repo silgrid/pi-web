@@ -1494,11 +1494,8 @@ pre, code {
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
 }
 
-/* Browse-row manage affordances (wi pi#59): pencil/trash stay hidden
-   until the row is hovered or keyboard-focused, and are always visible on
-   coarse-pointer/touch devices where hover does not exist. The buttons
-   carry no inline `display` style — this stylesheet is the single owner of
-   their visibility. */
+/* Directory-picker row manage buttons (rename/delete): always visible —
+   pi#76 dropped the hover-reveal; hover only adjusts their color. */
 .directory-picker-row-manage {
   display: inline-flex;
 }
