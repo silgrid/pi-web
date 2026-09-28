@@ -550,6 +550,8 @@ export const enLocale: LocalePlugin = {
     "i18n.source": "Source",
     "i18n.preview": "Preview",
     "i18n.diff": "Diff",
+    "files.binaryFileTitle": "Binary file",
+    "files.binaryFileHint": "This file type cannot be displayed as text. Download it to inspect the contents.",
     "i18n.downloadFile": "Download file",
     "i18n.liveSync": "Live sync active",
     "i18n.notWatching": "Not watching",

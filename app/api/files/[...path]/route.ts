@@ -28,7 +28,7 @@ import {
 } from "@/lib/file-upload";
 import { parseFormDataWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-form-data";
 import { filePathFromApiSegments, samePath } from "@/lib/paths";
-import { readTextPreviewChunk } from "@/lib/text-preview";
+import { fileLooksBinary, readTextPreviewChunk } from "@/lib/text-preview";
 
 const IGNORED_NAMES = new Set([
   "node_modules", ".git", ".next", "__pycache__",
@@ -557,6 +557,16 @@ export async function GET(
       const offset = Number(rawOffset ?? 0);
       if (!Number.isSafeInteger(offset) || offset > stat.size) {
         return NextResponse.json({ error: "Invalid text preview offset" }, { status: 400 });
+      }
+      // Unrecognized-type binaries would render as UTF-8 mojibake in the text
+      // viewer (owner report, pi#75): sniff the leading window for a NUL byte
+      // and answer a typed refusal carrying the download pointer instead.
+      // Offset reads skip the sniff — the client panel replaces the whole view.
+      if (offset === 0 && fileLooksBinary(filePath)) {
+        return NextResponse.json(
+          { error: "binaryFile", name: path.basename(filePath), size: stat.size },
+          { status: 415 },
+        );
       }
       const chunk = readTextPreviewChunk(filePath, stat.size, offset);
       const language = getLanguage(filePath);

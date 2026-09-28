@@ -1141,6 +1141,7 @@ function TextFileViewer({
   const { isDark } = useTheme();
   const { t } = useI18n();
   const [data, setData] = useState<FileData | null>(null);
+  const [binaryInfo, setBinaryInfo] = useState<{ name: string; size: number | null } | null>(null);
   const [gitDiff, setGitDiff] = useState<GitFileDiffResponse | null>(null);
   const [gitDiffLoading, setGitDiffLoading] = useState(false);
   const [gitDiffResolved, setGitDiffResolved] = useState(false);
@@ -1216,14 +1217,30 @@ function TextFileViewer({
   const fetchContent = useCallback((filePath: string, offset = 0) => {
     const requestId = ++contentRequestRef.current;
     return fetch(getFileApiUrl(filePath, "read", sourceSessionId, { offset: offset || undefined }))
-      .then((r) => r.json())
-      .then((d: FileData & { error?: string }) => {
+      .then(async (r): Promise<{ binary: { error: "binaryFile"; name: string; size: number } } | { data: FileData & { error?: string } }> => {
+        if (r.status === 415) {
+          // Unrecognized-type binary (server NUL sniff, pi#75): the typed body
+          // carries the download pointer for the panel instead of mojibake text.
+          const binary = await r.json() as { error: "binaryFile"; name: string; size: number };
+          return { binary };
+        }
+        return { data: await r.json() as FileData & { error?: string } };
+      })
+      .then((parsed) => {
         if (requestId !== contentRequestRef.current) return null;
+        if ("binary" in parsed) {
+          setError(null);
+          setBinaryInfo({ name: parsed.binary.name, size: parsed.binary.size });
+          return null;
+        }
+        const d = parsed.data;
         if (d.error) {
+          setBinaryInfo(null);
           setError(d.error);
           return null;
         }
         setError(null);
+        setBinaryInfo(null);
         setData((current) => offset && current
           ? { ...d, content: current.content + d.content }
           : d);
@@ -1268,6 +1285,7 @@ function TextFileViewer({
     let active = true;
     setLoading(true);
     setError(null);
+    setBinaryInfo(null);
     setData(null);
     setGitDiff(null);
     setGitDiffResolved(false);
@@ -1530,6 +1548,38 @@ function TextFileViewer({
     return (
       <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "#f87171", fontSize: 13 }}>
         {error}
+      </div>
+    );
+  }
+
+  if (binaryInfo) {
+    return (
+      <div style={{ height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 10, color: "var(--text-muted)", fontSize: 13, padding: 16, textAlign: "center" }}>
+        <div style={{ fontSize: 15, color: "var(--text)" }}>{t("files.binaryFileTitle")}</div>
+        <div>{t("files.binaryFileHint")}</div>
+        {binaryInfo.size != null && (
+          <div style={{ fontSize: 11 }}>{formatSize(binaryInfo.size)}</div>
+        )}
+        <a
+          href={getFileApiUrl(filePath, "download", sourceSessionId)}
+          download={getFileName(filePath)}
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 6,
+            padding: "6px 14px",
+            marginTop: 4,
+            fontSize: 12,
+            color: "var(--text)",
+            background: "var(--bg-hover)",
+            border: "1px solid var(--border)",
+            borderRadius: 7,
+            cursor: "pointer",
+            textDecoration: "none",
+          }}
+        >
+          {t("i18n.downloadFile")}
+        </a>
       </div>
     );
   }

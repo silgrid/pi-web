@@ -550,6 +550,8 @@ export const zhTWLocale: LocalePlugin = {
     "i18n.source": "原始碼",
     "i18n.preview": "預覽",
     "i18n.diff": "Diff",
+    "files.binaryFileTitle": "二進位檔案",
+    "files.binaryFileHint": "此檔案類型無法按文字顯示，請下載後查看。",
     "i18n.downloadFile": "下載檔案",
     "i18n.liveSync": "即時同步已啟用",
     "i18n.notWatching": "未監看",
