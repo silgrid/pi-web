@@ -1,4 +1,4 @@
-import { reorderById } from "./tab-order";
+import { reorderById } from "./tab-order.ts";
 
 export interface PaneTab {
   sessionId: string;
