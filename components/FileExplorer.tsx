@@ -223,6 +223,42 @@ function DismissButton({ onClick, title }: { onClick: () => void; title: string 
   );
 }
 
+// Indentation guides (VSCode-style): one thin vertical line per ancestor
+// level, positioned to line up with that ancestor's own chevron column.
+// Every row deeper than a given ancestor draws that ancestor's segment
+// (exactly matching the row's own 24px height), so stacked sibling rows
+// with no gaps assemble into one continuous line for as long as the
+// ancestor's subtree stays visible — no separate "last child" bookkeeping
+// needed. Rendered as absolutely positioned children of the row box
+// (which is already `position: relative`), so this never affects layout,
+// row height, or the marginLeft-based indent geometry those are measured
+// against (wi pi#57).
+const INDENT_STEP = 14;
+const GUIDE_INSET = 13; // row paddingLeft (8) + half the chevron width (5)
+
+function IndentGuides({ depth }: { depth: number }) {
+  if (depth <= 0) return null;
+  return (
+    <>
+      {Array.from({ length: depth }, (_, i) => (
+        <span
+          key={i}
+          aria-hidden="true"
+          style={{
+            position: "absolute",
+            top: 0,
+            bottom: 0,
+            left: GUIDE_INSET - INDENT_STEP * (i + 1),
+            width: 1,
+            background: "var(--border)",
+            pointerEvents: "none",
+          }}
+        />
+      ))}
+    </>
+  );
+}
+
 function TreeNode({
   node,
   depth,
@@ -235,6 +271,8 @@ function TreeNode({
   highlightedPaths,
   gitStatusByPath,
   changedDirectoryPaths,
+  activeFilePath,
+  onActivateFile,
   t,
 }: {
   node: FileNode;
@@ -248,10 +286,15 @@ function TreeNode({
   highlightedPaths: Set<string>;
   gitStatusByPath: Map<string, GitFileStatus>;
   changedDirectoryPaths: Set<string>;
+  /** Full path of the file currently shown in the editor/preview pane, for
+   *  the "currently open" row highlight (distinct from hover). */
+  activeFilePath?: string | null;
+  onActivateFile?: (fullPath: string) => void;
   t: Translate;
 }) {
   const open = expandedPaths.has(node.fullPath);
   const highlighted = highlightedPaths.has(node.fullPath);
+  const active = !node.isDir && activeFilePath === node.fullPath;
   const normalizedPath = normalizeFilePathSlashes(node.fullPath);
   const gitStatus = gitStatusByPath.get(normalizedPath);
   const containsGitChanges = node.isDir && (
@@ -295,9 +338,10 @@ function TreeNode({
       onToggleExpanded(node.fullPath, next);
       if (next && !loaded) loadChildren();
     } else {
+      onActivateFile?.(node.fullPath);
       onOpenFile(node.fullPath, node.name);
     }
-  }, [node.isDir, node.fullPath, node.name, loaded, open, loadChildren, onOpenFile, onToggleExpanded]);
+  }, [node.isDir, node.fullPath, node.name, loaded, open, loadChildren, onActivateFile, onOpenFile, onToggleExpanded]);
 
   return (
     <div>
@@ -322,16 +366,22 @@ function TreeNode({
           paddingRight: 8,
           height: 24,
           cursor: "pointer",
-          background: hovered ? "var(--bg-hover)" : "transparent",
+          // Three distinct, theme-token-only states: plain / hovered /
+          // active (selected — the currently open file). Active wins over
+          // hover so mousing over the open file does not read as merely
+          // hovered.
+          background: active ? "var(--bg-selected)" : hovered ? "var(--bg-hover)" : "transparent",
+          boxShadow: active ? "inset 2px 0 0 var(--accent)" : "none",
           borderRadius: 4,
           userSelect: "none",
         }}
       >
+        <IndentGuides depth={depth} />
         {node.isDir && (
           <svg
             width="10" height="10" viewBox="0 0 10 10" fill="none"
-            stroke="var(--text-dim)" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"
-            style={{ flexShrink: 0, transform: open ? "rotate(90deg)" : "none", transition: "transform 0.1s" }}
+            stroke={hovered || open ? "var(--text-muted)" : "var(--text-dim)"} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+            style={{ flexShrink: 0, transform: open ? "rotate(90deg)" : "none", transition: "transform 0.12s ease" }}
           >
             <polyline points="3 2 7 5 3 8" />
           </svg>
@@ -470,11 +520,14 @@ function TreeNode({
               highlightedPaths={highlightedPaths}
               gitStatusByPath={gitStatusByPath}
               changedDirectoryPaths={changedDirectoryPaths}
+              activeFilePath={activeFilePath}
+              onActivateFile={onActivateFile}
               t={t}
             />
           ))}
           {children.length === 0 && loaded && (
-            <div style={{ marginLeft: (depth + 2) * 14, paddingLeft: 8, fontSize: 11, color: "var(--text-dim)", height: 22, display: "flex", alignItems: "center" }}>
+            <div style={{ position: "relative", marginLeft: (depth + 2) * 14, paddingLeft: 8, fontSize: 11, color: "var(--text-dim)", height: 22, display: "flex", alignItems: "center" }}>
+              <IndentGuides depth={depth + 1} />
               empty
             </div>
           )}
@@ -493,12 +546,16 @@ function ChangeRow({
   cwd,
   onOpenFile,
   onAtMention,
+  active,
+  onActivateFile,
   t,
 }: {
   status: GitFileStatus;
   cwd: string;
   onOpenFile: OpenFileHandler;
   onAtMention?: (relativePath: string, isDir: boolean) => void;
+  active?: boolean;
+  onActivateFile?: (fullPath: string) => void;
   t: Translate;
 }) {
   const [hovered, setHovered] = useState(false);
@@ -510,7 +567,7 @@ function ChangeRow({
   const baseName = lastSlash >= 0 ? rel.slice(lastSlash + 1) : rel;
   return (
     <div
-      onClick={() => onOpenFile(status.filePath, name, { modeHint: "diff" })}
+      onClick={() => { onActivateFile?.(status.filePath); onOpenFile(status.filePath, name, { modeHint: "diff" }); }}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
       title={status.filePath}
@@ -522,7 +579,8 @@ function ChangeRow({
         paddingRight: 8,
         height: 24,
         cursor: "pointer",
-        background: hovered ? "var(--bg-hover)" : "transparent",
+        background: active ? "var(--bg-selected)" : hovered ? "var(--bg-hover)" : "transparent",
+        boxShadow: active ? "inset 2px 0 0 var(--accent)" : "none",
         borderRadius: 4,
         userSelect: "none",
         position: "relative",
@@ -624,6 +682,12 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
   const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set());
   const [treeRefreshKey, setTreeRefreshKey] = useState(0);
   const [highlightedPaths, setHighlightedPaths] = useState<Set<string>>(new Set());
+  // The most recently activated (clicked) file row, purely a local visual
+  // record — clicking a file already opens it immediately (existing
+  // interaction model), so this just remembers which one for the
+  // "currently open / selected" row highlight. No new behavior: it does
+  // not change what onOpenFile receives or when it fires.
+  const [activeFilePath, setActiveFilePath] = useState<string | null>(null);
   const [gitFiles, setGitFiles] = useState<GitFileStatus[]>([]);
   const [gitLineStats, setGitLineStats] = useState({ additions: 0, deletions: 0 });
   const [uploadPhase, setUploadPhase] = useState<UploadPhase>("idle");
@@ -869,6 +933,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
       setUploadSummary(null);
       setPendingConflict(null);
       setUploadError(null);
+      setActiveFilePath(null);
     }
 
     setLoading(cwdChanged);
@@ -1092,6 +1157,8 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
                     highlightedPaths={highlightedPaths}
                     gitStatusByPath={gitStatusByPath}
                     changedDirectoryPaths={changedDirectoryPaths}
+                    activeFilePath={activeFilePath}
+                    onActivateFile={setActiveFilePath}
                     t={t}
                   />
                 ))}
@@ -1125,6 +1192,8 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
               cwd={cwd}
               onOpenFile={onOpenFile}
               onAtMention={onAtMention}
+              active={activeFilePath === status.filePath}
+              onActivateFile={setActiveFilePath}
               t={t}
             />
           ))}
@@ -1152,6 +1221,8 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
                 highlightedPaths={highlightedPaths}
                 gitStatusByPath={gitStatusByPath}
                 changedDirectoryPaths={changedDirectoryPaths}
+                activeFilePath={activeFilePath}
+                onActivateFile={setActiveFilePath}
                 t={t}
               />
             ))
