@@ -72,8 +72,12 @@ test("the sidebar reads the filter through the shared lib and derives visibleSes
   // preview cut, without restoring the oversized list payload.
   assert.match(
     source,
-    /const visibleSessions = useMemo\(\s*\(\) => showFilteredSessions \|\| sessionFilterPatterns\.length === 0\s*\? allSessions\s*: allSessions\.filter\(\(session\) => \(\s*!isSessionFiltered\(session, sessionFilterPatterns\)\s*&& !serverFilterMatchedIds\.has\(session\.id\)\s*\)\),/,
+    /const visibleSessions = useMemo\(\s*\(\) => filterSessionsByAge\(\s*showFilteredSessions \|\| sessionFilterPatterns\.length === 0\s*\? allSessions\s*: allSessions\.filter\(\(session\) => \(\s*!isSessionFiltered\(session, sessionFilterPatterns\)\s*&& !serverFilterMatchedIds\.has\(session\.id\)\s*\)\),\s*sessionAgeFilterDays,\s*\)/,
   );
+  // pi#82: the age window composes after the worker filter inside the
+  // same memo, so one derivation stays the single source of visible rows.
+  assert.match(source, /filterSessionsByAge,/);
+  assert.match(source, /sessionFilter\.ageFilterDays/);
   // The server match is fetched against the pattern list it is applied to,
   // and a response from older patterns never leaks into newer ones.
   assert.match(source, /fetch\(`\/api\/sessions\/filter-match\?patterns=\$\{encodeURIComponent\(JSON\.stringify\(sessionFilterPatterns\)\)\}`/);

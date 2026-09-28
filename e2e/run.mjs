@@ -232,6 +232,13 @@ try {
   browser = await chromium.launch();
   for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 }]) {
     context = await browser.newContext({ viewport, locale: "en-US" });
+    // pi#82: the sidebar's age filter defaults to 7 days, and every fixture
+    // session carries its real (weeks-old) last-activity timestamp — the
+    // filter would legitimately hide them. The age semantics are unit-tested
+    // in lib/session-filter.test.mjs; the pass list runs with the filter off.
+    await context.addInitScript(() => {
+      try { window.localStorage.setItem("pi-web:session-age-filter-days", "0"); } catch {}
+    });
     await context.tracing.start({ screenshots: true, snapshots: true });
     page = await context.newPage();
     page.setDefaultTimeout(30_000);

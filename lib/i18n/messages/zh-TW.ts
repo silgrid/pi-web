@@ -47,6 +47,8 @@ export const zhTWLocale: LocalePlugin = {
     "sidebar.showHiddenSessions": "顯示{count}個隱藏會話",
     "settings.sessionFilter": "會話過濾",
     "settings.sessionFilterDescription": "在側邊欄隱藏 worker 會話。每行一條子串（大小寫不敏感）：會話名稱或首則訊息包含任一行即被隱藏。",
+    "settings.sessionAgeDays": "會話清單：只顯示最近 N 天",
+    "settings.sessionAgeDaysDescription": "側邊欄只顯示最近 N 天內有過更新的會話。0 表示不過濾（顯示全部）。預設 7。",
     "settings.sessionFilterPatternsLabel": "過濾規則（每行一條）",
     "settings.showFilteredSessions": "顯示被過濾的會話",
     "auth.prompt": "登入後繼續使用",

@@ -33,6 +33,9 @@ import {
   setSessionFilterPatterns,
   setShowFilteredSessions,
   sessionFilterStorage,
+  getSessionFilterState,
+  DEFAULT_SESSION_AGE_FILTER_DAYS,
+  setSessionAgeFilterDays,
 } from "@/lib/session-filter";
 import { SkillsConfig } from "./SkillsConfig";
 import { AgentsConfig } from "./AgentsConfig";
@@ -93,10 +96,15 @@ function GeneralSettings({ sessionId, onSessionReloaded, quoteSelectionEnabled, 
     () => DEFAULT_SESSION_FILTER_PATTERNS.join("\n"),
   );
   const [showFilteredSessions, setShowFilteredSessionsState] = useState(false);
+  // Session age window (pi#82): hydrated after mount like the other
+  // client-persisted values; every change persists through the shared store
+  // so the sidebar (and this field) update without a reload.
+  const [ageFilterDays, setAgeFilterDaysState] = useState(DEFAULT_SESSION_AGE_FILTER_DAYS);
 
   useEffect(() => {
     setSessionFilterRulesText(loadSessionFilterPatterns(sessionFilterStorage()).join("\n"));
     setShowFilteredSessionsState(loadShowFilteredSessions(sessionFilterStorage()));
+    setAgeFilterDaysState(getSessionFilterState().ageFilterDays);
   }, []);
 
   useEffect(() => {
@@ -325,6 +333,26 @@ function GeneralSettings({ sessionId, onSessionReloaded, quoteSelectionEnabled, 
             onChange={handleShowFilteredSessionsChange}
           />
         </div>
+        <div className="settings-shell-option">
+          <span>{t("settings.sessionAgeDays")}</span>
+          <input
+            type="number"
+            min={0}
+            max={365}
+            step={1}
+            value={ageFilterDays}
+            onChange={(event) => {
+              const days = Math.round(Number(event.target.value));
+              setAgeFilterDaysState(Number.isFinite(days) ? Math.max(0, Math.min(365, days)) : 0);
+              setSessionAgeFilterDays(days);
+            }}
+            aria-label={t("settings.sessionAgeDays")}
+            title={t("settings.sessionAgeDaysDescription")}
+            className="settings-age-filter-input"
+            data-testid="session-age-filter-input"
+          />
+        </div>
+        <p className="settings-general-description">{t("settings.sessionAgeDaysDescription")}</p>
       </section>
 
       {shellSettings?.isWindows && (

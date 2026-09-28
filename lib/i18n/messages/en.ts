@@ -47,6 +47,8 @@ export const enLocale: LocalePlugin = {
     "sidebar.showHiddenSessions": "Show {count} hidden sessions",
     "settings.sessionFilter": "Session filter",
     "settings.sessionFilterDescription": "Hide worker sessions from the sidebar. One substring per line (case-insensitive): a session whose name or first message contains any line is hidden.",
+    "settings.sessionAgeDays": "Session list: show last N days",
+    "settings.sessionAgeDaysDescription": "Only sessions modified within the last N days appear in the sidebar. 0 shows every session. Default 7.",
     "settings.sessionFilterPatternsLabel": "Filter patterns (one per line)",
     "settings.showFilteredSessions": "Show filtered sessions",
     "auth.prompt": "Sign in to continue",
