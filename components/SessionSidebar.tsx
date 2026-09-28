@@ -163,6 +163,12 @@ interface Props {
   ) => void;
   onOpenFile?: (filePath: string, fileName: string, options?: { sourceSessionId?: string | null; modeHint?: "diff" }) => void;
   onOpenTerminal?: (cwd: string) => void;
+  /** Full path of the file currently shown in the editor/preview pane (the
+   *  real active file-tab identity from AppShell), for the explorer's
+   *  "currently open" row highlight. Not a local echo — this is the same
+   *  value AppShell derives from its file-tab state, so it tracks the
+   *  TabBar, tab-close fallback, and any other path that opens a file. */
+  activeFilePath?: string | null;
   explorerRefreshKey?: number;
   onExplorerRefresh?: () => void;
   onAtMention?: (relativePath: string, isDir: boolean) => void;
@@ -643,7 +649,7 @@ function PiWebTitle() {
   );
 }
 
-export function SessionSidebar({ selectedSessionId, highlightSessionId, followHighlightIntoView, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, onOpenTerminal, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions, onBackgroundTaskDone, onRunningSessionIdsChange, onSessionsChange, onExternalSessionChange }: Props) {
+export function SessionSidebar({ selectedSessionId, highlightSessionId, followHighlightIntoView, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, onOpenTerminal, activeFilePath, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions, onBackgroundTaskDone, onRunningSessionIdsChange, onSessionsChange, onExternalSessionChange }: Props) {
   const { t } = useI18n();
   // Split-view follow: the row highlight reads the focus-derived id when the
   // shell passes one and falls back to the classic selection otherwise.
@@ -2311,6 +2317,7 @@ export function SessionSidebar({ selectedSessionId, highlightSessionId, followHi
                 onOpenFile={onOpenFile ?? (() => {})}
                 onAtMention={onAtMention}
                 onAtMentions={onAtMentions}
+                activeFilePath={activeFilePath ?? null}
                 onUploadBusyChange={setExplorerUploadBusy}
                 changesCollapsed={changesCollapsed}
                 onChangesCountChange={setChangesCount}
