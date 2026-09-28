@@ -565,10 +565,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // collapsing back to the fresh 50-entry window. The state hooks then
       // only need the server's tree/leaf/stats — never a history reset.
       const cached = getSessionViewSnapshot(sid);
+      // pi#83: the window-preservation branch also requires the client to
+      // actually HOLD those messages. A hover prefetch (lib/session-prefetch)
+      // can land a snapshot WHILE this force read is in flight on a fresh
+      // mount — messagesRef.current is still [] then, and trusting the
+      // revision alone blanked the pane (adopt the server window instead).
       const revisionUnchanged = Boolean(
         d.snapshotRevision
         && cached?.revision === d.snapshotRevision
-        && cached.entryIds.length >= (d.context.entryIds ?? []).length,
+        && cached.entryIds.length >= (d.context.entryIds ?? []).length
+        && messagesRef.current.length > 0,
       );
       const persistedMessages = revisionUnchanged ? messagesRef.current : d.context.messages;
       setData(revisionUnchanged

@@ -486,6 +486,23 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
   // Only render the last N messages initially. When the user scrolls to the
   // top, load another page while keeping the scroll position stable.
   const [visibleCount, setVisibleCount] = useState(VISIBLE_PAGE_SIZE);
+  // pi#83: render mirror of loadingOlderRef — the sentinel shows a spinner
+  // while an older page is in flight, and freshly prepended rows fade in.
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  const [prependedIds, setPrependedIds] = useState<ReadonlySet<string>>(new Set());
+  const prependedTimerRef = useRef<number | null>(null);
+  const markPrepended = useCallback((ids: readonly string[]) => {
+    if (ids.length === 0) return;
+    setPrependedIds(new Set(ids));
+    if (prependedTimerRef.current !== null) window.clearTimeout(prependedTimerRef.current);
+    prependedTimerRef.current = window.setTimeout(() => {
+      prependedTimerRef.current = null;
+      setPrependedIds(new Set());
+    }, 400);
+  }, []);
+  useEffect(() => () => {
+    if (prependedTimerRef.current !== null) window.clearTimeout(prependedTimerRef.current);
+  }, []);
   const sentinelRef = useRef<HTMLDivElement>(null);
   const messageContentRef = useRef<HTMLDivElement | null>(null);
   const prevScrollAnchorRef = useRef<ScrollAnchorSnapshot | null>(null);
@@ -677,16 +694,25 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
         const sid = session?.id ?? sessionIdRef.current;
         if (!sid) return;
         loadingOlderRef.current = true;
+        setLoadingOlder(true);
         prevScrollAnchorRef.current = captureScrollAnchor(
           container.scrollHeight,
           container.scrollTop,
           container.querySelector<HTMLElement>("[data-entry-id]")?.dataset.entryId ?? null,
         );
-        void loadContext(sid, activeLeafId, oldestId).finally(() => {
-          loadingOlderRef.current = false;
-        });
+        void loadContext(sid, activeLeafId, oldestId)
+          .then((context) => {
+            // pi#83: mark the prepended page's entries so their rows fade in.
+            if (context) markPrepended(context.entryIds);
+          })
+          .finally(() => {
+            loadingOlderRef.current = false;
+            setLoadingOlder(false);
+          });
       },
-      { root: container, threshold: 0 }
+      // pi#83: prefetch — start loading ~1.5 viewport-heights BEFORE the
+      // sentinel scrolls into view, so normal scrolling rarely sees the wait.
+      { root: container, rootMargin: "150% 0px 0px 0px", threshold: 0 }
     );
     observer.observe(sentinel);
     return () => observer.disconnect();
@@ -694,7 +720,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
     // an older page can exist), so the observer must be created when it flips;
     // the history cursor deliberately stays OUT of the deps — recreating the
     // observer per page delivered the cascading initial callbacks (see above).
-  }, [hasEarlierMessages, session, activeLeafId, loadContext, sessionIdRef, scrollContainerRef]);
+  }, [hasEarlierMessages, session, activeLeafId, loadContext, sessionIdRef, scrollContainerRef, markPrepended]);
 
   // Keep the rendered window at least as large as what's loaded, so prepended
   // (older) pages stay visible instead of being sliced off the top.
@@ -1184,7 +1210,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
                 );
                 if (!isVisible || currentRefIdx === undefined) return view;
                 return (
-                  <div key={`${keyPrefix}-${messageKey}`} data-entry-id={entryIds[idx]} ref={options.attachRef === false ? undefined : attachVisibleRef(idx, currentRefIdx)}>
+                  <div key={`${keyPrefix}-${messageKey}`} data-entry-id={entryIds[idx]} className={prependedIds.has(entryIds[idx]) ? "chat-row-prepended" : undefined} ref={options.attachRef === false ? undefined : attachVisibleRef(idx, currentRefIdx)}>
                     {view}
                   </div>
                 );
@@ -1304,8 +1330,18 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
               return (
                 <>
                   {hasMore && (
-                     <div ref={sentinelRef} className="py-3 text-center text-xs text-text-muted">
-                       {t("chat.loadEarlier")}
+                     <div ref={sentinelRef} className="py-3 text-center text-xs text-text-muted" aria-live="polite">
+                       {loadingOlder ? (
+                         <span className="chat-load-earlier-spinner" role="status" aria-label={t("chat.loadingEarlier")}>
+                           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true" style={{ display: "inline-block", verticalAlign: "-2px" }}>
+                             <g>
+                               <path d="M21 12a9 9 0 1 1-3.8-7.4" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" />
+                               <animateTransform attributeName="transform" type="rotate" from="0 12 12" to="360 12 12" dur="0.9s" repeatCount="indefinite" />
+                             </g>
+                           </svg>{" "}
+                           {t("chat.loadingEarlier")}
+                         </span>
+                       ) : t("chat.loadEarlier")}
                     </div>
                   )}
                   {rendered.slice(startIndex)}

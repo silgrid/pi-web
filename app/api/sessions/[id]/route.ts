@@ -15,6 +15,7 @@ import {
   readSessionHeader,
 } from "@/lib/session-reader";
 import { sessionPathKey } from "@/lib/session-path";
+import { cachedSessionBuild } from "@/lib/context-build-cache";
 import { abortSubagent, getRpcSession, getRpcSessionInfos } from "@/lib/rpc-manager";
 import { projectTreeForResponse, toSummaryTree } from "@/lib/project-tree";
 import { computeSessionTotalActiveMs } from "@/lib/session-timing";
@@ -60,28 +61,49 @@ export async function GET(
     const filePath = liveRpc?.sessionFile || sm.getSessionFile() || resolvedPath || "";
     const entries = sm.getEntries();
     const leafId = sm.getLeafId();
+    const header = sm.getHeader();
     const summaryTree = searchParams.get("tree") === "summary";
-    const tree = summaryTree
-      ? toSummaryTree(projectTreeForResponse(sm.getTree()))
-      : projectTreeForResponse(sm.getTree());
-    perf?.span("tree");
     const deferThinking = searchParams.has("deferThinking");
     const deferToolResultImages = searchParams.has("deferMedia");
     const rawTail = Number(searchParams.get("tail"));
     const tail = Number.isFinite(rawTail) && rawTail > 0 ? Math.min(rawTail, 1000) : 50;
-    const context = buildSessionContext(entries as never, leafId, {
-      deferThinking,
-      deferToolResultImages,
-      tail,
-      sessionId: id, // local: lazy URLs for historical tool-result images
-    });
+    // pi#83: the pure builds below (tree projection, context window, stats,
+    // subagent scan) are memoized against the on-disk fingerprint, so re-opening
+    // a tab or the client's background freshness read costs ~nothing when
+    // nothing appended. Live RPC sessions bypass the cache (they mutate).
+    const bundle = cachedSessionBuild(
+      liveRpc ? "" : (resolvedPath || sm.getSessionFile() || ""),
+      { route: "detail", summaryTree, deferThinking, deferToolResultImages, tail, leafId },
+      () => {
+        const builtTree = summaryTree
+          ? toSummaryTree(projectTreeForResponse(sm.getTree()))
+          : projectTreeForResponse(sm.getTree());
+        const builtContext = buildSessionContext(entries as never, leafId, {
+          deferThinking,
+          deferToolResultImages,
+          tail,
+          sessionId: id, // local: lazy URLs for historical tool-result images
+        });
+        return {
+          tree: builtTree,
+          context: builtContext,
+          stats: computeSessionStats(entries as unknown as SessionEntry[]),
+          totalActiveMs: computeSessionTotalActiveMs(entries),
+          subagent: header
+            ? readSubagentRun(entries as never, header.id, filePath)
+            : null,
+          toolNames: readSubagentSessionResources(entries as never)?.tools
+            ?? readSessionToolSelection(entries as never),
+        };
+      },
+    );
+    const tree = bundle.tree;
+    const context = bundle.context;
+    const stats = bundle.stats;
+    const totalActiveMs = bundle.totalActiveMs;
+    const subagent = bundle.subagent;
+    const toolNames = bundle.toolNames;
     perf?.span("context");
-    const totalActiveMs = computeSessionTotalActiveMs(entries);
-    // Cumulative usage over ALL entries, including history compacted away —
-    // the same aggregation the SDK's getSessionStats() uses. Lets the client
-    // keep monotonic token/cost counters across compaction and page reloads.
-    const stats = computeSessionStats(entries as unknown as SessionEntry[]);
-    perf?.span("stats");
     // Opaque freshness token for the session view cache. Derived from the
     // disk fingerprint and the actual read source; null tells the client the
     // snapshot is unstable and must not be cached as fresh.
@@ -97,17 +119,11 @@ export async function GET(
     const firstUserEntry = entries.find((entry) => entry.type === "message" && entry.message.role === "user");
     const firstUserMessage = firstUserEntry?.type === "message" ? firstUserEntry.message : undefined;
 
-    const header = sm.getHeader();
     let modified = header?.timestamp ?? new Date().toISOString();
     try { modified = statSync(filePath).mtime.toISOString(); } catch { /* use header timestamp */ }
     const parentSessionId = header?.parentSession
       ? await resolveSessionIdByPath(header.parentSession)
       : undefined;
-    const subagent = header
-      ? readSubagentRun(entries as never, header.id, filePath)
-      : null;
-    const toolNames = readSubagentSessionResources(entries as never)?.tools
-      ?? readSessionToolSelection(entries as never);
     const info = header ? (await attachSessionProjectInfo([{
       path: filePath,
       id: header.id,

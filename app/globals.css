@@ -2101,3 +2101,32 @@ span.token.table {
   border-color: var(--accent);
   outline: none;
 }
+
+/* Scroll-up history loading (pi#83): sentinel spinner affordance and the
+   fade-in of freshly prepended rows. The fade class is removed by timeout,
+   so removal never re-triggers the animation. */
+.chat-load-earlier-spinner {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-muted);
+}
+
+@keyframes chat-row-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.chat-row-prepended {
+  animation: chat-row-fade-in 160ms ease-out both;
+}
+@media (prefers-reduced-motion: reduce) {
+  .chat-row-prepended {
+    animation: none;
+  }
+}
