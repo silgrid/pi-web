@@ -1567,6 +1567,22 @@ export function DirectoryPicker({ onCancel, onSelect, initialPath, busy = false,
         )}
 
         <div className="directory-picker-list" style={{ flex: 1, minHeight: 0, overflow: "auto", padding: "8px 10px" }}>
+          {canNavigateUp && (
+            <div className="directory-picker-row" style={{ display: "flex", alignItems: "stretch" }}>
+              <button
+                className="directory-picker-entry"
+                type="button"
+                onClick={() => navigateTo(parentDirectory ?? undefined)}
+                title={t("directoryPicker.goToParent")}
+                style={{ flex: 1, minWidth: 0, minHeight: 30, display: "flex", alignItems: "center", gap: 7, padding: "5px 8px", border: 0, borderRadius: 5, background: "none", color: "var(--text-muted)", cursor: "pointer", textAlign: "left", fontFamily: "var(--font-mono)", fontSize: 11 }}
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="m18 15-6-6-6 6" />
+                </svg>
+                {t("directoryPicker.goToParent")}
+              </button>
+            </div>
+          )}
           {loading ? (
             <div style={{ padding: 8, color: "var(--text-dim)", fontSize: 11 }}>{t("directoryPicker.loadingDirectories")}</div>
           ) : drives !== null ? (

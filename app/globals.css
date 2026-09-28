@@ -1500,16 +1500,7 @@ pre, code {
    carry no inline `display` style — this stylesheet is the single owner of
    their visibility. */
 .directory-picker-row-manage {
-  display: none;
-}
-.directory-picker-row:hover .directory-picker-row-manage,
-.directory-picker-row:focus-within .directory-picker-row-manage {
   display: inline-flex;
-}
-@media (pointer: coarse) {
-  .directory-picker-row-manage {
-    display: inline-flex;
-  }
 }
 
 @media (max-width: 640px) {
