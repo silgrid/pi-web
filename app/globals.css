@@ -1983,3 +1983,104 @@ span.token.table {
     white-space: pre;
   }
 }
+
+/* ------------------------------------------------------------------ */
+/* In-tab search (pi#80): floating bar + CSS Custom Highlight painting */
+/* ------------------------------------------------------------------ */
+
+.tab-search-bar {
+  position: absolute;
+  top: 10px;
+  right: 18px;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 6px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-panel);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18);
+  font-size: 12px;
+}
+
+.tab-search-input {
+  width: 180px;
+  padding: 3px 6px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font-size: 12px;
+  outline: none;
+}
+.tab-search-input:focus {
+  border-color: var(--accent);
+}
+
+.tab-search-counter {
+  min-width: 44px;
+  text-align: center;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.tab-search-toggle,
+.tab-search-nav,
+.tab-search-close,
+.tab-search-extra {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 22px;
+  height: 22px;
+  padding: 0 4px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-family: var(--font-mono, monospace);
+  cursor: pointer;
+}
+.tab-search-toggle:hover,
+.tab-search-nav:hover:not(:disabled),
+.tab-search-close:hover,
+.tab-search-extra:hover:not(:disabled) {
+  background: var(--bg-selected);
+  color: var(--text);
+}
+.tab-search-toggle-active {
+  background: var(--bg-selected);
+  color: var(--text);
+}
+.tab-search-nav:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.tab-search-earlier-note {
+  position: absolute;
+  top: calc(100% + 2px);
+  right: 0;
+  padding: 2px 6px;
+  border-radius: 5px;
+  background: var(--bg-selected);
+  color: var(--text-muted);
+  font-size: 10px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+.tab-search-earlier-note:empty {
+  display: none;
+}
+
+/* CSS Custom Highlight API painting (lib/tab-search registers the
+   ranges; browsers without the API degrade to navigation-only). */
+::highlight(pi-tab-search-all) {
+  background-color: rgba(250, 204, 21, 0.35);
+}
+::highlight(pi-tab-search-current) {
+  background-color: rgba(249, 115, 22, 0.75);
+}

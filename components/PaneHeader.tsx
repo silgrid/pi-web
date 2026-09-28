@@ -30,6 +30,10 @@ interface PaneHeaderProps {
   onDragEnd?: (event: React.DragEvent<HTMLButtonElement>) => void;
   /** Localized aria-roledescription announcing the tab is drag-reorderable. */
   reorderRoleDescription?: string;
+  /** In-tab search opener (pi#80): raises the pane's floating search bar. */
+  onSearch?: () => void;
+  /** Localized aria-label/title for the search affordance. */
+  searchLabel?: string;
 }
 
 export function PaneHeader({
@@ -49,6 +53,8 @@ export function PaneHeader({
   onDrop,
   onDragEnd,
   reorderRoleDescription,
+  onSearch,
+  searchLabel,
 }: PaneHeaderProps) {
   const dropIndicatorShadow = dropIndicator === "before"
     ? "inset 3px 0 0 0 var(--accent)"
@@ -117,6 +123,43 @@ export function PaneHeader({
           }}
           aria-label="completed"
         />
+      )}
+      {onSearch && (
+        <span
+          role="button"
+          tabIndex={0}
+          aria-label={searchLabel ?? "Search in tab"}
+          title={searchLabel ?? "Search in tab"}
+          onClick={(e) => {
+            e.stopPropagation();
+            onSearch();
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.stopPropagation();
+              e.preventDefault();
+              onSearch();
+            }
+          }}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            width: 18,
+            height: 18,
+            borderRadius: 4,
+            lineHeight: 1,
+            color: "var(--text-dim)",
+            cursor: "pointer",
+            flexShrink: 0,
+            marginLeft: 2,
+          }}
+        >
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden="true" style={{ display: "block" }}>
+            <circle cx="11" cy="11" r="6.5" stroke="currentColor" strokeWidth="2" />
+            <path d="M16 16 L21 21" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+          </svg>
+        </span>
       )}
       <span
         role="button"

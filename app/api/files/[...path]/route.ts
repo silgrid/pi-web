@@ -29,6 +29,7 @@ import {
 import { parseFormDataWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-form-data";
 import { filePathFromApiSegments, samePath } from "@/lib/paths";
 import { fileLooksBinary, readTextPreviewChunk } from "@/lib/text-preview";
+import { searchFileText } from "@/lib/file-search";
 
 const IGNORED_NAMES = new Set([
   "node_modules", ".git", ".next", "__pycache__",
@@ -46,7 +47,7 @@ const IGNORED_NAMES = new Set([
 const BUILD_OUTPUT_NAMES = new Set(["dist", "build"]);
 const IGNORED_SUFFIXES = [".pyc"];
 
-const FILE_REQUEST_TYPES = ["list", "read", "download", "meta", "preview", "watch"] as const;
+const FILE_REQUEST_TYPES = ["list", "read", "download", "meta", "preview", "search", "watch"] as const;
 type FileRequestType = typeof FILE_REQUEST_TYPES[number];
 const FILE_REQUEST_TYPE_SET = new Set<string>(FILE_REQUEST_TYPES);
 const MAX_UPLOAD_FILE_BYTES = 25 * 1024 * 1024;
@@ -571,6 +572,42 @@ export async function GET(
       const chunk = readTextPreviewChunk(filePath, stat.size, offset);
       const language = getLanguage(filePath);
       return NextResponse.json({ ...chunk, language, size: stat.size });
+    }
+
+    if (type === "search") {
+      if (!stat?.isFile()) {
+        return NextResponse.json({ error: "Not a file" }, { status: 400 });
+      }
+      const query = (request.nextUrl.searchParams.get("q") ?? "").trim();
+      if (!query) {
+        return NextResponse.json({ matches: [], truncated: false });
+      }
+      if (query.length > 200) {
+        return NextResponse.json({ error: "Search query exceeds 200 characters" }, { status: 400 });
+      }
+      if (fileLooksBinary(filePath)) {
+        // Same typed refusal shape the read branch answers with (pi#75):
+        // binary files have no text to search.
+        return NextResponse.json(
+          { error: "binaryFile", name: path.basename(filePath), size: stat.size },
+          { status: 415 },
+        );
+      }
+      const rawOffset = request.nextUrl.searchParams.get("offset");
+      if (rawOffset !== null && !/^\d+$/.test(rawOffset)) {
+        return NextResponse.json({ error: "Invalid search offset" }, { status: 400 });
+      }
+      const offset = Number(rawOffset ?? 0);
+      if (!Number.isSafeInteger(offset) || offset > stat.size) {
+        return NextResponse.json({ error: "Invalid search offset" }, { status: 400 });
+      }
+      const response = await searchFileText(filePath, query, {
+        offset,
+        caseSensitive: request.nextUrl.searchParams.has("case"),
+        regex: request.nextUrl.searchParams.has("regex"),
+        signal: request.signal,
+      });
+      return NextResponse.json(response);
     }
 
     if (type === "download") {
