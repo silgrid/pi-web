@@ -50,6 +50,7 @@ import {
 import { workspaceKeyOf } from "@/lib/workspace-memory";
 import { formatRelativeTime } from "@/lib/i18n/format";
 import { useI18n } from "@/hooks/useI18n";
+import { RunningSessionIndicator } from "@/components/RunningSessionIndicator";
 import { useResizablePanel } from "@/hooks/useResizablePanel";
 import { useScrollbarVisibility } from "@/hooks/useScrollbarVisibility";
 import { DirectoryPicker } from "./DirectoryPicker";
@@ -2317,43 +2318,6 @@ export function SessionSidebar({ selectedSessionId, highlightSessionId, followHi
   );
 }
 
-function RunningSessionIndicator() {
-  const { t } = useI18n();
-  return (
-    <span
-      title={t("sidebar.agentRunning")}
-      aria-label={t("sidebar.agentRunning")}
-      style={{
-        width: 14,
-        height: 14,
-        display: "inline-flex",
-        alignItems: "center",
-        justifyContent: "center",
-        flexShrink: 0,
-        color: "var(--accent)",
-      }}
-    >
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true" style={{ display: "block" }}>
-        <g>
-          <path
-            d="M21 12a9 9 0 1 1-3.8-7.4"
-            stroke="currentColor"
-            strokeWidth="2.8"
-            strokeLinecap="round"
-          />
-          <animateTransform
-            attributeName="transform"
-            type="rotate"
-            from="0 12 12"
-            to="360 12 12"
-            dur="0.9s"
-            repeatCount="indefinite"
-          />
-        </g>
-      </svg>
-    </span>
-  );
-}
 
 function UnreadSessionIndicator() {
   const { t } = useI18n();

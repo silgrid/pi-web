@@ -1,5 +1,7 @@
 "use client";
 
+import { RunningSessionIndicator } from "@/components/RunningSessionIndicator";
+
 // Embedded pane header (pi#25): each pane column carries its own header row
 // instead of the old shared tab strip. The header keeps tab semantics
 // (role="tab" + aria-selected, keyboard focus, running dot, completion badge,
@@ -92,18 +94,7 @@ export function PaneHeader({
         transition: "background 0.1s, color 0.1s",
       }}
     >
-      {running && (
-        <span
-          style={{
-            width: 6,
-            height: 6,
-            borderRadius: "50%",
-            background: "var(--accent)",
-            flexShrink: 0,
-          }}
-          aria-hidden="true"
-        />
-      )}
+      {running && <RunningSessionIndicator />}
       <span
         style={{
           minWidth: 0,
