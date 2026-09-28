@@ -1,3 +1,5 @@
+import { reorderById } from "./tab-order";
+
 export interface PaneTab {
   sessionId: string;
   label: string;
@@ -88,6 +90,25 @@ export function openPane(
   const existing = tabs.find((t) => t.sessionId === sessionId);
   if (existing) return tabs;
   return [...tabs, { sessionId, label, projectName, hasBadge: false }];
+}
+
+/**
+ * Drag-to-reorder for the session pane strip (pi#70): moves the pane
+ * identified by `draggedSessionId` next to `targetSessionId`. Every other
+ * field of the moved tab (in particular its `sessionId`, so its bound
+ * session/pane mapping) is untouched — only its position in the array
+ * changes. `tabs` is the same array the pi#42 restore/persistence channel
+ * (`lib/pane-tab-state.ts`'s `writeOpenPaneTabs`) already reads, so feeding
+ * the result back into `paneTabs` state is enough for the new order to
+ * survive a reload with no separate storage.
+ */
+export function reorderPaneTabs(
+  tabs: PaneTab[],
+  draggedSessionId: string,
+  targetSessionId: string,
+  after: boolean,
+): PaneTab[] {
+  return reorderById(tabs, (tab) => tab.sessionId, draggedSessionId, targetSessionId, after);
 }
 
 // --- New-session tab (pi#21) ---

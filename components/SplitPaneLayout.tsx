@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState, forwardRef, useImperativeHand
 import { PaneHeader } from "./PaneHeader";
 import { useI18n } from "@/hooks/useI18n";
 import { useChatAppearance } from "@/hooks/useChatAppearance";
+import { useTabDragReorder } from "@/hooks/useTabDragReorder";
 import {
   isPlainClick,
   paneWidth,
@@ -24,6 +25,8 @@ interface SplitPaneLayoutProps {
   onFocusPane: (sessionId: string) => void;
   onClosePane: (sessionId: string) => void;
   renderPane: (sessionId: string, focused: boolean) => React.ReactNode;
+  /** Drag-to-reorder (pi#70): fired once per drop with the final triple. */
+  onReorderPane?: (draggedId: string, targetId: string, after: boolean) => void;
 }
 
 // Embedded pane headers (pi#25): the old shared tab strip is gone. Each pane
@@ -41,10 +44,21 @@ function SplitPaneLayoutInner(
     onFocusPane,
     onClosePane,
     renderPane,
+    onReorderPane,
   },
   ref,
 ) {
   const { t } = useI18n();
+  // Drag-to-reorder (pi#70): the pane area is a single strip, so
+  // useTabDragReorder's per-element dragover/drop is all it needs — there is
+  // no cross-strip surface here to guard against separately.
+  const handleReorderPane = useCallback(
+    (draggedId: string, targetId: string, after: boolean) => {
+      onReorderPane?.(draggedId, targetId, after);
+    },
+    [onReorderPane],
+  );
+  const { draggedId, dropTarget, getDragHandlers } = useTabDragReorder(handleReorderPane);
   const paneContainerRef = useRef<HTMLDivElement>(null);
   const paneRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   const overflowTriggerRef = useRef<HTMLButtonElement>(null);
@@ -170,7 +184,12 @@ function SplitPaneLayoutInner(
           minHeight: 0,
         }}
       >
-        {tabs.map((tab) => (
+        {tabs.map((tab) => {
+          const dragHandlers = getDragHandlers(tab.sessionId);
+          const dropIndicator: "before" | "after" | null = dropTarget?.id === tab.sessionId
+            ? (dropTarget.after ? "after" : "before")
+            : null;
+          return (
           <div
             key={tab.sessionId}
             ref={(el) => {
@@ -200,6 +219,15 @@ function SplitPaneLayoutInner(
                 onFocusPane(tab.sessionId);
               }}
               onClose={() => onClosePane(tab.sessionId)}
+              draggable={dragHandlers.draggable}
+              isDragging={draggedId === tab.sessionId}
+              dropIndicator={dropIndicator}
+              onDragStart={dragHandlers.onDragStart}
+              onDragOver={dragHandlers.onDragOver}
+              onDragLeave={dragHandlers.onDragLeave}
+              onDrop={dragHandlers.onDrop}
+              onDragEnd={dragHandlers.onDragEnd}
+              reorderRoleDescription={t("tabs.reorderRoleDescription")}
             />
             {/* The pane's tabpanel: the embedded header's controlled region.
                 A flex column so the pane content (ChatWindow) keeps its
@@ -220,7 +248,8 @@ function SplitPaneLayoutInner(
               {renderPane(tab.sessionId, tab.sessionId === focusedId)}
             </div>
           </div>
-        ))}
+          );
+        })}
       </div>
       {overflowed && (
         <>

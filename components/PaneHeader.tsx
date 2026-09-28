@@ -16,17 +16,58 @@ interface PaneHeaderProps {
   focused: boolean;
   onClick: () => void;
   onClose: () => void;
+  /** Drag-to-reorder (pi#70): spread from useTabDragReorder.getDragHandlers. */
+  draggable?: boolean;
+  isDragging?: boolean;
+  /** Insertion-position indicator: which side of THIS header a drop would land on. */
+  dropIndicator?: "before" | "after" | null;
+  onDragStart?: (event: React.DragEvent<HTMLButtonElement>) => void;
+  onDragOver?: (event: React.DragEvent<HTMLButtonElement>) => void;
+  onDragLeave?: (event: React.DragEvent<HTMLButtonElement>) => void;
+  onDrop?: (event: React.DragEvent<HTMLButtonElement>) => void;
+  onDragEnd?: (event: React.DragEvent<HTMLButtonElement>) => void;
+  /** Localized aria-roledescription announcing the tab is drag-reorderable. */
+  reorderRoleDescription?: string;
 }
 
-export function PaneHeader({ id, label, running, hasBadge, focused, onClick, onClose }: PaneHeaderProps) {
+export function PaneHeader({
+  id,
+  label,
+  running,
+  hasBadge,
+  focused,
+  onClick,
+  onClose,
+  draggable,
+  isDragging,
+  dropIndicator,
+  onDragStart,
+  onDragOver,
+  onDragLeave,
+  onDrop,
+  onDragEnd,
+  reorderRoleDescription,
+}: PaneHeaderProps) {
+  const dropIndicatorShadow = dropIndicator === "before"
+    ? "inset 3px 0 0 0 var(--accent)"
+    : dropIndicator === "after"
+      ? "inset -3px 0 0 0 var(--accent)"
+      : undefined;
   return (
     <button
       type="button"
       id={id}
       role="tab"
       aria-selected={focused}
+      aria-roledescription={reorderRoleDescription}
       onClick={onClick}
       title={label}
+      draggable={draggable}
+      onDragStart={onDragStart}
+      onDragOver={onDragOver}
+      onDragLeave={onDragLeave}
+      onDrop={onDrop}
+      onDragEnd={onDragEnd}
       style={{
         display: "flex",
         alignItems: "center",
@@ -46,6 +87,8 @@ export function PaneHeader({ id, label, running, hasBadge, focused, onClick, onC
         whiteSpace: "nowrap",
         overflow: "hidden",
         textOverflow: "ellipsis",
+        opacity: isDragging ? 0.4 : 1,
+        boxShadow: dropIndicatorShadow,
         transition: "background 0.1s, color 0.1s",
       }}
     >
