@@ -2,12 +2,13 @@
 
 import { useEffect, useState, useRef, useCallback, useMemo, type CSSProperties, type MouseEvent } from "react";
 import {
-  Prism as SyntaxHighlighter,
+  PrismAsyncLight as SyntaxHighlighter,
   createElement as renderSyntaxNode,
   type SyntaxHighlighterProps,
 } from "react-syntax-highlighter";
 import { vs } from "react-syntax-highlighter/dist/cjs/styles/prism";
 import { vscDarkPlus } from "react-syntax-highlighter/dist/cjs/styles/prism";
+import { resolveHighlightLanguage } from "@/lib/prism-language";
 import ReactMarkdown from "react-markdown";
 import { useTheme } from "@/hooks/useTheme";
 import {
@@ -1382,7 +1383,7 @@ function TextFileViewer({
     () => (
       <SyntaxHighlighter
         className={wrapLines ? "file-source-view is-wrapped" : "file-source-view"}
-        language={language === "text" ? "plaintext" : language}
+        language={language === "text" ? "plaintext" : resolveHighlightLanguage(language)}
         style={isDark ? vscDarkPlus : vs}
         showLineNumbers
         lineNumberStyle={{
