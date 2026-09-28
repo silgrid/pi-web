@@ -1955,51 +1955,6 @@ export function SessionSidebar({ selectedSessionId, highlightSessionId, followHi
         }}
       >
         <SessionSearch open={sessionSearchOpen} query={sessionSearchQuery} selectedSessionId={selectedSessionId} onSelectSession={handleSelectSessionFromList}>
-        {/* Hidden-count badge (wi pi#65): the only visible affordance that
-            rows are being hidden. Clicking it toggles the reveal switch
-            through the shared live store (setShowFilteredSessions), so the
-            sidebar list and the Settings toggle stay in sync instantly. */}
-        {hiddenSessionCount > 0 && (
-          <button
-            type="button"
-            onClick={() => setShowFilteredSessions(!showFilteredSessions)}
-            title={t(showFilteredSessions ? "sidebar.hiddenByFilterShownTitle" : "sidebar.hiddenByFilterTitle")}
-            aria-pressed={showFilteredSessions}
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 5,
-              margin: "4px 14px 0",
-              padding: "3px 8px",
-              flexShrink: 0,
-              width: "fit-content",
-              fontSize: 11,
-              lineHeight: 1.4,
-              color: "var(--text-muted)",
-              background: "var(--bg-hover)",
-              border: "1px solid var(--border)",
-              borderRadius: 6,
-              cursor: "pointer",
-            }}
-          >
-            {showFilteredSessions ? (
-              // Open eye (reveal ON): the filtered sessions are showing, not hidden.
-              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
-                <path d="M1 12s3-8 11-8 11 8 11 8-3 8-11 8-11-8-11-8Z" />
-                <circle cx="12" cy="12" r="3" />
-              </svg>
-            ) : (
-              // Crossed eye (reveal OFF): the matching sessions are hidden.
-              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
-                <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-10-8-10-8a18.45 18.45 0 0 1 5.06-5.94" />
-                <path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 10 8 10 8a18.5 18.5 0 0 1-2.16 3.19" />
-                <path d="M14.12 14.12a3 3 0 1 1-4.24-4.24" />
-                <line x1="1" y1="1" x2="23" y2="23" />
-              </svg>
-            )}
-            {t(showFilteredSessions ? "sidebar.hiddenByFilterShown" : "sidebar.hiddenByFilter", { count: hiddenSessionCount })}
-          </button>
-        )}
         <div
           ref={listScrollRef}
           onScroll={handleListScroll}
@@ -2148,6 +2103,37 @@ export function SessionSidebar({ selectedSessionId, highlightSessionId, followHi
         )}
         </div>
         </SessionSearch>
+        {hiddenSessionCount > 0 && (
+          /* Hidden-sessions toggle (wi pi#73, refines pi#65): relocated to the
+             bottom of the list and restyled after the explorer's build-outputs
+             checkbox. Checking it reveals the filtered rows through the shared
+             live store (setShowFilteredSessions), keeping Settings in sync. */
+          <label
+            title={t("sidebar.showHiddenSessions", { count: hiddenSessionCount })}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 5,
+              width: "100%",
+              padding: "4px 14px",
+              flexShrink: 0,
+              fontSize: 10,
+              color: "var(--text-dim)",
+              cursor: "pointer",
+              userSelect: "none",
+              borderTop: "1px solid var(--border)",
+            }}
+          >
+            <input
+              type="checkbox"
+              checked={showFilteredSessions}
+              onChange={() => setShowFilteredSessions(!showFilteredSessions)}
+              aria-label={t("sidebar.showHiddenSessions", { count: hiddenSessionCount })}
+              style={{ margin: 0 }}
+            />
+            {t("sidebar.showHiddenSessions", { count: hiddenSessionCount })}
+          </label>
+        )}
       </div>
 
       {explorerOpen && (
