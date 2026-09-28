@@ -1,8 +1,9 @@
 "use client";
 
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import { getFileIcon } from "./FileIcons";
 import { useI18n } from "@/hooks/useI18n";
+import { useTabDragReorder } from "@/hooks/useTabDragReorder";
 import type { FileViewerDisplayMode, FileViewerState } from "@/lib/file-viewer-state";
 
 export interface Tab {
@@ -24,11 +25,20 @@ interface Props {
   activeTabId: string;
   onSelectTab: (id: string) => void;
   onCloseTab: (id: string) => void;
+  /** Drag-to-reorder (pi#70): fired once per drop with the final triple. */
+  onReorderTab?: (draggedId: string, targetId: string, after: boolean) => void;
 }
 
-export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab }: Props) {
+export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, onReorderTab }: Props) {
   const { t } = useI18n();
   const [hoveredClose, setHoveredClose] = useState<string | null>(null);
+  const handleReorderTab = useCallback(
+    (draggedId: string, targetId: string, after: boolean) => {
+      onReorderTab?.(draggedId, targetId, after);
+    },
+    [onReorderTab],
+  );
+  const { draggedId, dropTarget, getDragHandlers } = useTabDragReorder(handleReorderTab);
 
   return (
     <div
@@ -44,13 +54,24 @@ export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab }: Props) {
     >
       {tabs.map((tab) => {
         const isActive = tab.id === activeTabId;
+        const dragHandlers = getDragHandlers(tab.id);
+        const dropIndicator: "before" | "after" | null = dropTarget?.id === tab.id
+          ? (dropTarget.after ? "after" : "before")
+          : null;
         return (
           <div
             key={tab.id}
             role="tab"
             aria-label={tab.kind === "terminal" ? t("terminal.tabLabel", { name: tab.label }) : tab.label}
             aria-selected={isActive}
+            aria-roledescription={t("tabs.reorderRoleDescription")}
             tabIndex={isActive || (!activeTabId && tabs[0].id === tab.id) ? 0 : -1}
+            draggable={dragHandlers.draggable}
+            onDragStart={dragHandlers.onDragStart}
+            onDragOver={dragHandlers.onDragOver}
+            onDragLeave={dragHandlers.onDragLeave}
+            onDrop={dragHandlers.onDrop}
+            onDragEnd={dragHandlers.onDragEnd}
             onKeyDown={(event) => {
               if (event.target !== event.currentTarget) return;
               if (event.key === "Enter" || event.key === " ") {
@@ -92,6 +113,12 @@ export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab }: Props) {
               minWidth: 80,
               flexShrink: 0,
               userSelect: "none",
+              opacity: draggedId === tab.id ? 0.4 : 1,
+              boxShadow: dropIndicator === "before"
+                ? "inset 2px 0 0 0 var(--accent)"
+                : dropIndicator === "after"
+                  ? "inset -2px 0 0 0 var(--accent)"
+                  : undefined,
               transition: "background 0.1s, color 0.1s",
             }}
           >

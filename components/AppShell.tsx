@@ -37,10 +37,12 @@ import {
   resolveSidebarSessionId,
   openNewSessionTab,
   hasSessionTab,
+  reorderPaneTabs,
   NEW_SESSION_TAB_ID,
   type PaneTab,
 } from "@/lib/pane-state";
 import { readOpenPaneTabs, writeOpenPaneTabs } from "@/lib/pane-tab-state";
+import { reorderById, syncTabOrder, applyTabOrder } from "@/lib/tab-order";
 import { projectDisplayNameForPath } from "@/lib/project-groups";
 import { listCustomDirectories } from "@/lib/custom-directories";
 import { copyText } from "@/lib/clipboard";
@@ -688,13 +690,27 @@ export function AppShell() {
   }, [activeFileTabId]);
   const [terminalTabs, setTerminalTabs] = useState<TerminalTab[]>([]);
   const [terminalsRestored, setTerminalsRestored] = useState(false);
-  const panelTabs: Tab[] = [...fileTabs, ...terminalTabs.map((tab) => ({
+  const rawPanelTabs: Tab[] = [...fileTabs, ...terminalTabs.map((tab) => ({
     id: tab.id,
     label: getFileName(tab.cwd) || tab.cwd,
     filePath: tab.cwd,
     kind: "terminal" as const,
     closing: Boolean(tab.closing),
   }))];
+  // Right-panel tab order (pi#70): fileTabs/terminalTabs are separate state
+  // arrays, concatenated file-first above, so neither array alone can
+  // represent an interleaved drag order. panelTabOrder tracks the DISPLAYED
+  // order only; reordering never touches fileTabs/terminalTabs themselves,
+  // so each tab's bound session/pane mapping is untouched by construction.
+  const [panelTabOrder, setPanelTabOrder] = useState<string[]>([]);
+  const rawPanelTabIds = rawPanelTabs.map((tab) => tab.id).join("\u0000");
+  useEffect(() => {
+    setPanelTabOrder((prev) => syncTabOrder(prev, rawPanelTabIds ? rawPanelTabIds.split("\u0000") : []));
+  }, [rawPanelTabIds]);
+  const panelTabs: Tab[] = applyTabOrder(panelTabOrder, rawPanelTabs, (tab) => tab.id);
+  const handleReorderPanelTab = useCallback((draggedId: string, targetId: string, after: boolean) => {
+    setPanelTabOrder((prev) => reorderById(prev, (tabId) => tabId, draggedId, targetId, after));
+  }, []);
 
   useEffect(() => {
     try {
@@ -2824,6 +2840,9 @@ export function AppShell() {
                 setFocusedPaneId(sid);
                 setPaneTabs((prev) => clearBadgeOnFocus(prev, sid));
               }}
+              onReorderPane={(draggedId, targetId, after) => {
+                setPaneTabs((prev) => reorderPaneTabs(prev, draggedId, targetId, after));
+              }}
               onClosePane={(sid) => {
                 releasePaneChatInputRef(sid);
                 const closingNewSessionTab = isNewSessionTab(sid);
@@ -3101,6 +3120,7 @@ export function AppShell() {
               activeTabId={activeFileTabId ?? ""}
               onSelectTab={setActiveFileTabId}
               onCloseTab={handleCloseFileTab}
+              onReorderTab={handleReorderPanelTab}
             />
           </div>
           <button
