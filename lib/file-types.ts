@@ -1,4 +1,8 @@
 export const TEXT_PREVIEW_MAX_BYTES = 256 * 1024;
+/** Edit-mode ceiling (pi#81): files above this stay read-only. Shared by
+ * the client gate and the server save path. */
+export const EDIT_MAX_BYTES = 512 * 1024;
+
 export const IMAGE_PREVIEW_MAX_BYTES = 10 * 1024 * 1024;
 export const DOCX_PREVIEW_MAX_BYTES = 10 * 1024 * 1024;
 
