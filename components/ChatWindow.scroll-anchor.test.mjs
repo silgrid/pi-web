@@ -26,8 +26,8 @@ test("sentinel observer is created once per sentinel lifecycle and reads cursor 
   assert.match(effect[0], /if \(!history\.hasEarlierMessages\) return;/);
   assert.match(effect[0], /const oldestId = history\.historyCursor;/);
   assert.doesNotMatch(effect[0], /historyCursor,/, "the effect deps must not include the history cursor");
-  assert.match(effect[0], /\}, \[hasEarlierMessages, session, activeLeafId, loadContext, sessionIdRef, scrollContainerRef\]\);/,
-    "hasEarlierMessages gates the sentinel's existence, so the observer is created when it flips; the cursor must stay out of the deps so pages do not re-arm the observer");
+  assert.match(effect[0], /\}, \[hasEarlierMessages, session, activeLeafId, loadContext, sessionIdRef, scrollContainerRef, markPrepended\]\);/,
+    "hasEarlierMessages gates the sentinel's existence, so the observer is created when it flips; the cursor must stay out of the deps so pages do not re-arm the observer (markPrepended, pi#83, is a stable useCallback)");
 });
 
 test("pagination captures a full scroll anchor snapshot, not a bare distance", async () => {

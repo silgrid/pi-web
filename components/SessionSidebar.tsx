@@ -7,6 +7,7 @@ import { loadExplorerOpen, saveExplorerOpen } from "@/lib/file-explorer-state";
 import { dispatchSessionRowContextMenu } from "@/lib/session-row-context-menu";
 import { skillExpansionToCommand } from "@/lib/slash-display";
 import { getRecentProjects, isPathInsideDirectory, sessionsForDirectory, sessionsForProject } from "@/lib/project-groups";
+import { prefetchSessionView } from "@/lib/session-prefetch";
 import {
   addCustomDirectory,
   customDirectoryIdentity,
@@ -1743,6 +1744,8 @@ export function SessionSidebar({ selectedSessionId, highlightSessionId, followHi
         isUnread={familySessions.some((session) => unreadSessionIds.has(session.id))}
         isFiltered={familyIsFiltered}
         onClick={() => handleSelectSessionFromList(family.root)}
+        onPointerEnter={() => void prefetchSessionView(family.root.id)}
+        onFocus={() => void prefetchSessionView(family.root.id)}
         onRenamed={loadSessions}
         onDeleted={(id) => {
           onSessionDeleted?.(id);
@@ -2403,6 +2406,8 @@ function SessionItem({
   isUnread,
   isFiltered = false,
   onClick,
+  onPointerEnter,
+  onFocus,
   onRenamed,
   onDeleted,
   depth = 0,
@@ -2419,6 +2424,9 @@ function SessionItem({
    *  muted/italic with a marker chip instead of blending in. */
   isFiltered?: boolean;
   onClick: () => void;
+  /** Hover/focus prefetch (pi#83): warms the session view before the click. */
+  onPointerEnter?: () => void;
+  onFocus?: () => void;
   onRenamed?: () => void;
   onDeleted?: (id: string) => void;
   depth?: number;
@@ -2533,6 +2541,10 @@ function SessionItem({
     <div
       onClick={confirmDelete || renaming ? undefined : onClick}
       onContextMenu={confirmDelete || renaming ? undefined : handleContextMenu}
+      // pi#83: hover/focus prefetch — warm the session view so the click's
+      // mount takes the snapshot fast path.
+      onPointerEnter={() => { setHovered(true); onPointerEnter?.(); }}
+      onFocus={() => onFocus?.()}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => { setHovered(false); }}
       style={{
