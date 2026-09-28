@@ -305,10 +305,11 @@ export async function checkSplitPane(page, sessions) {
   }, wideMinPaneWidth, { timeout: 10_000 });
   await assertExactPaneWidth(2, wideMinPaneWidth);
   await overflowTrigger.waitFor({ state: "visible" });
-  // Back to 820 (the slider floor): the panes re-widen to the equal split in
-  // the same pass and the overflow switcher hides again.
+  // Back to 820 (the DEFAULT via the reset button — the slider floor is 600
+  // since pi#78, so Home no longer lands on 820): the panes re-widen to the
+  // equal split in the same pass and the overflow switcher hides again.
   await page.getByRole("button", { name: "Settings", exact: true }).click();
-  await page.getByRole("slider", { name: "Chat content width", exact: true }).press("Home");
+  await page.getByRole("button", { name: "Reset chat content width", exact: true }).click();
   await page.keyboard.press("Escape");
   await page.waitForFunction(() => {
     const area = document.querySelector("[data-split-pane-area]");

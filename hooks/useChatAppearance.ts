@@ -3,7 +3,7 @@
 import { useSyncExternalStore } from "react";
 
 export const CHAT_CONTENT_WIDTH_DEFAULT = 820;
-export const CHAT_CONTENT_WIDTH_MIN = 820;
+export const CHAT_CONTENT_WIDTH_MIN = 600;
 export const CHAT_CONTENT_WIDTH_MAX = 2000;
 export const CHAT_CONTENT_WIDTH_STORAGE_KEY = "pi-chat-content-width";
 export const CHAT_CONTENT_FONT_SIZE_DEFAULT = 14;
@@ -24,7 +24,11 @@ let appearance: ChatAppearance | null = null;
 const listeners = new Set<() => void>();
 
 export function clampChatContentWidth(value: unknown): number {
-  const width = Number(value);
+  // A missing stored preference must fall to the DEFAULT before clamping:
+  // Number(null) is 0, and with the floor below the default (pi#78) the old
+  // floor-rescue no longer masks it (the fontSize clamp always had this
+  // null guard — this brings the width clamp in line).
+  const width = Number(value ?? CHAT_CONTENT_WIDTH_DEFAULT);
   if (!Number.isFinite(width)) return CHAT_CONTENT_WIDTH_DEFAULT;
   return Math.max(CHAT_CONTENT_WIDTH_MIN, Math.min(CHAT_CONTENT_WIDTH_MAX, Math.round(width)));
 }
