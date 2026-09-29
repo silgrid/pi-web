@@ -128,6 +128,78 @@ try {
       await waitOutput(`RECONNECT:alive:${pid}`);
       assert.equal(((await text()).match(new RegExp(`REFRESH:alive:${pid}`, "g")) ?? []).length, 1, "reconnect must not replay delivered output");
 
+      // pi#84: soft keyboards that fire no keydown reach the page only as bare
+      // `input` insertions (xterm's screenReaderMode drops that path), and
+      // their Enter arrives as insertLineBreak. Dispatching them directly on
+      // the xterm textarea must run the command exactly once — no loss, no
+      // duplication — including at mobile viewport sizes.
+      await page.locator(".terminal-panel:visible .xterm-helper-textarea").focus();
+      await page.evaluate(() => {
+        const panel = [...document.querySelectorAll(".terminal-panel")].find((element) => element.getBoundingClientRect().width > 0);
+        const textarea = panel.querySelector(".xterm-helper-textarea");
+        textarea.dispatchEvent(new InputEvent("input", { inputType: "insertText", data: "printf '\\nBARE:%s\\n' ok", bubbles: true, composed: true }));
+        textarea.dispatchEvent(new InputEvent("input", { inputType: "insertLineBreak", bubbles: true, composed: true }));
+      });
+      await waitOutput("BARE:ok");
+      assert.equal(((await text()).match(/BARE:ok/g) ?? []).length, 1, "bare input insertions must be delivered exactly once");
+
+      // pi#84 review: a real-xterm IME composition regression. xterm's
+      // CompositionHelper delivers the commit itself from the textarea's
+      // final value on a deferred timeout, and that final value can differ
+      // from every composition candidate. The bridge must swallow the commit
+      // echo whatever it says (the commit reaches the shell exactly once),
+      // and the suppression must not outlive the commit sequence (an
+      // identical bare insertion still flows afterwards). Input POSTs are
+      // counted directly so the exactly-once claim does not depend on how
+      // the pty echo wraps at this viewport's column count.
+      const imeMarker = "I84M";
+      const imeSends = [];
+      const onImeSend = (request) => {
+        if (request.method() === "POST" && new URL(request.url()).pathname === `/api/terminal/${id}`) {
+          const body = request.postDataJSON();
+          if (body?.type === "input" && String(body.data).includes(imeMarker)) imeSends.push(String(body.data));
+        }
+      };
+      page.on("request", onImeSend);
+      const imeSentCount = () => imeSends.join("").split(imeMarker).length - 1;
+      const waitForIme = async (count) => {
+        for (let i = 0; i < 100 && imeSentCount() < count; i++) await delay(100);
+        return imeSentCount();
+      };
+      try {
+        await page.locator(".terminal-panel:visible .xterm-helper-textarea").focus();
+        await page.evaluate((marker) => {
+          const panel = [...document.querySelectorAll(".terminal-panel")].find((element) => element.getBoundingClientRect().width > 0);
+          const textarea = panel.querySelector(".xterm-helper-textarea");
+          const before = textarea.value;
+          const fire = (event) => textarea.dispatchEvent(event);
+          fire(new CompositionEvent("compositionstart"));
+          textarea.value = `${before}ime`; // mid-composition candidate
+          fire(new CompositionEvent("compositionupdate", { data: "ime" }));
+          textarea.value = `${before}echo ${marker}`; // committed final value, unlike the candidate
+          fire(new CompositionEvent("compositionend", { data: "ime" }));
+          // The commit echo some browsers fire after compositionend, carrying
+          // the final value that matches no composition candidate.
+          fire(new InputEvent("input", { inputType: "insertText", data: `echo ${marker}`, bubbles: true, composed: true }));
+        }, imeMarker);
+        // The deferred delivery posts the commit once; a swallowed echo adds
+        // nothing, a forwarded one would double the marker (batched into the
+        // same write or a neighboring one).
+        assert.equal(await waitForIme(1), 1, "the IME commit must reach the shell exactly once (echo swallowed, deferred delivery sent once)");
+        // The suppression ended with xterm's deferred delivery: an identical
+        // bare insertion is new input and must flow.
+        await page.locator(".terminal-panel:visible .xterm-helper-textarea").focus();
+        await page.evaluate((marker) => {
+          const panel = [...document.querySelectorAll(".terminal-panel")].find((element) => element.getBoundingClientRect().width > 0);
+          const textarea = panel.querySelector(".xterm-helper-textarea");
+          textarea.dispatchEvent(new InputEvent("input", { inputType: "insertText", data: `echo ${marker}`, bubbles: true, composed: true }));
+        }, imeMarker);
+        assert.equal(await waitForIme(2), 2, "an identical bare insertion after the finished composition must not be swallowed");
+        await page.keyboard.press("Control+c"); // drop the mangled command line
+      } finally {
+        page.off("request", onImeSend);
+      }
+
       await page.screenshot({ path: join(artifacts, `${viewport.width}.png`), fullPage: true });
       const dimensions = await page.locator(".terminal-panel:visible").evaluate((element) => {
         const panel = element.getBoundingClientRect();

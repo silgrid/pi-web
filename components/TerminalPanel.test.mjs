@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { setImmediate } from "node:timers/promises";
+
 import { createTerminalWriter, terminalRequest } from "../lib/terminal-client.ts";
+// The panel's input pipeline (bare-input forwarding, startup buffering,
+// disableStdin policy) is covered behaviorally in terminal-panel-input.test.mjs.
 
 test("terminal errors preserve server diagnostics and explain non-JSON responses", async (t) => {
   const fetch = t.mock.method(globalThis, "fetch");

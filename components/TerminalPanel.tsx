@@ -5,7 +5,8 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import { useI18n } from "@/hooks/useI18n";
 import { createTerminalWriter, terminalRequest } from "@/lib/terminal-client";
-import type { TerminalEvent } from "@/lib/terminal-manager";
+import { createTerminalPanelInput, type TerminalPanelInput } from "./terminal-panel-input";
+import { createTerminalPanelStream, type TerminalPanelStream } from "./terminal-panel-stream";
 import type { TerminalTab } from "./terminal-tab-state";
 
 interface Props {
@@ -29,16 +30,12 @@ export function TerminalPanel({ tab, active, onRestart, onClosed, onCloseError }
   const [error, setError] = useState<string | null>(null);
   const [exitCode, setExitCode] = useState<number | null>(null);
   const [reconnectKey, setReconnectKey] = useState(0);
+  const inputRef = useRef<TerminalPanelInput | null>(null);
 
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
     let disposed = false;
-    let events: EventSource | null = null;
-    let offset: number | undefined;
-    let connected = false;
-    let exited = false;
-    let inputFailed = false;
     setStatus("connecting");
     setError(null);
     setExitCode(null);
@@ -50,7 +47,11 @@ export function TerminalPanel({ tab, active, onRestart, onClosed, onCloseError }
       lineHeight: 1.25,
       scrollback: 8000,
       screenReaderMode: true,
-      disableStdin: true,
+      // Input stays enabled from the start so keystrokes typed while the
+      // panel settles are captured (and flushed once the shell exists)
+      // instead of being silently swallowed; error/exit/offline paths below
+      // still disable it.
+      disableStdin: false,
       theme: {
         background: "#111318", foreground: "#d7dce5", cursor: "#60a5fa",
         selectionBackground: "#365b8a",
@@ -73,105 +74,86 @@ export function TerminalPanel({ tab, active, onRestart, onClosed, onCloseError }
       return true;
     });
 
-    const writer = createTerminalWriter(id, (reason) => {
-      if (disposed) return;
-      inputFailed = true;
-      terminal.options.disableStdin = true;
-      setError(reason.message);
-      setStatus("error");
-    });
-    writerRef.current = writer;
-    const onData = terminal.onData((data) => {
-      if (connected && !exited && !inputFailed) writer.write(data);
-    });
     const fitAndResize = () => {
       if (!container.offsetWidth || !container.offsetHeight) return;
       fit.fit();
     };
+
+    let stream: TerminalPanelStream | null = null;
+    const writer = createTerminalWriter(id, (reason) => {
+      if (disposed) return;
+      stream?.markInputFailed(reason.message);
+    });
+    writerRef.current = writer;
+    // All terminal-input handling (early buffering, bare-input forwarding with
+    // lifecycle-scoped dedup, and the disableStdin policy) lives in the
+    // bridge; the SSE output stream, page-lifecycle suspension and the
+    // failed-start input policy live in the stream controller — both so the
+    // races between them are testable (pi#84).
+    const inputBridge = createTerminalPanelInput(terminal, (data) => writer.write(data));
+    inputRef.current = inputBridge;
     const onResize = terminal.onResize(({ cols, rows }) => {
-      if (connected && !exited && !inputFailed) writer.resize(cols, rows);
+      if (stream?.canResize()) writer.resize(cols, rows);
     });
     const resizeObserver = new ResizeObserver(fitAndResize);
     resizeObserver.observe(container);
 
-    const connect = () => {
-      if (disposed || exited || !navigator.onLine) return;
-      events?.close();
-      events = new EventSource(`/api/terminal/${encodeURIComponent(id)}/events${offset === undefined ? "" : `?after=${offset}`}`);
-      events.onmessage = (message) => {
-        const event = JSON.parse(message.data) as TerminalEvent;
-        if (event.type === "output") {
-          if (event.reset) terminal.reset();
-          else if (offset !== undefined && event.offset <= offset) return;
-          terminal.write(event.data);
-          offset = event.offset;
+    const createServerTerminal = () => terminalRequest("/api/terminal", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id, cwd, cols: terminal.cols, rows: terminal.rows }),
+    });
+    stream = createTerminalPanelStream({
+      start: async () => {
+        fitAndResize();
+        if (reconnectKey > 0) {
+          try {
+            await terminalRequest(`/api/terminal/${encodeURIComponent(id)}`);
+          } catch (reason) {
+            // An explicit Reconnect on a tab whose server terminal is gone
+            // (server restart, lease expiry) revives the tab in place: same
+            // id, fresh shell, so the panel is never a dead end.
+            if (!navigator.onLine) throw reason;
+            await createServerTerminal();
+          }
+        } else if (restored) {
+          // Restoring a tab must never silently launch a replacement shell.
+          await terminalRequest(`/api/terminal/${encodeURIComponent(id)}`);
         } else {
-          exited = true;
-          connected = false;
-          terminal.options.disableStdin = true;
-          events?.close();
-          setExitCode(event.type === "exit" ? event.exitCode : null);
-          setStatus("exited");
+          await createServerTerminal();
         }
-      };
-      events.onopen = () => {
-        connected = true;
-        if (inputFailed) return;
-        terminal.options.disableStdin = false;
-        setStatus("ready");
+      },
+      openStream: (after) => new EventSource(
+        `/api/terminal/${encodeURIComponent(id)}/events${after === undefined ? "" : `?after=${after}`}`,
+      ),
+      input: inputBridge,
+      isOnline: () => navigator.onLine,
+      addWindowListener: (type, handler) => window.addEventListener(type, handler),
+      removeWindowListener: (type, handler) => window.removeEventListener(type, handler),
+      onOutput: (data) => terminal.write(data),
+      onReset: () => terminal.reset(),
+      onStreamReady: () => {
         fitAndResize();
         writer.resize(terminal.cols, terminal.rows);
         if (container.offsetWidth && container.offsetHeight) terminal.focus();
-      };
-      events.onerror = () => {
-        if (disposed || exited) return;
-        connected = false;
-        terminal.options.disableStdin = true;
-        setStatus(events?.readyState === EventSource.CLOSED ? "error" : "connecting");
-      };
-    };
-
-    startRef.current = (async () => {
-      fitAndResize();
-      if (restored || reconnectKey > 0) {
-        // Restoring a tab must never silently launch a replacement shell.
-        await terminalRequest(`/api/terminal/${encodeURIComponent(id)}`);
-      } else {
-        await terminalRequest("/api/terminal", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ id, cwd, cols: terminal.cols, rows: terminal.rows }),
-        });
-      }
-      connect();
-    })().catch((reason: Error) => {
-      if (disposed) return;
-      setError(reason.message);
-      setStatus("error");
+      },
+      onStatus: setStatus,
+      onError: setError,
+      onExited: (exitCode) => {
+        setExitCode(exitCode);
+        setStatus("exited");
+      },
     });
+    startRef.current = stream.started();
 
-    const pageHide = () => {
-      connected = false;
-      terminal.options.disableStdin = true;
-      events?.close();
-      if (!exited && !inputFailed) setStatus("connecting");
-    };
-    const pageShow = (event: PageTransitionEvent) => { if (event.persisted) connect(); };
-    window.addEventListener("pagehide", pageHide);
-    window.addEventListener("pageshow", pageShow);
-    window.addEventListener("offline", pageHide);
-    window.addEventListener("online", connect);
     return () => {
       disposed = true;
-      events?.close();
+      stream?.dispose();
       void writer.stop();
+      inputRef.current = null;
       resizeObserver.disconnect();
-      onData.dispose();
+      inputBridge.dispose();
       onResize.dispose();
-      window.removeEventListener("pagehide", pageHide);
-      window.removeEventListener("pageshow", pageShow);
-      window.removeEventListener("offline", pageHide);
-      window.removeEventListener("online", connect);
       terminal.dispose();
       terminalRef.current = null;
     };
@@ -184,7 +166,7 @@ export function TerminalPanel({ tab, active, onRestart, onClosed, onCloseError }
   useEffect(() => {
     if (!tab.closing) return;
     let cancelled = false;
-    if (terminalRef.current) terminalRef.current.options.disableStdin = true;
+    inputRef.current?.suspendStdin();
     void (async () => {
       await startRef.current;
       await writerRef.current?.stop();
