@@ -36,9 +36,53 @@ SSE consumers are disconnected once their response queue fills.
 
 Input and resizes are serialized. Pending adjacent input is batched so remote
 connections do not require one round trip per keystroke; large pastes are split
-without splitting Unicode characters. Failed input is not retried because its
-delivery may be ambiguous. Reconnect attaches to the same process with a fresh
-writer; restart explicitly replaces the process.
+without splitting Unicode characters. Keystrokes typed before the server-side
+terminal exists are held by the panel (`components/terminal-panel-input.ts`) and
+flushed in order once creation (or attach) resolves, so the settle window no
+longer swallows input. Failed input is not retried because its delivery may be
+ambiguous. Reconnect attaches to the same process with a fresh writer; when the
+terminal behind an explicit Reconnect has expired (server restart, lease
+expiry), the tab is revived in place with the same id and a fresh shell —
+restores themselves never silently spawn a replacement. Restart explicitly
+replaces the process.
+
+Soft-keyboard input that reaches the page only as `input` events (no keydown,
+no composition — iOS/WKWebView keyboards, some IME commits) is forwarded by
+the panel, because xterm's screenReaderMode drops that path. The suppression
+of insertions xterm already delivered through its own keydown/keypress paths
+is scoped to the actual event sequence: keyup and blur end it, so an arrow
+key cannot make a later soft-keyboard insertion disappear. Compositions are
+coordinated with xterm's own delivery rather than with candidate strings:
+xterm's CompositionHelper delivers the commit itself from the textarea's
+final value on a deferred timeout (a value that can differ from every
+composition candidate), so the bridge forwards nothing while that delivery
+is pending — not just a single commit echo some browsers fire after
+compositionend, but every insertion up to xterm's own delivery, because
+xterm reads the textarea's value at delivery time and a keystroke typed in
+that window is already part of what xterm is about to send (swallowing only
+the first such event would double-send the rest). That suppression ends on
+the same deferred turn as xterm's own delivery — which for a cancelled or
+empty composition sends nothing at all — or earlier at the keyup/blur/new-
+composition boundaries: a finished IME commit cannot swallow later input
+(including the very first character typed after an aborted composition),
+and the commit is never sent twice.
+
+The output stream (SSE) is independent of the input path: an SSE error or
+reconnect leaves stdin enabled and typing keeps flowing through the writer,
+which serializes delivery; a genuinely dead shell surfaces through the input
+writer's failure path (stdin disabled, error banner) on the next keystroke.
+Exit, failed input delivery, page hide/offline and terminal close still
+disable stdin. Hiding the page or going offline also suspends the panel's
+own forwarding — keystrokes that arrive while suspended are retained and
+flush in order when the stream reconnects; a closing tab's buffer is dropped.
+A failed shell start or failed input delivery drops the retained buffer as
+well, so input typed around a dead start is never silently replayed into
+the fresh shell a later Reconnect spawns. The stream itself lives in the
+panel's lifecycle controller (`components/terminal-panel-stream.ts`): while
+the page is suspended it refuses to open — or to recover, if its `open`
+fires after the hide — even when `navigator.onLine` is still true (bfcache
+pagehide), so retained input only ever flushes into a visible page once the
+matching `pageshow`/`online` reconnects.
 
 `bin/prepare-terminal.js` repairs node-pty 1.1.0's macOS spawn-helper executable
 bits during installation, including published/npm-installed Pi Web packages.
