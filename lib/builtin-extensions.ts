@@ -16,6 +16,7 @@ import { join } from "node:path";
 import { McpHost, type McpHostOptions } from "./mcp-host";
 import { createPiWebMcpTransportFactory } from "./mcp-transport";
 import { loadPiSdkInternals, type PiSdkInternals, type PiSdkInternalsResult } from "./pi-sdk-internals";
+import { mayReadProjectConfigNow } from "./project-trust";
 import { PROJECT_SETTINGS_MAX_BYTES, readRegularFileText } from "./regular-file";
 
 // The built-in extensions the pi CLI prepends from a module the SDK does not
@@ -176,11 +177,19 @@ async function loadMcpRuntime(): Promise<McpRuntimeResult> {
  * session connects and registers them itself, so the extension connects none
  * on `session_start`, and its startup wait, which ignores Stop, never arms.
  * The file-level `autoEnableCodemode` still comes from `mcp.json`, as in the
- * CLI; reading it runs nothing.
+ * CLI; reading it runs nothing. Whether the project file counts is read fresh,
+ * with the MCP host's read (`mayReadProjectConfigNow()`), not from the
+ * wrapper's `ctx.isProjectTrusted()`, which is fixed when the wrapper is built
+ * and refreshed only on reload. The extension calls `loadConfig` only on
+ * `session_start`, though — when the wrapper is built and on reload — so a
+ * project's `autoEnableCodemode` keeps the value read then: a trust decision
+ * made later reaches the project's servers on the next prompt, but this flag
+ * only on the next reload.
  */
 export function createMcpExtensionConfigLoader(
   internals: Pick<PiSdkInternals, "loadMcpConfig">,
   agentDir: string,
+  mayReadProjectConfig: (cwd: string) => boolean = (cwd) => mayReadProjectConfigNow(cwd, agentDir),
 ): (ctx: ExtensionContext) => LoadedMcpConfig {
   return (ctx) => {
     let autoEnableCodemode: boolean | undefined;
@@ -188,7 +197,7 @@ export function createMcpExtensionConfigLoader(
       autoEnableCodemode = internals.loadMcpConfig({
         agentDir,
         cwd: ctx.cwd,
-        projectTrusted: ctx.isProjectTrusted(),
+        projectTrusted: mayReadProjectConfig(ctx.cwd),
       }).autoEnableCodemode;
     } catch {
       // Unreadable files are reported where servers are managed, not on every session start.

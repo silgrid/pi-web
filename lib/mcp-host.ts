@@ -1,12 +1,17 @@
-import type {
-  ExtensionAPI,
-  ExtensionContext,
-  InlineExtension,
-  McpServerConfig,
-  McpServerEntry,
-  McpTransportFactory,
+import { closeSync, constants, fstatSync, openSync, readSync, realpathSync } from "node:fs";
+import { join } from "node:path";
+import {
+  CONFIG_DIR_NAME,
+  type ExtensionAPI,
+  type ExtensionContext,
+  type InlineExtension,
+  type McpServerConfig,
+  type McpServerEntry,
+  type McpTransportFactory,
 } from "@earendil-works/pi-coding-agent";
+import { hasParentDirectorySegment, isPathWithinRoots, resolveRealRoots } from "./path-security";
 import type { PiSdkInternals } from "./pi-sdk-internals";
+import { mayReadProjectConfigNow } from "./project-trust";
 
 // Pi Web decides which MCP servers a session connects (ADR 0006). The SDK's
 // MCP extension is created with a `loadConfig` that returns no servers; this
@@ -21,6 +26,8 @@ import type { PiSdkInternals } from "./pi-sdk-internals";
 //   on its next message without a reload. The prompt then waits up to 10 s for
 //   servers still connecting, and Stop ends that wait.
 // - A host that has not prompted for PI_WEB_MCP_IDLE_MS unregisters its servers.
+// - Project trust is read fresh on every sync too, never taken from the
+//   wrapper (see desiredServers()).
 //
 // The extension does not report connection state, so the host watches the
 // transports it creates through the factory pi-web gives it. A transport exists
@@ -68,6 +75,69 @@ function canonicalJson(value: unknown): string {
   return JSON.stringify(value) ?? "null";
 }
 
+// Hot reload re-evaluates this module; globalThis keeps one log line per error per process.
+const CONFIG_ERRORS_LOGGED_KEY: symbol = Symbol.for("pi-web:mcp-config-errors-logged");
+const CONFIG_ERRORS_LOGGED_MAX = 200;
+
+/**
+ * Log an `mcp.json` problem once. Every open session syncs twice per prompt,
+ * and a file that stays broken would otherwise repeat the same line each time.
+ */
+function logConfigErrorOnce(message: string): void {
+  const store = globalThis as Record<symbol, Set<string> | undefined>;
+  const logged = (store[CONFIG_ERRORS_LOGGED_KEY] ??= new Set());
+  if (logged.has(message)) return;
+  if (logged.size >= CONFIG_ERRORS_LOGGED_MAX) logged.clear();
+  logged.add(message);
+  console.warn(`[pi-web] MCP config: ${message}`);
+}
+
+const PROJECT_CONFIG_MAX_BYTES = 1024 * 1024;
+/** Windows defines neither flag; it has no FIFOs, and the realpath check still refuses a link that leads outside. */
+const NAMES_OPEN_FLAGS = constants.O_RDONLY | (constants.O_NONBLOCK || 0) | (constants.O_NOFOLLOW || 0);
+
+/**
+ * The server names an untrusted project's `.pi/mcp.json` declares, so the host
+ * can report why they do not connect. Only the names are read: nothing is
+ * validated, resolved, or run. The file is repository-controlled and read
+ * before anyone trusted it, so only a regular file of at most 1 MiB that
+ * resolves inside the project is parsed. The resolved path is opened once,
+ * without following a link swapped in since and without blocking on a FIFO,
+ * and the checks run on what was opened rather than on the path again: a link
+ * to a file elsewhere on the disk is refused before opening, and a FIFO or a
+ * device is opened without blocking and never read.
+ */
+export function untrustedProjectServerNames(cwd: string): string[] {
+  const path = join(cwd, CONFIG_DIR_NAME, "mcp.json");
+  let fd: number | undefined;
+  try {
+    if (hasParentDirectorySegment(path)) return [];
+    const realPath = realpathSync(path);
+    if (!isPathWithinRoots(realPath, resolveRealRoots(new Set([cwd])))) return [];
+    fd = openSync(realPath, NAMES_OPEN_FLAGS);
+    const stats = fstatSync(fd);
+    if (!stats.isFile() || stats.size > PROJECT_CONFIG_MAX_BYTES) return [];
+    // One byte past the size it reported: a file still growing is not parsed.
+    const buffer = Buffer.alloc(stats.size + 1);
+    let length = 0;
+    while (length < buffer.length) {
+      const read = readSync(fd, buffer, length, buffer.length - length, null);
+      if (read === 0) break;
+      length += read;
+    }
+    if (length > stats.size) return [];
+    const parsed: unknown = JSON.parse(buffer.toString("utf8", 0, length));
+    return isRecord(parsed) && isRecord(parsed.mcpServers) ? Object.keys(parsed.mcpServers) : [];
+  } catch {
+    // Missing, unreadable, swapped for a link, or not JSON: there are no names to report.
+    return [];
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+
+// The fork's SDK 1.0.0 dropped "codemode-deferred" from McpExposure, so this is a
+// plain Set<string> (see 3104ed53); "deferred" is the exposure the fork substitutes.
 const SCRIPT_EXPOSURES = new Set<string>(["codemode", "codemode-deferred", "deferred"]);
 
 /**
@@ -165,7 +235,9 @@ export type McpHostServerState =
   | "ready"
   | "failed"
   /** Another extension registered the name first, or the extension refused the config. */
-  | "not-registered";
+  | "not-registered"
+  /** The project's `.pi/mcp.json` declares it, but the project is not trusted, so it is not read. */
+  | "not-trusted";
 
 export interface McpHostServerStatus {
   name: string;
@@ -236,6 +308,7 @@ class HostInstance {
   private ctx: ExtensionContext | undefined;
   private active = false;
   private readonly attempts = new Map<string, ConnectAttempt>();
+  /** Keyed by scope and name: an untrusted project entry may share its name with a global one. */
   private readonly problems = new Map<string, McpHostServerStatus>();
   private queue: Promise<void> = Promise.resolve();
   private idleTimer: NodeJS.Timeout | undefined;
@@ -341,7 +414,7 @@ class HostInstance {
         ...(attempt.error ? { error: attempt.error } : {}),
       });
     }
-    return states.sort((a, b) => a.name.localeCompare(b.name));
+    return states.sort((a, b) => a.name.localeCompare(b.name) || a.scope.localeCompare(b.scope));
   }
 
   /** Unregister everything, for idle and for a host whose session goes away. */
@@ -367,19 +440,35 @@ class HostInstance {
   private desiredServers(ctx: ExtensionContext): Map<string, { config: McpServerConfig; scope: "global" | "project" }> {
     this.problems.clear();
     const desired = new Map<string, { config: McpServerConfig; scope: "global" | "project" }>();
-    let loaded;
+    // Project entries follow the project's trust, as in the pi CLI: the SDK reads
+    // `.pi/mcp.json` only once the project is trusted (ADR 0006). Trust is read
+    // fresh here, never from ctx.isProjectTrusted(): that is the wrapper's
+    // SettingsManager flag, fixed when the wrapper was built (true for a folder that
+    // needed no trust then) and refreshed only on reload, so a `.pi/mcp.json` that
+    // appeared since would connect on the next prompt with no trust decision. The
+    // default read also answers false for a folder that needs no trust: the SDK
+    // reads the file again itself, and a file landing between the two reads would
+    // otherwise be read without a decision.
+    const projectReadable = this.options.mayReadProjectConfig(ctx.cwd);
+    let loaded: ReturnType<McpHostOptions["internals"]["loadMcpConfig"]> | undefined;
     try {
-      // Project entries follow the project's trust, as in the pi CLI: the SDK reads
-      // `.pi/mcp.json` only once the project is trusted (ADR 0006).
       loaded = this.options.internals.loadMcpConfig({
         agentDir: this.options.agentDir,
         cwd: ctx.cwd,
-        projectTrusted: ctx.isProjectTrusted(),
+        projectTrusted: projectReadable,
       });
     } catch (error) {
-      console.error("[pi-web] cannot read mcp.json:", errorMessage(error));
-      return desired;
+      logConfigErrorOnce(`cannot read mcp.json: ${errorMessage(error)}`);
     }
+    // After the SDK's read, so a file that landed since the trust read is reported too.
+    if (!projectReadable) {
+      for (const name of untrustedProjectServerNames(ctx.cwd)) {
+        this.problems.set(`project\0${name}`, { name, scope: "project", state: "not-trusted" });
+      }
+    }
+    if (!loaded) return desired;
+    // Each names its file: an unparsable file, or an entry the SDK refused and skipped.
+    for (const error of loaded.errors) logConfigErrorOnce(error);
     for (const entry of loaded.servers) {
       if (entry.config.enabled === false) continue;
       const scope = entry.scope === "project" ? "project" : "global";
@@ -395,7 +484,7 @@ class HostInstance {
       this.pi.registerMcpServer(name, config);
     } catch (error) {
       this.attempts.delete(name);
-      this.problems.set(name, { name, scope: attempt.scope, state: "not-registered", error: errorMessage(error) });
+      this.problems.set(`${scope}\0${name}`, { name, scope, state: "not-registered", error: errorMessage(error) });
     }
   }
 
@@ -436,6 +525,14 @@ export interface McpHostOptions {
   internals: Pick<PiSdkInternals, "loadMcpConfig">;
   /** Whether codemode can run scripts; servers it cannot reach become `deferred`. */
   codemodeAvailable: () => boolean;
+  /**
+   * Whether the project's `.pi/mcp.json` may be read, asked on every sync.
+   * Defaults to a fresh read of the folder and `trust.json`
+   * (`mayReadProjectConfigNow()`): true only while a decision trusts a folder
+   * that requires trust. While it is false, the names the file declares are
+   * reported as `not-trusted`.
+   */
+  mayReadProjectConfig?: (cwd: string) => boolean;
   idleMs?: number;
   promptWaitMs?: number;
 }
@@ -454,6 +551,7 @@ export class McpHost {
       idleMs: resolveMcpIdleMs(),
       promptWaitMs: PROMPT_WAIT_MS,
       ...options,
+      mayReadProjectConfig: options.mayReadProjectConfig ?? ((cwd) => mayReadProjectConfigNow(cwd, options.agentDir)),
     };
   }
 
