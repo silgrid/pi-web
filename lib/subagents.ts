@@ -295,20 +295,26 @@ function parseProfileFile(filePath: string, scope: SubagentScope): SubagentProfi
     const deniedKeys = new Set(
       disallowedExtensionTools.map((tool) => normalizeExtensionSelector(tool).toLowerCase()),
     );
-    const extensionTools = parseExtensionToolSelectors(data?.tools)
+    const requestedExtensionTools = parseExtensionToolSelectors(data?.tools);
+    const extensionTools = requestedExtensionTools
       .filter((tool) => {
         const allowed = normalizeExtensionSelector(tool).toLowerCase();
         return ![...deniedKeys].some((denied) => (
           denied === "*" || allowed === denied || allowed.startsWith(`${denied}/`)
         ));
       });
+    // An explicitly written selector list that the deny list empties must stay
+    // an (empty) selection: dropping the field would make the runtime grant
+    // every loaded extension tool on its unconditional default path, bypassing
+    // the deny list entirely (review blocker: subagent tool-selection escape).
+    const hadExtensionSelectors = requestedExtensionTools.length > 0;
     return {
       name,
       displayName: stringValue(data?.display_name) ?? name,
       description: stringValue(data?.description) ?? name,
       systemPrompt: rest.trim(),
       tools: tools.filter((tool) => !disallowedTools.has(tool)),
-      ...(extensionTools.length > 0 ? { extensionTools } : {}),
+      ...(hadExtensionSelectors || extensionTools.length > 0 ? { extensionTools } : {}),
       ...(disallowedExtensionTools.length > 0 ? { disallowedExtensionTools } : {}),
       loadSkills: resourceBoolean(data?.load_skills ?? data?.skills, false),
       loadExtensions: resourceBoolean(data?.load_extensions ?? data?.extensions, extensionTools.length > 0),

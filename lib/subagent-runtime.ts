@@ -267,15 +267,26 @@ export function createSubagentController(
           : {}),
       });
 
-      const extensionToolNames = profile.loadExtensions
-        ? profile.extensionTools?.length
+      const extensionToolNames = !profile.loadExtensions
+        ? []
+        : profile.extensionTools !== undefined
+          // An explicit selection — including one the deny list emptied — is
+          // resolved through the selector machinery, so a fully denied list
+          // grants nothing (review blocker: the old truthiness check turned an
+          // emptied selection into "grant everything").
           ? selectSubagentExtensionTools(
             services.resourceLoader.getExtensions().extensions,
             profile.extensionTools,
             profile.disallowedExtensionTools,
           )
-          : services.resourceLoader.getExtensions().extensions.flatMap((extension) => [...extension.tools.keys()])
-        : [];
+          // No explicit selection: the default is every loaded extension tool,
+          // still minus the deny selectors — the deny list applies on every
+          // activation path.
+          : selectSubagentExtensionTools(
+            services.resourceLoader.getExtensions().extensions,
+            ["ext:*"],
+            profile.disallowedExtensionTools ?? [],
+          );
       const activeTools = resolveShellTools(
         withSubagentExtensionTools(profile.tools, extensionToolNames),
         settingsManager.getDefaultTools(),

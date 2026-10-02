@@ -10,6 +10,7 @@ import {
   resolveDirectory,
   shouldShowWindowsDrivePicker,
 } from "@/lib/directory-browser";
+import { isRegistrableRoot } from "@/lib/root-registration-policy";
 
 // GET /api/cwd/browse?path=...：列出文件系统中的可读子目录。
 export async function GET(request: NextRequest) {
@@ -77,7 +78,25 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Directory name is required" }, { status: 400 });
     }
 
-    const createdPath = await createDirectory(parentPath, name);
+    // Creating a directory is only meaningful where a project root could be
+    // registered; enforce the same registration policy as /api/cwd/validate
+    // before creating anything, so the picker's mkdir cannot create children
+    // in arbitrary server-writable locations — including through directory
+    // symlinks — outside the registration prefixes (review blocker:
+    // alternative unguarded mkdir endpoint).
+    const resolvedParent = await resolveDirectory(parentPath).catch(() => null);
+    if (!resolvedParent) {
+      return NextResponse.json({ error: "Parent directory does not exist" }, { status: 404 });
+    }
+    const registrable = isRegistrableRoot(resolvedParent);
+    if (!registrable.ok) {
+      return NextResponse.json(
+        { error: "Parent directory is outside the allowed registration prefixes" },
+        { status: 403 },
+      );
+    }
+
+    const createdPath = await createDirectory(resolvedParent, name);
     return NextResponse.json({ success: true, path: createdPath });
   } catch (error) {
     const code = error && typeof error === "object" && "code" in error
