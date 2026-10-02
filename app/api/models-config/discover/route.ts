@@ -102,7 +102,12 @@ export async function POST(req: Request) {
     // Request-key path: the literal goes out untouched — resolveModelDiscoveryAuth
     // (SDK auth resolution) is only consulted on the stored/verified-expression
     // path, where the destination gate above already pinned the operator's
-    // configured URL.
+    // configured URL. resolveModelDiscoveryAuth also resolves pi's provider
+    // catalog baseUrl/api as a fallback (upstream #1006) when the temp runtime's
+    // entry omits them, but provider.baseUrl/provider.api are themselves
+    // mandatory here (see lib/model-discovery-guards.ts's zod schema), so that
+    // fallback is reachable only through model-level overrides, not a missing
+    // provider baseUrl.
     const auth = literalApiKey
       ? { apiKey: literalApiKey, headers: provider.headers }
       : await resolveModelDiscoveryAuth(providerName, providerEntry);

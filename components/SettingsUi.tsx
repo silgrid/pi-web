@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useId, useRef } from "react";
 import type { ButtonHTMLAttributes, CSSProperties, HTMLAttributes, ReactNode } from "react";
 
 type ConfigButtonVariant = "primary" | "secondary" | "danger" | "ghost";
@@ -81,8 +82,60 @@ export function ConfigSidebarList({ children }: { children: ReactNode }) {
   return <div className="config-sidebar-list">{children}</div>;
 }
 
-export function ConfigSidebarGroupLabel({ children }: { children: ReactNode }) {
-  return <div className="config-sidebar-group-label">{children}</div>;
+/** A sidebar group heading; `aside` sits at its right edge. */
+export function ConfigSidebarGroupLabel({ children, aside }: { children: ReactNode; aside?: ReactNode }) {
+  return (
+    <div className="config-sidebar-group-label">
+      <span className="config-sidebar-group-label-text">{children}</span>
+      {aside}
+    </div>
+  );
+}
+
+/**
+ * Switches every row of a sidebar group at once, for a group heading's
+ * `aside`. Like the provider switch in the Models panel it is on only while
+ * every row is, so a partial group reads as off beside its count and one click
+ * completes it; on, a click switches the whole group off.
+ */
+export function ConfigSidebarGroupSwitch({
+  enabled,
+  total,
+  label,
+  disabled = false,
+  loading = false,
+  onChange,
+}: {
+  enabled: number;
+  total: number;
+  label: string;
+  disabled?: boolean;
+  loading?: boolean;
+  onChange: (enabled: boolean) => void;
+}) {
+  return (
+    <span className="config-sidebar-group-switch">
+      <span className="config-sidebar-group-count">{enabled}/{total}</span>
+      <ConfigSwitch
+        checked={total > 0 && enabled === total}
+        disabled={disabled}
+        loading={loading}
+        label={label}
+        onChange={onChange}
+      />
+    </span>
+  );
+}
+
+/** What the last group switch left undone, under that group's heading. */
+export function ConfigSidebarGroupStatus({ error, note }: { error?: string | null; note?: string | null }) {
+  if (!error && !note) return null;
+  return (
+    <div className="config-sidebar-group-status">
+      {note && <div role="status" className="config-sidebar-group-note">{note}</div>}
+      {error && <div role="alert" className="config-sidebar-group-error">{error}</div>}
+    </div>
+  );
 }
 
 export function ConfigSidebarItem({
@@ -165,6 +218,280 @@ export function ConfigField({ label, children, style }: { label: ReactNode; chil
   );
 }
 
+/**
+ * A detail pane's two-column label/value grid. Each row is a
+ * `ConfigDetailGridRow`; values wrap anywhere so a long path never widens the
+ * pane.
+ */
+export function ConfigDetailGrid({ children }: { children: ReactNode }) {
+  return <div className="config-detail-grid">{children}</div>;
+}
+
+export function ConfigDetailGridRow({
+  label,
+  tone = "muted",
+  mono = false,
+  className,
+  style,
+  children,
+}: {
+  label: ReactNode;
+  /** `plain` leaves the color to the value's own children or `style`. */
+  tone?: "plain" | "muted" | "dim" | "error";
+  mono?: boolean;
+  className?: string;
+  style?: CSSProperties;
+  children: ReactNode;
+}) {
+  return (
+    <>
+      <div className="config-detail-grid-label">{label}</div>
+      <div
+        className={[
+          "config-detail-grid-value",
+          tone === "plain" ? null : `is-${tone}`,
+          mono ? "is-mono" : null,
+          className,
+        ].filter(Boolean).join(" ")}
+        style={style}
+      >
+        {children}
+      </div>
+    </>
+  );
+}
+
+/** Where a row lives (`global`, `project`, …); a project scope is tinted. */
+export function ConfigScopeTag({ scope, children }: { scope: string; children: ReactNode }) {
+  return (
+    <span className={`config-scope-tag${scope === "project" ? " is-project" : ""}`}>
+      {children}
+    </span>
+  );
+}
+
+export interface ConfigScopeOption<S extends string> {
+  value: S;
+  label: string;
+  disabled?: boolean;
+}
+
+/**
+ * Chooses the scope something is written to. Why an option is unavailable is
+ * shown as text under the control, never only as a tooltip, which a touch
+ * screen cannot show. `children` share the switch's line (the submit button,
+ * where the result goes), so the reason sits under that whole line instead of
+ * pulling them out of line with the switch.
+ */
+export function ConfigScopeSwitch<S extends string>({
+  value,
+  options,
+  label,
+  disabledReason,
+  size = "default",
+  onChange,
+  children,
+}: {
+  value: S;
+  options: readonly ConfigScopeOption<S>[];
+  /** Names the group for assistive technology. */
+  label: string;
+  /** Shown while any option is disabled. */
+  disabledReason?: string | null;
+  size?: "default" | "small";
+  onChange: (value: S) => void;
+  children?: ReactNode;
+}) {
+  const reasonId = useId();
+  const reason = disabledReason && options.some((option) => option.disabled) ? disabledReason : null;
+  return (
+    <div className="config-scope-switch-field">
+      <div className="config-scope-switch-row">
+        <div role="group" aria-label={label} className={`config-scope-switch${size === "small" ? " is-small" : ""}`}>
+          {options.map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              aria-pressed={option.value === value}
+              aria-describedby={option.disabled && reason ? reasonId : undefined}
+              disabled={option.disabled}
+              className="config-scope-switch-option"
+              onClick={() => {
+                if (!option.disabled) onChange(option.value);
+              }}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
+        {children}
+      </div>
+      {reason && (
+        <span id={reasonId} className="config-scope-switch-reason">
+          {reason}
+        </span>
+      )}
+    </div>
+  );
+}
+
+/**
+ * The add form of a list-detail panel: a title with a link to the catalog,
+ * where the result is saved, one source box, the caller's controls (usually a
+ * scope switch and the submit button) as `children`, and examples that fill
+ * the box. Enter submits while `canSubmit` holds; `normalizeValue` rewrites a
+ * paste or the box on blur, e.g. to drop a pasted `pi install` prefix.
+ */
+export function ConfigAddSourcePanel({
+  title,
+  catalogHref,
+  catalogLabel,
+  catalogIcon,
+  location,
+  inputLabel,
+  inputId,
+  placeholder,
+  value,
+  canSubmit,
+  normalizeValue,
+  onValueChange,
+  onSubmit,
+  examplesLabel,
+  examples,
+  error,
+  children,
+}: {
+  title: string;
+  catalogHref: string;
+  catalogLabel: string;
+  catalogIcon?: ReactNode;
+  location: ReactNode;
+  inputLabel: string;
+  inputId?: string;
+  placeholder: string;
+  value: string;
+  canSubmit: boolean;
+  normalizeValue?: (value: string) => string;
+  onValueChange: (value: string) => void;
+  onSubmit: () => void;
+  examplesLabel: string;
+  examples: readonly string[];
+  error?: string | null;
+  children?: ReactNode;
+}) {
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    inputRef.current?.focus();
+  }, []);
+
+  return (
+    <ConfigDetailStack className="is-fill">
+      <div className="config-add-source-heading">
+        <div className="config-add-source-title-row">
+          <ConfigDetailTitle>{title}</ConfigDetailTitle>
+          <a href={catalogHref} target="_blank" rel="noopener noreferrer" className="config-add-source-catalog">
+            {catalogIcon}
+            {catalogLabel}
+          </a>
+        </div>
+        <div className="config-add-source-location">{location}</div>
+      </div>
+
+      <ConfigField label={inputLabel}>
+        <input
+          id={inputId}
+          ref={inputRef}
+          value={value}
+          aria-label={inputLabel}
+          className="config-add-source-input"
+          placeholder={placeholder}
+          onChange={(event) => onValueChange(event.target.value)}
+          onPaste={(event) => {
+            if (!normalizeValue) return;
+            const pasted = event.clipboardData.getData("text");
+            const normalized = normalizeValue(pasted);
+            if (normalized === pasted) return;
+            event.preventDefault();
+            onValueChange(normalized);
+          }}
+          onBlur={(event) => {
+            if (normalizeValue) onValueChange(normalizeValue(event.currentTarget.value));
+          }}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && canSubmit) onSubmit();
+          }}
+        />
+      </ConfigField>
+
+      {children}
+
+      {examples.length > 0 && (
+        <div className="config-add-source-examples">
+          <div className="config-add-source-examples-label">{examplesLabel}</div>
+          <div className="config-add-source-example-list">
+            {examples.map((example) => (
+              <button
+                key={example}
+                type="button"
+                className="config-add-source-example"
+                onClick={() => onValueChange(example)}
+              >
+                {example}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {error && (
+        <div role="alert" className="config-add-source-error">
+          {error}
+        </div>
+      )}
+    </ConfigDetailStack>
+  );
+}
+
+/** A banner above a panel's split view; `action` sits at its right edge. */
+export function ConfigNotice({ action, children }: { action?: ReactNode; children: ReactNode }) {
+  return (
+    <div role="status" className={`config-notice${action ? " has-action" : ""}`}>
+      {action ? <span className="config-notice-text">{children}</span> : children}
+      {action}
+    </div>
+  );
+}
+
+/**
+ * Says why a panel's project resources are not loaded. The trust button
+ * appears only when the caller can act on it, so the panel never offers a
+ * button that does nothing.
+ */
+export function ConfigTrustNotice({
+  message,
+  trustLabel,
+  trusting = false,
+  onTrust,
+}: {
+  message: string;
+  trustLabel?: string;
+  trusting?: boolean;
+  onTrust?: () => void;
+}) {
+  return (
+    <ConfigNotice
+      action={onTrust && trustLabel ? (
+        <ConfigButton size="small" onClick={onTrust} disabled={trusting}>
+          {trustLabel}
+        </ConfigButton>
+      ) : undefined}
+    >
+      {message}
+    </ConfigNotice>
+  );
+}
+
 export function ConfigEmptyState({ children }: { children: ReactNode }) {
   return <div className="config-empty-state">{children}</div>;
 }
@@ -183,6 +510,34 @@ export function ConfigFooter({ status, children }: { status?: ReactNode; childre
       <div className="config-footer-status">{status}</div>
       <div className="config-footer-actions">{children}</div>
     </footer>
+  );
+}
+
+/**
+ * A footer's one-line status. With `details` the summary opens a visible
+ * list, so diagnostics are readable on a touch screen instead of hiding in a
+ * tooltip.
+ */
+export function ConfigFooterStatus({
+  summary,
+  tone = "default",
+  details,
+}: {
+  summary: ReactNode;
+  tone?: "default" | "warning" | "error";
+  details?: readonly ReactNode[];
+}) {
+  const className = `config-footer-status-summary${tone === "default" ? "" : ` is-${tone}`}`;
+  if (!details?.length) return <span className={className}>{summary}</span>;
+  return (
+    <details className="config-footer-status-details">
+      <summary className={className}>{summary}</summary>
+      <ul className="config-footer-status-list">
+        {details.map((detail, index) => (
+          <li key={index}>{detail}</li>
+        ))}
+      </ul>
+    </details>
   );
 }
 
@@ -209,7 +564,21 @@ export function ConfigButton({
   );
 }
 
-export function ConfigSwitch({ checked, disabled = false, loading = false, label, onChange }: { checked: boolean; disabled?: boolean; loading?: boolean; label: string; onChange: (checked: boolean) => void }) {
+export function ConfigSwitch({
+  checked,
+  disabled = false,
+  loading = false,
+  size = "default",
+  label,
+  onChange,
+}: {
+  checked: boolean;
+  disabled?: boolean;
+  loading?: boolean;
+  size?: "default" | "small";
+  label: string;
+  onChange: (checked: boolean) => void;
+}) {
   const inactive = disabled || loading;
   return (
     <button
@@ -220,7 +589,7 @@ export function ConfigSwitch({ checked, disabled = false, loading = false, label
       aria-label={label}
       title={label}
       disabled={inactive}
-      className={`config-switch${loading ? " is-loading" : ""}`}
+      className={`config-switch${size === "small" ? " is-small" : ""}${loading ? " is-loading" : ""}`}
       onClick={() => onChange(!checked)}
     >
       <span className="config-switch-knob" aria-hidden="true" />

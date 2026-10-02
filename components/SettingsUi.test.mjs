@@ -21,6 +21,8 @@ test("provides one template for config layout and controls", () => {
     "ConfigSplitView",
     "ConfigSidebar",
     "ConfigSidebarGroupLabel",
+    "ConfigSidebarGroupSwitch",
+    "ConfigSidebarGroupStatus",
     "ConfigSidebarItem",
     "ConfigSidebarText",
     "ConfigDetail",
@@ -37,6 +39,14 @@ test("provides one template for config layout and controls", () => {
     "ConfigSwitch",
     "ConfigListAction",
     "ConfigStatusDot",
+    "ConfigScopeTag",
+    "ConfigScopeSwitch",
+    "ConfigAddSourcePanel",
+    "ConfigDetailGrid",
+    "ConfigDetailGridRow",
+    "ConfigFooterStatus",
+    "ConfigNotice",
+    "ConfigTrustNotice",
   ]) {
     assert.match(templateSource, new RegExp(`export function ${primitive}`));
   }
@@ -144,6 +154,12 @@ test("keeps shared static presentation in the stylesheet", () => {
     "config-detail-stack",
     "config-button",
     "config-switch",
+    "config-scope-switch",
+    "config-detail-grid",
+    "config-add-source-input",
+    "config-add-source-example",
+    "config-footer-status-list",
+    "config-notice",
   ]) {
     assert.match(templateSource, new RegExp(className));
     assert.match(cssSource, new RegExp(`\\.${className}\\b`));
@@ -175,4 +191,73 @@ test("skills, agents, and plugins share enabled and disabled controls", () => {
     assert.match(sources[name], /<ConfigSwitch/);
     assert.match(sources[name], /<ConfigStatusDot/);
   }
+});
+
+test("skills and plugins show reasons as visible text, never only as a tooltip", () => {
+  const sources = Object.fromEntries(configSources);
+  for (const name of ["SkillsConfig", "PluginsConfig"]) {
+    // The unavailable project scope explains itself under the scope switch.
+    assert.match(sources[name], /<ConfigScopeSwitch[\s\S]*?disabledReason=\{t\("trust\.projectScopeUnavailable"\)\}/, name);
+    assert.doesNotMatch(sources[name], /title=\{[^}]*(?:projectScopeUnavailable|openSessionToReload)/, name);
+    assert.match(sources[name], /<ConfigTrustNotice message=\{t\("trust\.(?:skills|plugins)NotLoaded"\)\} \/>/, name);
+    assert.doesNotMatch(sources[name], /className="config-trust-notice"/, name);
+  }
+  const plugins = sources.PluginsConfig;
+  assert.match(plugins, /<div id=\{reloadReasonId\} className="config-detail-heading-note">\s*\{t\("i18n\.openSessionToReload"\)\}/);
+  assert.match(plugins, /aria-describedby=\{sessionId \? undefined : reloadReasonId\}/);
+  // Diagnostics open a list in the footer instead of a title.
+  assert.match(plugins, /<ConfigFooterStatus[\s\S]*?details=\{data\.diagnostics\.map\(diagnosticText\)\}/);
+  assert.doesNotMatch(plugins, /title=\{data\.diagnostics/);
+});
+
+test("plugin and skill panel words come from the locale files", () => {
+  const sources = Object.fromEntries(configSources);
+  const plugins = sources.PluginsConfig;
+  for (const literal of [
+    /Loading\.\.\./,
+    /No plugins configured/,
+    /label="Source"/,
+    />\s*Examples\s*</,
+    /"(?:Package|Session) (?:removed|installed|updated|disabled|enabled|reloaded)\."/,
+    /diagnostic\{/,
+    /\} ext · \$\{/,
+    /\{group\.scope\}<|group: group\.scope \}/,
+    /\{scope\}\s*<\/(?:span|button)>/,
+  ]) {
+    assert.doesNotMatch(plugins, literal);
+  }
+  assert.match(plugins, /\{scopeLabel\(group\.scope, t\)\}/);
+  assert.match(plugins, /inputLabel=\{t\("config\.source"\)\}/);
+  assert.match(plugins, /examplesLabel=\{t\("config\.examples"\)\}/);
+
+  const skills = sources.SkillsConfig;
+  for (const literal of [/label="(?:Source|Version|Name|Description)"/, /"No skills found"/, /: "unknown"/, /to discover and install skills/, /\{s\}\s*<\/button>/, /\{label\}\s*<\/span>/]) {
+    assert.doesNotMatch(skills, literal);
+  }
+  assert.match(skills, /t\("skills\.discoverHint"\)\.split\("\{site\}"\)/);
+  for (const source of [enSource, zhSource]) {
+    assert.match(source, /"skills\.discoverHint": "[^"]*\{site\}[^"]*"/);
+    for (const key of ["config.source", "config.examples", "config.name", "config.scope", "plugins.diagnostic", "plugins.diagnostics"]) {
+      assert.match(source, new RegExp(`"${key.replace(".", "\\.")}":`));
+    }
+    for (const status of ["loaded", "installed", "missing", "disabled"]) {
+      assert.match(source, new RegExp(`"plugins\\.status\\.${status}":`));
+    }
+  }
+});
+
+test("skills and plugins switch whole groups from the group heading, not from a bar", () => {
+  const sources = Object.fromEntries(configSources);
+  for (const name of ["SkillsConfig", "PluginsConfig"]) {
+    const sidebar = sources[name].match(/<ConfigSidebar>[\s\S]*?<\/ConfigSidebar>/)?.[0] ?? "";
+    // The switch sits in the heading row, so the list keeps all of its height.
+    assert.match(sidebar, /<ConfigSidebarGroupLabel\s+aside=\{\s*<ConfigSidebarGroupSwitch/, name);
+    assert.match(sidebar, /<ConfigSidebarGroupStatus /, name);
+    assert.doesNotMatch(sidebar, /<ConfigButton/, name);
+  }
+  assert.doesNotMatch(templateSource, /ConfigSidebarBulkActions/);
+  assert.doesNotMatch(cssSource, /config-sidebar-bulk/);
+  assert.match(cssSource, /\.config-sidebar-group-label \{[\s\S]*?display: flex/);
+  assert.match(cssSource, /\.config-switch \{[\s\S]*?width: 32px[\s\S]*?height: 18px/);
+  assert.match(cssSource, /\.config-sidebar-group-status \{[\s\S]*?max-height: 4\.2em[\s\S]*?white-space: pre-wrap/);
 });

@@ -5,6 +5,7 @@ import { useI18n } from "@/hooks/useI18n";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import type { SubagentProfilesResponse, SubagentSettingsResponse } from "@/lib/api-types";
 import { sendAgentCommand } from "@/lib/agent-client";
+import { displayPathWithin, shortenPath } from "@/lib/display-path";
 import type { ModelsData } from "@/lib/models-cache";
 import { isSubagentProfileOverridden } from "@/lib/subagent-profile-precedence";
 import type { SubagentProfile, SubagentScope, SubagentWritableScope } from "@/lib/subagents";
@@ -119,17 +120,11 @@ function isTogglableScope(scope: SubagentScope): boolean {
   return isWritableScope(scope) || scope === "builtin";
 }
 
-function shortenPath(path: string): string {
-  return path.replace(/^\/(?:Users|home)\/[^/]+/, "~");
-}
-
 function displayProfilePath(profile: SubagentProfile, cwd: string): string | null {
   if (!profile.filePath) return null;
-  if ((profile.scope === "project" || profile.scope === "workspace") && profile.filePath.startsWith(cwd)) {
-    const relative = profile.filePath.slice(cwd.length).replace(/^[/\\]/, "");
-    return `./${relative}`;
-  }
-  return shortenPath(profile.filePath);
+  return profile.scope === "project" || profile.scope === "workspace"
+    ? displayPathWithin(profile.filePath, cwd)
+    : shortenPath(profile.filePath);
 }
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
