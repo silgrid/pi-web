@@ -1154,10 +1154,15 @@ export class AgentSessionWrapper {
         // The definition's description is not always what the model gets: `prepareLoadout`
         // hooks rewrite the declared ones (codemode lists its nested tools and the MCP types).
         const declared = new Map((this.inner.agent.state?.tools ?? []).map((t) => [t.name, t.description]));
+        // Active and callable, but requests leave the declaration out: codemode's "only" mode
+        // does this to active `direct` tools. The set is private to pi 0.99's AgentSession.
+        const hiddenDeclarations: unknown = Reflect.get(this.inner, "_hiddenDeclarations");
+        const hidden = hiddenDeclarations instanceof Set ? hiddenDeclarations : new Set<unknown>();
         return all.map((t) => ({
           ...t,
           description: declared.get(t.name) ?? t.description,
           active: active.has(t.name),
+          declarationHidden: hidden.has(t.name),
         }));
       }
 
