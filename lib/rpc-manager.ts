@@ -765,8 +765,10 @@ export class AgentSessionWrapper {
           // route before send() left an await window where another pi process
           // could append between the probe and this submission, chaining the
           // prompt onto a stale in-memory head and forking the session tree.
-          // Here the probe and inner.prompt() are one synchronous section
-          // under admission, closing that window. evictIfDiskAhead refuses
+          // Under admission the probe and inner.prompt() are one synchronous
+          // section — except when an MCP host must be prepared first: that
+          // wait is itself an await window, so the prompt rechecks the disk
+          // head after it (below) before submitting. evictIfDiskAhead refuses
           // while a run is in flight, so only idle prompts pay the one
           // readLatestSessionEntryId read, and a wrapper that reloads throws
           // SessionReloadedFromDiskError so the caller can retry cold.
@@ -830,6 +832,21 @@ export class AgentSessionWrapper {
               await waited;
             } finally {
               if (this.mcpPromptWait === wait) this.mcpPromptWait = null;
+            }
+            // The MCP wait was an await window under admission: another pi
+            // process may have appended while this prompt prepared its MCP
+            // servers, so the pre-wait probe no longer proves the in-memory
+            // head is current (review blocker 2). Recheck the disk head
+            // directly — the plain evictIfDiskAhead() refuses while
+            // pendingPromptCount holds this prompt. Settle the prompt
+            // accounting, drop the stale wrapper, and make the caller retry
+            // cold, exactly like the pre-wait eviction.
+            const diskLatestIdAfterWait = readLatestSessionEntryId(this.sessionFile);
+            if (diskLatestIdAfterWait && !this.inner.sessionManager.getEntry(diskLatestIdAfterWait)) {
+              finishPrompt();
+              this.destroy();
+              invalidateSessionListCache();
+              throw new SessionReloadedFromDiskError();
             }
           }
           let prompt: Promise<void>;

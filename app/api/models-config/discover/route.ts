@@ -99,7 +99,11 @@ export async function POST(req: Request) {
 
     const providerEntry: Record<string, unknown> = {
       ...(requestedBaseUrl ? { baseUrl: requestedBaseUrl } : {}),
-      api: provider.api,
+      // An explicitly named protocol pins the resolution; an omitted one must
+      // reach the SDK unresolved so pi's catalog can supply the provider's
+      // native protocol (upstream #1006). The guard passes an omitted api
+      // through as "" rather than defaulting (lib/model-discovery-guards.ts).
+      ...(provider.api ? { api: provider.api } : {}),
       ...(provider.apiKey ? { apiKey: provider.apiKey } : {}),
       ...(Object.keys(provider.headers).length > 0 ? { headers: provider.headers } : {}),
       ...provider.extra,
@@ -107,16 +111,18 @@ export async function POST(req: Request) {
 
     let auth: { apiKey?: string; headers: Record<string, string> };
     let effectiveBaseUrl = requestedBaseUrl;
-    // provider.api already defaults to "openai-completions" in
-    // lib/model-discovery-guards.ts when the request omits it, so the catalog's
-    // own protocol (`resolved.api` below) is consulted only if that changes.
+    // The guard no longer defaults the protocol: provider.api is "" when the
+    // request omitted it, so the catalog's own protocol (`resolved.api` below)
+    // is consulted before the OpenAI fallback applies (review blocker 3).
     let effectiveApi = provider.api;
 
     if (literalApiKey && requestedBaseUrl) {
       // Request-key path with a known destination: the literal goes out
       // untouched — resolveModelDiscoveryAuth (SDK auth resolution) is skipped
       // entirely so it never gets a chance to substitute the operator's stored
-      // credential for a colliding provider id.
+      // credential for a colliding provider id. With no catalog consult, an
+      // omitted protocol falls straight to the default.
+      effectiveApi = provider.api || "openai-completions";
       auth = { apiKey: literalApiKey, headers: provider.headers };
     } else {
       // Stored/verified-expression path (destination gate above already
@@ -127,12 +133,28 @@ export async function POST(req: Request) {
       let resolved: Awaited<ReturnType<typeof resolveModelDiscoveryAuth>>;
       try {
         resolved = await resolveModelDiscoveryAuth(providerName, providerEntry);
-      } catch (error) {
-        // Without a configured Base URL, pi's catalog was the only other source
-        // of one; for a custom/unknown provider that fails validating the
-        // internal placeholder model (upstream #1006).
-        if (!requestedBaseUrl) return NextResponse.json({ error: "Base URL is required" }, { status: 400 });
-        throw error;
+      } catch (firstError) {
+        const message = firstError instanceof Error ? firstError.message : String(firstError);
+        if (!/no .api. specified/.test(message)) {
+          // Without a configured/requested Base URL, pi's catalog was the only
+          // other source of one; for a custom/unknown provider that fails
+          // validating the internal placeholder model (upstream #1006).
+          if (!requestedBaseUrl) return NextResponse.json({ error: "Base URL is required" }, { status: 400 });
+          throw firstError;
+        }
+        // A provider the catalog does not know has no SDK-level protocol
+        // default: retry with the OpenAI-compatible protocol the guard used
+        // to pin (review blocker 3). A catalog provider never lands here —
+        // its native protocol resolved on the first attempt.
+        try {
+          resolved = await resolveModelDiscoveryAuth(providerName, {
+            ...providerEntry,
+            api: "openai-completions",
+          });
+        } catch (retryError) {
+          if (!requestedBaseUrl) return NextResponse.json({ error: "Base URL is required" }, { status: 400 });
+          throw retryError;
+        }
       }
       // Fall back to pi's provider catalog so built-in providers, and entries
       // that only list models, do not have to repeat the upstream base URL

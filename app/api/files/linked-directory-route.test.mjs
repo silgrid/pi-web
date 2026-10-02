@@ -11,10 +11,19 @@ const base = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "pi-web-linke
 const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
 process.env.PI_CODING_AGENT_DIR = path.join(base, "agent");
 fs.mkdirSync(process.env.PI_CODING_AGENT_DIR);
+// Promotion into the process-wide roots follows the registration policy
+// (lib/root-registration-policy.ts): point the configured prefixes at the
+// scratch base so the policy's happy path is exercised here, and a link
+// target outside it can be refused (review blocker 1). Set before any test
+// runs — registrationPrefixes() memoizes on globalThis at first call.
+const previousAllowedPrefixes = process.env.PI_WEB_ALLOWED_ROOT_PREFIXES;
+process.env.PI_WEB_ALLOWED_ROOT_PREFIXES = base;
 
 test.after(() => {
   if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
   else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+  if (previousAllowedPrefixes === undefined) delete process.env.PI_WEB_ALLOWED_ROOT_PREFIXES;
+  else process.env.PI_WEB_ALLOWED_ROOT_PREFIXES = previousAllowedPrefixes;
   fs.rmSync(base, { recursive: true, force: true });
 });
 
@@ -126,6 +135,33 @@ test("an explicit allow-link request makes that link target browsable", async (t
   assert.equal(byName.linked.outsideLinkTarget, undefined);
   assert.equal(byName.second.outsideLinkTarget, second);
   assert.equal((await request("GET", path.join(hub, "second"), "list")).status, 403);
+});
+
+test("allow-link refuses a target outside the registration prefixes (review blocker 1)", async (t) => {
+  const fixture = createHub(t);
+  if (!fixture) return;
+  const { hub } = fixture;
+  // A link inside the allowed project pointing outside every registration
+  // prefix: the scratch base is the configured prefix here, and the temp
+  // directory below it is not. Repository content — including where a
+  // symlink points — must never widen the process-wide roots on its own.
+  const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "pi-web-linked-outside-")));
+  t.after(() => fs.rmSync(outside, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(outside, "escape.txt"), "escape");
+  const dirType = process.platform === "win32" ? "junction" : "dir";
+  try {
+    fs.symlinkSync(outside, path.join(hub, "escape"), dirType);
+  } catch (error) {
+    if (error?.code === "EPERM") {
+      t.skip("Creating symbolic links requires additional privileges on this platform");
+      return;
+    }
+    throw error;
+  }
+
+  const refused = await allowLink(path.join(hub, "escape"), outside);
+  assert.equal(refused.status, 403);
+  assert.equal((await request("GET", path.join(hub, "escape"), "list")).status, 403);
 });
 
 test("allow-link refuses anything that is not a directory link inside the roots", async (t) => {

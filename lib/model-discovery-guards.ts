@@ -224,7 +224,14 @@ export function validateModelDiscoveryProvider(body: unknown): ModelDiscoveryBod
       // "" rather than undefined: callers treat a falsy baseUrl as "fall back
       // to pi's provider catalog" without needing to special-case undefined.
       baseUrl: provider.baseUrl ?? "",
-      api: provider.api ?? "openai-completions",
+      // "" rather than undefined: callers treat a falsy api as "fall back
+      // to pi's provider catalog" without needing to special-case undefined.
+      // Deliberately NOT defaulted to "openai-completions" here: the catalog
+      // resolves the protocol for built-in providers (upstream #1006), and a
+      // default at this layer would make the route's `provider.api ||
+      // resolved.api` fallback unreachable for a non-OpenAI provider whose
+      // request omits the protocol (review blocker 3).
+      api: provider.api ?? "",
       ...(provider.apiKey ? { apiKey: provider.apiKey } : {}),
       headers: provider.headers ?? {},
       extra,

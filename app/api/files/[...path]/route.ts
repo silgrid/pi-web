@@ -8,6 +8,7 @@ import {
   isFilePathAllowed,
 } from "@/lib/file-access";
 import { checkLinkedDirectoryApproval, withOutsideLinkTargets } from "@/lib/linked-directory";
+import { isRegistrableRoot } from "@/lib/root-registration-policy";
 import {
   DOCX_PREVIEW_MAX_BYTES,
   IMAGE_PREVIEW_MAX_BYTES,
@@ -144,7 +145,22 @@ async function allowLinkedDirectory(
   if (!approval.ok) {
     return NextResponse.json({ error: approval.error }, { status: approval.status });
   }
-  if (!approval.alreadyAllowed) allowFileRoot(approval.target);
+  if (!approval.alreadyAllowed) {
+    // Promotion into the process-wide roots follows the same registration
+    // policy as /api/cwd/validate and /api/agent/new: the target's realpath
+    // must lie inside a registration prefix (home, PI_WEB_ALLOWED_ROOT_PREFIXES,
+    // or an already-registered root). Without this guard a repository symlink
+    // pointing at / or any directory outside the prefixes could register that
+    // entire target process-wide on one operator click (review blocker 1).
+    const registrable = isRegistrableRoot(approval.target);
+    if (!registrable.ok) {
+      return NextResponse.json(
+        { error: "Link target is outside the allowed registration prefixes" },
+        { status: 403 },
+      );
+    }
+    allowFileRoot(registrable.path);
+  }
   return NextResponse.json({ path: approval.target });
 }
 
