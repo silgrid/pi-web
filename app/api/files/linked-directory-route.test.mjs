@@ -36,6 +36,7 @@ const { GET, POST } = await jiti.import("./[...path]/route.ts");
 const { GET: getFileIndex } = await jiti.import("../file-index/route.ts");
 const { allowFileRoot } = await jiti.import("../../../lib/file-access.ts");
 const { encodeFilePathForApi } = await jiti.import("../../../lib/file-paths.ts");
+const { __setRegistrationScopesForTesting: setRegistrationScopes } = await jiti.import("../../../lib/root-registration-policy.ts");
 const { NextRequest } = await jiti.import("next/server");
 
 function request(method, filePath, type, body, contentType = "application/json") {
@@ -141,9 +142,18 @@ test("allow-link refuses a target outside the registration prefixes (review bloc
   const fixture = createHub(t);
   if (!fixture) return;
   const { hub } = fixture;
+  // Pin the registration scopes through the test-only seam: the memo is
+  // process-global and other suites in a shared runner may have swapped it,
+  // so this fixture must not depend on ambient module state (the seam call
+  // re-derives lazily on restore).
+  const previousPrefixes = process.env.PI_WEB_ALLOWED_ROOT_PREFIXES;
+  const homeFixture = path.join(base, "home-fixture");
+  fs.mkdirSync(homeFixture, { recursive: true });
+  setRegistrationScopes(homeFixture, base);
+  t.after(() => setRegistrationScopes(null, previousPrefixes));
   // A link inside the allowed project pointing outside every registration
-  // prefix: the scratch base is the configured prefix here, and the temp
-  // directory below it is not. Repository content — including where a
+  // prefix: the fixture home and the scratch base are the prefixes here, and
+  // the temp directory below is not. Repository content — including where a
   // symlink points — must never widen the process-wide roots on its own.
   const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "pi-web-linked-outside-")));
   t.after(() => fs.rmSync(outside, { recursive: true, force: true }));
