@@ -135,7 +135,14 @@ const modelDiscoveryModelSchema = z.strictObject({
  * operator's real config is known.
  */
 const modelDiscoveryProviderSchema = z.strictObject({
-  baseUrl: z.string().trim().min(1),
+  // Optional (upstream #1006): a request naming a built-in provider id, or
+  // an entry that only lists models, relies on pi's own provider catalog to
+  // resolve the endpoint — see model-discovery-auth.ts's fallback and the
+  // discover route's "Base URL is required" handling for the unresolvable
+  // case. An EXPLICITLY empty string is still refused (`min(1)` only runs
+  // when the key is present) so a caller cannot send `baseUrl: ""` to mean
+  // the same as omitting it.
+  baseUrl: z.string().trim().min(1).optional(),
   api: z.string().trim().min(1).optional(),
   apiKey: z.string().trim().min(1).optional(),
   name: z.string().trim().min(1).optional(),
@@ -159,6 +166,7 @@ const modelDiscoveryBodySchema = z.strictObject({
 });
 
 export interface ModelDiscoveryProvider {
+  /** "" when the request named none at all — the caller falls back to pi's provider catalog. */
   baseUrl: string;
   api: string;
   apiKey?: string;
@@ -213,7 +221,9 @@ export function validateModelDiscoveryProvider(body: unknown): ModelDiscoveryBod
     ok: true,
     providerName,
     provider: {
-      baseUrl: provider.baseUrl,
+      // "" rather than undefined: callers treat a falsy baseUrl as "fall back
+      // to pi's provider catalog" without needing to special-case undefined.
+      baseUrl: provider.baseUrl ?? "",
       api: provider.api ?? "openai-completions",
       ...(provider.apiKey ? { apiKey: provider.apiKey } : {}),
       headers: provider.headers ?? {},

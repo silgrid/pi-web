@@ -69,7 +69,7 @@ function canonicalJson(value: unknown): string {
   return JSON.stringify(value) ?? "null";
 }
 
-const SCRIPT_EXPOSURES = new Set<McpExposure>(["codemode", "codemode-deferred"]);
+const SCRIPT_EXPOSURES = new Set<string>(["codemode", "codemode-deferred", "deferred"]);
 
 /**
  * Without a working codemode sandbox, tools only scripts can reach would be

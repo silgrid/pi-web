@@ -2,12 +2,6 @@ import { NextResponse } from "next/server";
 import { mkdirSync } from "fs";
 import { defaultCwdPath } from "@/lib/default-cwd";
 
-// Shared by GET and POST so both report/select exactly the same directory.
-function defaultCwdPath(): string {
-  const date = new Date().toISOString().slice(0, 10).replace(/-/g, "");
-  return join(homedir(), `pi-cwd-${date}`);
-}
-
 // GET /api/default-cwd
 // Reports today's default directory (~/pi-cwd-<YYYYMMDD>) WITHOUT creating
 // it, so the sidebar can apply shortcut-visibility rules (pi#18: hide the
