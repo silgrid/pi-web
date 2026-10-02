@@ -1151,8 +1151,12 @@ export class AgentSessionWrapper {
         // A hidden tool is withdrawn: pi ignores it when setting the active tools.
         const all: ToolInfo[] = this.inner.getAllTools().filter((t) => t.exposure !== "hidden");
         const active = new Set<string>(this.inner.getActiveToolNames());
+        // The definition's description is not always what the model gets: `prepareLoadout`
+        // hooks rewrite the declared ones (codemode lists its nested tools and the MCP types).
+        const declared = new Map((this.inner.agent.state?.tools ?? []).map((t) => [t.name, t.description]));
         return all.map((t) => ({
           ...t,
+          description: declared.get(t.name) ?? t.description,
           active: active.has(t.name),
         }));
       }
