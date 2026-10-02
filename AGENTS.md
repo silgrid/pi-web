@@ -6,40 +6,25 @@
 npm run dev   # port 30141
 ```
 
-Typecheck: `node_modules/.bin/tsc --noEmit`  
-Lint: `npm run lint`  
-**Never run `next build` during dev** — pollutes `.next/` and breaks `npm run dev`.
+Typecheck: `node_modules/.bin/tsc --noEmit` · Lint: `npm run lint`
+
+**Never run `next build` during dev**: it pollutes `.next/` and breaks `npm run dev`.
 
 ### Dev server troubleshooting
 
-- Before starting a server, run `lsof -nP -iTCP:30141 -sTCP:LISTEN` and reuse the existing Pi Web process when it is healthy. A second `next dev` for the same checkout cannot use a different port as a workaround because both processes contend for `.next/dev/lock`.
-- A browser-only `Module ... factory is not available` overlay usually means that tab has a stale Turbopack/HMR graph; it does not prove the server or source is broken. First call the browser's explicit reload action, then compare the current server log and a direct HTTP/API request.
-- Restart only after the failure reproduces from a fresh page and the server-side checks also fail. Stop the exact dev process gracefully, move `.next` into a `mktemp -d` backup, and restart with the standard `npm run dev` command.
-- Do not use `next dev --webpack` as a fallback. This repository's development graph can fail on `undici` imports such as `node:console`; development is expected to use Turbopack.
-- Next.js may append a generated `BEGIN:nextjs-agent-rules` block to `AGENTS.md` when `next dev` starts. Treat that as generated tooling output, verify it with `git status`, and do not include it in an unrelated feature commit.
+- First run `lsof -nP -iTCP:30141 -sTCP:LISTEN` and reuse a healthy Pi Web process. A second `next dev` on another port is no workaround: both contend for `.next/dev/lock`.
+- A browser-only `Module ... factory is not available` overlay usually means that tab has a stale Turbopack/HMR graph, not a broken server or source. Use the browser's explicit reload, then compare the server log and a direct HTTP/API request.
+- Restart only when the failure reproduces from a fresh page and the server-side checks fail too: stop that exact dev process gracefully, move `.next` into a `mktemp -d` backup, restart with `npm run dev`.
+- Never fall back to `next dev --webpack`: the dev graph can fail on `undici` imports such as `node:console`. Development uses Turbopack.
+- `next dev` may append a generated `BEGIN:nextjs-agent-rules` block to `AGENTS.md`. It is tooling output: check `git status` and keep it out of unrelated commits.
 
 ---
 
 ## Architecture
 
-```
-Browser                Next.js Server              AgentSession (in-process)
-  │                        │                               │
-  ├─ GET /api/sessions ────▶ reads ~/.pi/agent/sessions/   │
-  ├─ GET /api/sessions/[id] reads .jsonl file directly     │
-  ├─ GET /api/agent/running ───────▶ running id snapshot   │
-  │                        │                               │
-  ├─ send message ─────────▶ POST /api/agent/[id]          │
-  │                        │   startRpcSession() ─────────▶│ createAgentSession()
-  │                        │   session.send(cmd) ─────────▶│ session.prompt()
-  │                        │                               │
-  ├─ SSE connect ──────────▶ GET /api/agent/[id]/events    │
-  │                        │   session.onEvent() ◀─────────│ session.subscribe()
-  │◀── data: {...} ─────────│                               │
-```
-
-**Session browsing** (read-only): reads `.jsonl` files through SDK `SessionManager` helpers and `lib/session-reader.ts` — no AgentSession created.  
-**Sending a message**: `startRpcSession()` in `lib/rpc-manager.ts` creates an AgentSession in-process.
+- **Browsing** (read-only, no AgentSession): `GET /api/sessions` lists `~/.pi/agent/sessions/`; `GET /api/sessions/[id]` reads the `.jsonl` through SDK `SessionManager` helpers and `lib/session-reader.ts`, or an open wrapper's in-memory `SessionManager`. `GET /api/agent/running` snapshots the running ids.
+- **Sending**: `POST /api/agent/[id]` → `startRpcSession()` (`lib/rpc-manager.ts`) creates the AgentSession in-process (`createAgentSessionFromServices()`); `session.send(cmd)` → `session.prompt()`.
+- **Events**: `GET /api/agent/[id]/events` streams SSE `data: {...}` from `session.onEvent()`, fed by `session.subscribe()`.
 
 ---
 
@@ -171,19 +156,19 @@ hooks/
 
 ## Topic Notes
 
-Most design decisions and traps live in `docs/agents/`, one file per area. Before changing code in an area, read its note; a change that spans areas needs every note it touches. Add new notes to the area's file, not here: this file keeps only what applies to any change.
+Design decisions and traps live in `docs/agents/`, one note per area. Read every note whose files a change touches before making it. Add new notes to the area's file, not here.
 
-- [sessions.md](docs/agents/sessions.md) — AgentSession lifecycle and shutdown, fork vs in-session branching, session file rewrites, toolCall normalization, SSE reconnect and tool execution events, transcript system / usage / context-edit entries, running-state polling, exported HTML. Read before changing `lib/rpc-manager.ts`, `lib/session-reader.ts`, `lib/normalize.ts`, `hooks/useAgentSession.ts`, `app/api/agent/**`, `app/api/sessions/**`, `components/BranchNavigator.tsx`, `components/MessageView.tsx` or `components/CodemodeToolView.tsx`.
-- [tools.md](docs/agents/tools.md) — tool presets and Chat only, exact system prompts, tool exposure, the built-in codemode / tool-search / mcp extensions, the read-only MCP policy, the Code mode and PowerShell `defaultTools` switches. Read before changing `lib/tool-presets.ts`, `lib/tool-preset-preference.ts`, `lib/chat-only.ts`, `lib/exact-system-prompt.ts`, `lib/builtin-extensions.ts`, `lib/mcp-read-only-policy.ts`, `lib/codemode-settings.ts`, `lib/powershell-settings.ts`, `lib/global-settings-file.ts`, `app/api/agent/new/route.ts`, `app/api/tools/settings/route.ts`, or tool selection in `lib/rpc-manager.ts`.
-- [mcp-runtime.md](docs/agents/mcp-runtime.md) — the per-session MCP host: when servers register and connect, the connection states it reports, trust read on every sync, idle release; `/mcp` typed in the composer. Read before changing `lib/mcp-host.ts`, `lib/mcp-transport.ts`, `lib/mcp-status.ts`, `lib/mcp-command.ts`, `lib/mcp-config-key.ts`, the MCP wiring in `lib/rpc-manager.ts` or `lib/builtin-extensions.ts`, or `/mcp` handling in `hooks/useAgentSession.ts`.
-- [mcp-settings.md](docs/agents/mcp-settings.md) — Settings › MCP: reading both `mcp.json` files without running anything, masking, the trust dialog's server list, the panel's row states, notices, Code mode choice, trust from Settings and Escape stacking, and every `mcp.json` write with undo. Read before changing `app/api/mcp/route.ts`, `app/api/project-trust/route.ts`, `lib/mcp-config-read.ts`, `lib/mcp-config-file.ts`, `lib/mcp-undo.ts`, `lib/mcp-secrets.ts`, `lib/mcp-server-display.ts`, `lib/mcp-json-error.ts`, `lib/project-trust.ts`, `lib/regular-file.ts`, `lib/stacked-dialog.ts`, `lib/settings-navigation.ts`, `components/McpConfig.tsx`, `components/mcp-config-helpers.ts`, `components/ProjectTrustDialog.tsx` or `components/SettingsPanel.tsx`.
-- [mcp-test-sign-in.md](docs/agents/mcp-test-sign-in.md) — Settings › MCP Test (route checks, bounded connection, `!command` queue, redaction, status store) and OAuth sign-in / sign-out. Read before changing `app/api/mcp/test/**`, `app/api/mcp/sign-in/**`, `lib/mcp-test.ts`, `lib/mcp-entry-request.ts`, `lib/mcp-status.ts`, `lib/mcp-sign-in.ts`, `lib/mcp-sign-out.ts`, `components/McpSignIn.tsx`, `components/mcp-sign-in-helpers.ts` or `components/OAuthPastePanel.tsx`.
-- [mcp-add.md](docs/agents/mcp-add.md) — Settings › MCP add: the paste parsed again on the server, host-variable confirmation, literal secrets kept global, fresh-folder trust in one step, the add pane; the paste importer's escaping and grammars. Read before changing `lib/mcp-add.ts`, `lib/mcp-import*.ts`, `lib/shell-words.ts`, the fresh-folder trust in `lib/project-trust.ts`, `components/McpAddServer.tsx`, `components/mcp-add-helpers.ts`, or the `add` action of `app/api/mcp/route.ts`.
-- [models.md](docs/agents/models.md) — default model and reasoning level, mid-run reasoning changes, remote provider catalogs, `enabledModels` scoping and minimal edits, provider auth listing and credentials. Read before changing `app/api/models/**`, `app/api/models-config/**`, `app/api/auth/**`, `lib/default-preferences.ts`, `lib/model-scope.ts`, `lib/enabled-models*.ts`, `lib/model-catalog-refresh.ts`, `lib/provider-listing*.ts`, `components/ModelsConfig.tsx`, `components/EnabledModelsSection.tsx`, `components/ModelSelector.tsx` or `components/SelectorRow.tsx`.
-- [files-and-access.md](docs/agents/files-and-access.md) — worktrees and project grouping, the file access allow-list (the security boundary for `/api/files`), file tree visibility, web password throttling. Read before changing `app/api/files/**`, `app/api/cwd/**`, `app/api/worktrees/**`, `app/api/file-index/**`, `app/api/web-auth/**`, `proxy.ts`, `lib/path-security.ts`, `lib/file-access.ts`, `lib/linked-directory.ts`, `lib/session-file-references*.ts`, `lib/file-tree-visibility.ts`, `lib/worktree.ts`, `lib/paths.ts`, `lib/auth-throttle.ts` or `components/FileExplorer.tsx`.
-- [settings-ui.md](docs/agents/settings-ui.md) — the Plugins and Skills routes, sidebar group switches, and the shared `SettingsUi` blocks every settings panel and add pane uses. Read before changing `app/api/plugins/**`, `app/api/skills/**`, `components/SettingsUi.tsx`, `components/settings-ui-helpers.ts`, `components/SkillsConfig.tsx` or `components/PluginsConfig.tsx`, and before adding a settings section or add pane.
-- [subagents.md](docs/agents/subagents.md) — the built-in subagent setting, profiles and their files, run status, completion notifications. Read before changing `lib/subagent*.ts`, `app/api/subagents/**` or `components/AgentsConfig.tsx`.
-- [client-platform.md](docs/agents/client-platform.md) — the mobile software keyboard and viewport height, the completion sound. Read before changing `hooks/useViewportHeight.ts`, `hooks/useAudio.ts` or the keyboard-open CSS.
+- [sessions.md](docs/agents/sessions.md): AgentSession lifecycle and shutdown, fork vs in-session branching, session file rewrites, toolCall normalization, SSE reconnect and tool events, transcript system / usage / context-edit entries, running-state polling, exported HTML. Files: `lib/rpc-manager.ts`, `lib/session-reader.ts`, `lib/normalize.ts`, `hooks/useAgentSession.ts`, `app/api/agent/**`, `app/api/sessions/**`, `components/BranchNavigator.tsx`, `components/MessageView.tsx`, `components/CodemodeToolView.tsx`.
+- [tools.md](docs/agents/tools.md): tool presets and Chat only, exact system prompts, tool exposure, the codemode / tool-search / mcp built-ins, the read-only MCP policy, the Code mode and PowerShell `defaultTools` switches. Files: `lib/tool-presets.ts`, `lib/tool-preset-preference.ts`, `lib/chat-only.ts`, `lib/exact-system-prompt.ts`, `lib/builtin-extensions.ts`, `lib/mcp-read-only-policy.ts`, `lib/codemode-settings.ts`, `lib/powershell-settings.ts`, `lib/global-settings-file.ts`, `app/api/agent/new/route.ts`, `app/api/tools/settings/route.ts`, tool selection in `lib/rpc-manager.ts`.
+- [mcp-runtime.md](docs/agents/mcp-runtime.md): the per-session MCP host (when servers register and connect, reported states, trust read on every sync, idle release); `/mcp` in the composer. Files: `lib/mcp-host.ts`, `lib/mcp-transport.ts`, `lib/mcp-status.ts`, `lib/mcp-command.ts`, `lib/mcp-config-key.ts`, MCP wiring in `lib/rpc-manager.ts` and `lib/builtin-extensions.ts`, `/mcp` handling in `hooks/useAgentSession.ts`.
+- [mcp-settings.md](docs/agents/mcp-settings.md): Settings › MCP reads without running anything, masking, the trust dialog's server list, row states, notices, Code mode choice, trust from Settings, Escape stacking, every `mcp.json` write and undo. Files: `app/api/mcp/route.ts`, `app/api/project-trust/route.ts`, `lib/mcp-config-read.ts`, `lib/mcp-config-file.ts`, `lib/mcp-undo.ts`, `lib/mcp-secrets.ts`, `lib/mcp-server-display.ts`, `lib/mcp-json-error.ts`, `lib/project-trust.ts`, `lib/regular-file.ts`, `lib/stacked-dialog.ts`, `lib/settings-navigation.ts`, `components/McpConfig.tsx`, `components/mcp-config-helpers.ts`, `components/ProjectTrustDialog.tsx`, `components/SettingsPanel.tsx`.
+- [mcp-test-sign-in.md](docs/agents/mcp-test-sign-in.md): Settings › MCP Test (route checks, bounded connection, `!command` queue, redaction, status store) and OAuth sign-in / sign-out. Files: `app/api/mcp/test/**`, `app/api/mcp/sign-in/**`, `lib/mcp-test.ts`, `lib/mcp-entry-request.ts`, `lib/mcp-status.ts`, `lib/mcp-sign-in.ts`, `lib/mcp-sign-out.ts`, `components/McpSignIn.tsx`, `components/mcp-sign-in-helpers.ts`, `components/OAuthPastePanel.tsx`.
+- [mcp-add.md](docs/agents/mcp-add.md): Settings › MCP add (paste re-parsed on the server, host-variable confirmation, literal secrets kept global, fresh-folder trust, the add pane) and the paste importer's escaping and grammars. Files: `lib/mcp-add.ts`, `lib/mcp-import*.ts`, `lib/shell-words.ts`, fresh-folder trust in `lib/project-trust.ts`, `components/McpAddServer.tsx`, `components/mcp-add-helpers.ts`, the `add` action of `app/api/mcp/route.ts`.
+- [models.md](docs/agents/models.md): default model and reasoning level, mid-run reasoning changes, remote provider catalogs, `enabledModels` scoping and minimal edits, provider auth listing and credentials. Files: `app/api/models/**`, `app/api/models-config/**`, `app/api/auth/**`, `lib/default-preferences.ts`, `lib/model-scope.ts`, `lib/enabled-models*.ts`, `lib/model-catalog-refresh.ts`, `lib/provider-listing*.ts`, `components/ModelsConfig.tsx`, `components/EnabledModelsSection.tsx`, `components/ModelSelector.tsx`, `components/SelectorRow.tsx`.
+- [files-and-access.md](docs/agents/files-and-access.md): worktrees and project grouping, the file access allow-list (the `/api/files` security boundary), file tree visibility, web password throttling. Files: `app/api/files/**`, `app/api/cwd/**`, `app/api/worktrees/**`, `app/api/file-index/**`, `app/api/web-auth/**`, `proxy.ts`, `lib/path-security.ts`, `lib/file-access.ts`, `lib/linked-directory.ts`, `lib/session-file-references*.ts`, `lib/file-tree-visibility.ts`, `lib/worktree.ts`, `lib/paths.ts`, `lib/auth-throttle.ts`, `components/FileExplorer.tsx`.
+- [settings-ui.md](docs/agents/settings-ui.md): Plugins and Skills routes, sidebar group switches, the shared `SettingsUi` blocks every settings panel and add pane uses. Files: `app/api/plugins/**`, `app/api/skills/**`, `components/SettingsUi.tsx`, `components/settings-ui-helpers.ts`, `components/SkillsConfig.tsx`, `components/PluginsConfig.tsx`; also before adding a settings section or add pane.
+- [subagents.md](docs/agents/subagents.md): the built-in subagent setting, profiles and their files, run status, completion notifications. Files: `lib/subagent*.ts`, `app/api/subagents/**`, `components/AgentsConfig.tsx`.
+- [client-platform.md](docs/agents/client-platform.md): mobile software keyboard and viewport height, completion sound. Files: `hooks/useViewportHeight.ts`, `hooks/useAudio.ts`, the keyboard-open CSS.
 
 ---
 
@@ -213,9 +198,10 @@ The fork has no MCP group switch or `ConfigSaveTarget` in `components/SettingsUi
 - Each sidebar group of the Skills and Plugins panels (a skill scope, a package scope; not standalone extensions) has a small switch in its heading (`ConfigSidebarGroupSwitch`), with the same rule as the Models panel's provider switch: on only while every row is, so a partial group reads as off beside its `n/m` count and one click completes it. It lives in the heading row so the sidebar loses no height, which matters in the 190px phone layout. A switch sends one request with a list (`PATCH /api/skills` with `filePaths`, `POST /api/plugins` with `packages`) and gets a result per item, so a refused row does not stop the rest; what it left undone is shown under that group's heading (`ConfigSidebarGroupStatus`). `SettingsManager` records load and write failures instead of throwing, and `flush()` still resolves; the bulk plugin path reads them back with `drainErrors()`, or an unreadable settings.json would report success. An entry already in the requested state is left alone, and enabling keeps an entry's own keys such as `autoload`. Disabling empties the four resource lists and nothing keeps the filters they replaced, so switching a group off leaves an enabled filtered package on (the SDK reports every object entry as `filtered`) and says so, and the bulk route refuses one. `PATCH /api/skills` edits only `.md` files: the roots it allows also hold `auth.json`, settings and project files.
 - The Skills and Plugins panels are built from the shared blocks in `components/SettingsUi.tsx` (`ConfigScopeTag`, `ConfigScopeSwitch`, `ConfigAddSourcePanel`, `ConfigDetailGrid`, `ConfigFooterStatus`, `ConfigTrustNotice`), `itemsToSwitch()` in `components/settings-ui-helpers.ts`, and `lib/display-path.ts`; a new settings section reuses them instead of copying a panel. Why a control is unavailable is visible text — a scope switch's `disabledReason` (under the switch's whole line, so controls passed as its `children` stay level with it), the note under a detail header, a footer summary that opens its diagnostics — never only a `title` tooltip, which a touch screen cannot show. `SettingsUi.tsx` takes every word as a prop and holds no state, so it renders outside the i18n provider; the panels pass `t()` strings. `ConfigTrustNotice` shows its button only when given `onTrust`, and neither panel passes one yet: trusting from Settings needs `AppShell`'s trust state threaded through `SettingsPanel` and a reload of the panel afterwards.
 
-### Old Safari (iOS 16.2)
-- `/` renders entirely on the client, so one script chunk the browser cannot *parse* is a blank page, not a broken feature (#753). Next 16 compiles for Safari 16.4+ by default; the `browserslist` in `package.json` lowers Safari and iOS to 16.2 so SWC turns class `static {}` blocks into private static fields. That reaches Next's own client runtime, but other node_modules keep the syntax they ship unless they are in `transpilePackages`; mermaid and `@mermaid-js/parser` are listed there because their lazy diagram chunks are full of static blocks. Keep the other browserslist entries at Next's defaults.
-- SWC cannot downlevel a RegExp **lookbehind** (`(?<=`, `(?<!`), which Safari parses only from 16.4. Do not write one in client code: `lib/markdown.ts` emulates its leading lookbehinds with `replaceNotPrecededBy()`. A lookbehind built at runtime (`new RegExp("(?<=…)")` inside `try`) only fails when it runs, which is how `lib/gfm-autolink-email-loader.cjs` fixes the email regex in `mdast-util-gfm-autolink-literal`; the loader is registered for both webpack and Turbopack in `next.config.ts` and fails the build if that regex changes upstream.
+## Old Safari (iOS 16.2)
+
+- `/` renders entirely on the client, so one script chunk the browser cannot parse is a blank page. Next 16 targets Safari 16.4+; the `browserslist` in `package.json` lowers Safari and iOS to 16.2 so SWC turns class `static {}` blocks into private static fields. That covers Next's client runtime; other node_modules keep their syntax unless listed in `transpilePackages` (mermaid and `@mermaid-js/parser` are, for their lazy diagram chunks). Keep the other browserslist entries at Next's defaults.
+- Never write a RegExp lookbehind (`(?<=`, `(?<!`) in client code: SWC cannot downlevel it and Safari parses it only from 16.4. `lib/markdown.ts` emulates its leading lookbehinds with `replaceNotPrecededBy()`. A lookbehind built at runtime (`new RegExp("(?<=…)")` in `try`) fails only when run; that is how `lib/gfm-autolink-email-loader.cjs` fixes `mdast-util-gfm-autolink-literal`'s email regex. The loader is registered for webpack and Turbopack in `next.config.ts` and fails the build if that regex changes upstream.
 
 ## Pi Session File Format
 
@@ -231,9 +217,7 @@ Location: `~/.pi/agent/sessions/<encoded-cwd>/<timestamp>_<uuid>.jsonl`
 {"type":"session_info","id":"...","parentId":"...","name":"user-defined name"}
 ```
 
-`entryIds[]` in `SessionContext` is a parallel array to `messages[]` — maps each displayed message back to its `.jsonl` entry id, used for fork and navigate_tree calls.
-
----
+`SessionContext.entryIds[]` parallels `messages[]`: each displayed message's `.jsonl` entry id, used for fork and navigate_tree.
 
 ## CSS Variables (`app/globals.css`)
 
