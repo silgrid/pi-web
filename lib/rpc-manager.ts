@@ -2035,7 +2035,9 @@ const closingSessionWaits = new WeakMap<AgentSessionWrapper, { done: boolean; pr
  * extension's session_shutdown may append to the file, which a replacement opened earlier
  * would branch away from, and dispose() releases provider resources (a Codex websocket) by
  * session id, which the replacement shares. The wait is bounded so a shutdown stuck in
- * extension binding cannot keep the session from starting again.
+ * extension binding cannot keep the session from starting again. One wait per closing
+ * wrapper: its bound runs from the first caller and later callers share it, so a
+ * shutdown still binding extensions can be overtaken.
  */
 function closingRpcSessionWait(sessionId: string): Promise<void> | null {
   const closing = getRegistry().get(sessionId);
