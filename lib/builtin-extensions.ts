@@ -89,11 +89,14 @@ export async function runCodemodeSelfTest(options: CodemodeSelfTestOptions = {})
   const controller = new AbortController();
   let timer: NodeJS.Timeout | undefined;
   const timedOut = new Promise<never>((_, reject) => {
+    // The timer must stay ref'd: it decides an awaited race (below), and an
+    // unref'd timer never fires when nothing else holds the event loop, so
+    // an otherwise-idle process would hang on the self-test instead of
+    // timing out (Node's test runner in CI is exactly such a process).
     timer = setTimeout(() => {
       controller.abort();
       reject(new Error(`the sandbox did not answer within ${timeoutMs} ms`));
     }, timeoutMs);
-    timer.unref?.();
   });
   try {
     const run = (async () => {
