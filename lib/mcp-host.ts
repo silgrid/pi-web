@@ -2,7 +2,6 @@ import type {
   ExtensionAPI,
   ExtensionContext,
   InlineExtension,
-  McpExposure,
   McpServerConfig,
   McpServerEntry,
   McpTransportFactory,
