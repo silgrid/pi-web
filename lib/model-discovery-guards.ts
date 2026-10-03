@@ -176,6 +176,8 @@ export interface ModelDiscoveryProvider {
 
 export interface ModelDiscoveryModel {
   id: string;
+  /** The model's own protocol, when the request supplies one. */
+  api?: string;
   /** The model's own baseUrl override, when the request supplies one. */
   baseUrl?: string;
   /** The validated model entry, ready for the temp models.json. */
@@ -254,6 +256,7 @@ export function validateModelDiscoveryModel(raw: unknown): ModelDiscoveryModelVa
     ok: true,
     model: {
       id: model.id,
+      ...(model.api ? { api: model.api } : {}),
       ...(model.baseUrl ? { baseUrl: model.baseUrl } : {}),
       entry: { ...model, id: model.id },
     },
