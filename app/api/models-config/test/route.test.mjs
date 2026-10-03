@@ -109,6 +109,57 @@ function sseOkResponse() {
   });
 }
 
+test("an omitted provider.api resolves from the model entry, the catalog, or the OpenAI default (review blocker)", async (t) => {
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (input, init) => {
+    calls.push({ input: String(input), init });
+    return sseOkResponse();
+  };
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  // 1. model-level protocol: the model entry names the api, the provider
+  //    omits it (the guard now passes "" instead of a default).
+  const modelLevel = await POST(testModel({
+    providerName: "acme",
+    provider: { baseUrl: "https://acme.example/v1", apiKey: "own-key" },
+    model: { id: "m", api: "openai-completions" },
+  }));
+  const modelPayload = await modelLevel.json();
+  assert.equal(modelLevel.status, 200, JSON.stringify(modelPayload));
+  assert.equal(modelPayload.ok, true, JSON.stringify(modelPayload));
+  assert.equal(calls.at(-1).input.startsWith("https://acme.example/v1"), true, calls.at(-1).input);
+
+  // 2. catalog default: a catalog provider with neither provider.api nor
+  //    model.api — pi's catalog supplies the provider's native protocol
+  //    (deepseek ships openai-completions).
+  const catalog = await POST(testModel({
+    providerName: "deepseek",
+    provider: { baseUrl: "https://api.deepseek.com", apiKey: "own-key" },
+    model: { id: "deepseek-chat" },
+  }));
+  const catalogPayload = await catalog.json();
+  assert.equal(catalog.status, 200, JSON.stringify(catalogPayload));
+  assert.equal(catalogPayload.ok, true, JSON.stringify(catalogPayload));
+  assert.ok(calls.at(-1).input.startsWith("https://api.deepseek.com"), calls.at(-1).input);
+
+  // 3. custom provider with no protocol anywhere: the temp load first fails
+  //    with 'no "api" specified' and the route retries with the
+  //    OpenAI-compatible default the guard used to pin.
+  const custom = await POST(testModel({
+    providerName: "brand-new",
+    provider: { baseUrl: "https://custom.example/v1", apiKey: "own-key" },
+    model: { id: "m" },
+  }));
+  const customPayload = await custom.json();
+  assert.equal(custom.status, 200, JSON.stringify(customPayload));
+  assert.equal(customPayload.ok, true, JSON.stringify(customPayload));
+  assert.ok(calls.at(-1).input.startsWith("https://custom.example/v1"), calls.at(-1).input);
+  assert.equal(new Headers(calls.at(-1).init.headers).get("authorization"), "Bearer own-key");
+});
+
 test("a request apiKey is sent as the exact LITERAL on an isolated credential path — the operator's stored credential is never swapped in (review r1)", async (t) => {
   // providerName "openai" carries a stored auth.json credential; the request
   // supplies its own key and a foreign URL. Under the old code, getAuth()

@@ -479,12 +479,14 @@ export function AppShell() {
   // Branch navigator state — populated by ChatWindow via onBranchDataChange
   const [branchTree, setBranchTree] = useState<SessionTreeNode[]>([]);
   const [branchActiveLeafId, setBranchActiveLeafId] = useState<string | null>(null);
+  const [branchSwitchLocked, setBranchSwitchLocked] = useState(false);
   const branchLeafChangeFnRef = useRef<((leafId: string | null) => void) | null>(null);
   const sessionHasBranches = hasSessionBranches(branchTree);
 
-  const handleBranchDataChange = useCallback((tree: SessionTreeNode[], activeLeafId: string | null, onLeafChange: (leafId: string | null) => void) => {
+  const handleBranchDataChange = useCallback((tree: SessionTreeNode[], activeLeafId: string | null, onLeafChange: (leafId: string | null) => void, locked: boolean) => {
     setBranchTree(tree);
     setBranchActiveLeafId(activeLeafId);
+    setBranchSwitchLocked(locked);
     branchLeafChangeFnRef.current = onLeafChange;
   }, []);
 
@@ -953,6 +955,7 @@ export function AppShell() {
     setSessionKey((k) => k + 1);
     setBranchTree([]);
     setBranchActiveLeafId(null);
+    setBranchSwitchLocked(false);
     setSystemPrompt(null);
     setSystemTools(null);
     setSystemInfoLoading(false);
@@ -1009,6 +1012,7 @@ export function AppShell() {
     setSessionKey((k) => k + 1);
     setBranchTree([]);
     setBranchActiveLeafId(null);
+    setBranchSwitchLocked(false);
     branchLeafChangeFnRef.current = null;
     setSystemPrompt(null);
     setSystemTools(null);
@@ -1072,6 +1076,7 @@ export function AppShell() {
     setSessionKey((k) => k + 1);
     setBranchTree([]);
     setBranchActiveLeafId(null);
+    setBranchSwitchLocked(false);
     setSystemPrompt(null);
     setSystemTools(null);
     setSystemInfoLoading(false);
@@ -1098,11 +1103,27 @@ export function AppShell() {
     if (customDirs.length > 0) return customDirs[0].path;
     try {
       // POST is the established "use default directory" semantic (pi#18):
-      // it creates and allow-lists the directory, so the composer's cwd
-      // validation does not hit a 403 on a not-yet-created dir.
+      // it creates the directory; selection then goes through /api/cwd/validate
+      // like any other directory, which allow-lists it so the composer's cwd
+      // validation — and every cwd-scoped query the new tab fires (project
+      // trust, models) — does not hit a 403 on a not-yet-registered dir. The
+      // pi#27 entry flow used to skip that selection step, so a fresh server
+      // 403'd both queries before any session existed in the directory.
       const response = await fetch("/api/default-cwd", { method: "POST" });
       const data = await response.json() as { cwd?: string };
-      if (data.cwd) return data.cwd;
+      if (data.cwd) {
+        try {
+          await fetch("/api/cwd/validate", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ cwd: data.cwd }),
+          });
+        } catch {
+          // Best-effort: an offline failure defers root registration to the
+          // next validate/commit that touches this directory.
+        }
+        return data.cwd;
+      }
     } catch {
       // fall through to the current workspace
     }
@@ -1346,6 +1367,7 @@ export function AppShell() {
       setSessionKey((k) => k + 1);
       setBranchTree([]);
       setBranchActiveLeafId(null);
+      setBranchSwitchLocked(false);
       setSystemPrompt(null);
       setSystemTools(null);
       setSystemInfoLoading(false);
@@ -2013,6 +2035,7 @@ export function AppShell() {
             tree={branchTree}
             activeLeafId={branchActiveLeafId}
             onLeafChange={handleBranchLeafChange}
+            locked={branchSwitchLocked}
             inline
             containerRef={topBarRef}
             open={activeTopPanel === "branches"}
@@ -2573,6 +2596,7 @@ export function AppShell() {
               tree={branchTree}
               activeLeafId={branchActiveLeafId}
               onLeafChange={handleBranchLeafChange}
+              locked={branchSwitchLocked}
               inline
               compact
               containerRef={topBarRef}

@@ -90,17 +90,22 @@ export async function POST(req: Request) {
     }
     const isRequestKey = decision.source === "requestApiKey";
 
-    const providerEntry: Record<string, unknown> = {
+    const providerEntry = (api?: string): Record<string, unknown> => ({
       baseUrl: provider.baseUrl,
-      api: provider.api,
+      // An explicitly named protocol pins the temp config; an omitted one is
+      // left unresolved so the model entry, pi's catalog, or the SDK default
+      // supplies it — serializing the guard's "" sentinel is rejected by
+      // ProviderConfigSchema even when the model entry names an api (review
+      // blocker: connection tests for requests that omit provider.api broke).
+      ...(api ? { api } : {}),
       ...(provider.apiKey ? { apiKey: provider.apiKey } : {}),
       ...(Object.keys(provider.headers).length > 0 ? { headers: provider.headers } : {}),
       ...provider.extra,
-    };
+    });
 
-    const outcome = await withTempModelsRuntime(
+    const runOutcome = (api?: string) => withTempModelsRuntime(
       providerName,
-      providerEntry,
+      providerEntry(api),
       [model.entry],
       async (modelRuntime) => {
         const resolvedModel = modelRuntime.getModel(providerName, model.id);
@@ -177,6 +182,23 @@ export async function POST(req: Request) {
       },
       { isolatedCredentials: isRequestKey },
     );
+
+    // First attempt resolves the protocol from the request (model entry) and
+    // pi's catalog. A custom provider with no protocol anywhere has no
+    // SDK-level default and fails the temp load with 'no "api" specified' —
+    // retry once with the OpenAI-compatible protocol the guard used to pin
+    // (review blocker: the "" sentinel broke these connection tests).
+    let outcome;
+    try {
+      // A model-level protocol pins the provider entry too: the SDK's temp
+      // registry otherwise defaults an unknown provider to the Responses
+      // transport and ignores the model entry's api for stream selection.
+      outcome = await runOutcome(provider.api || model.api || undefined);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!(error instanceof TempModelsLoadError) || !/no .api. specified/.test(message)) throw error;
+      outcome = await runOutcome("openai-completions");
+    }
 
     return NextResponse.json(outcome);
   } catch (error) {

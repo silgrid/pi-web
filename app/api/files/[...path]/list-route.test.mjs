@@ -1,57 +1,118 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
+import { NextRequest } from "next/server.js";
+import { createJiti } from "jiti";
 
-const source = await readFile(new URL("./route.ts", import.meta.url), "utf8");
+// Keep the machine's git configuration out of the answers, same isolation as
+// lib/file-tree-visibility.test.mjs: a global excludes file could ignore the
+// very names these tests expect to see.
+const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "pi-web-list-route-")));
+fs.writeFileSync(path.join(root, "gitconfig"), "");
+process.env.GIT_CONFIG_NOSYSTEM = "1";
+process.env.GIT_CONFIG_GLOBAL = path.join(root, "gitconfig");
+process.env.XDG_CONFIG_HOME = path.join(root, "xdg");
+process.env.GIT_CEILING_DIRECTORIES = root;
+test.after(() => fs.rmSync(root, { recursive: true, force: true }));
 
-function sliceBetween(startMarker, endMarker) {
-  const start = source.indexOf(startMarker);
-  assert.ok(start !== -1, `marker not found: ${startMarker}`);
-  const end = source.indexOf(endMarker, start);
-  assert.ok(end !== -1, `end marker not found after ${startMarker}: ${endMarker}`);
-  // Include the end marker so assertions can pin it.
-  return source.slice(start, end + endMarker.length);
+const jiti = createJiti(import.meta.url, {
+  alias: { "@": process.cwd() },
+  interopDefault: true,
+  moduleCache: false,
+});
+const { GET } = await jiti.import("./route.ts");
+const { allowFileRoot } = await jiti.import("../../../../lib/allowed-roots.ts");
+allowFileRoot(root);
+
+const source = await fs.promises.readFile(new URL("./route.ts", import.meta.url), "utf8");
+
+function write(filePath, content = "") {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, content);
 }
 
-test("build/dist live in BUILD_OUTPUT_NAMES, not the unconditional ignore set", () => {
-  const ignoredNamesBlock = sliceBetween("const IGNORED_NAMES", "const BUILD_OUTPUT_NAMES");
-  // The opt-in exempted names are exactly `dist` and `build`...
-  assert.match(source, /const BUILD_OUTPUT_NAMES = new Set\(\["dist", "build"\]\);/);
-  // ...and they are gone from the always-hidden set.
-  assert.ok(!ignoredNamesBlock.includes('"dist"'), "dist must not be in IGNORED_NAMES");
-  assert.ok(!ignoredNamesBlock.includes('"build"'), "build must not be in IGNORED_NAMES");
+function git(cwd, ...args) {
+  execFileSync("git", ["-C", cwd, ...args], { stdio: "ignore" });
+}
+
+function request(filePath, type, extraQuery = "") {
+  const segments = filePath.replace(/\\/g, "/").split("/").filter(Boolean);
+  return GET(
+    new NextRequest(`http://localhost/api/files/x?type=${type}${extraQuery}`),
+    { params: Promise.resolve({ path: segments }) },
+  );
+}
+
+async function list(dir, extraQuery = "") {
+  const response = await request(dir, "list", extraQuery);
+  assert.equal(response.status, 200);
+  return response.json();
+}
+
+async function listNames(dir, extraQuery = "") {
+  const { entries } = await list(dir, extraQuery);
+  return entries.map((entry) => entry.name);
+}
+
+// BUILD_OUTPUT_NAMES is this fork's own opt-in on top of upstream's shared,
+// git-aware lib/file-tree-visibility (merge note: the old IGNORED_NAMES /
+// IGNORED_SUFFIXES local filter these tests used to assert against was
+// removed by the upstream merge; getFileTreeVisibility is now the single
+// source of truth for everything except this fork's two exempted names).
+
+test("build/dist stay hidden outside Git unless showBuildOutputs is set, other conventional names never surface", async () => {
+  const plain = path.join(root, "plain-build-outputs");
+  write(path.join(plain, "build/index.js"));
+  write(path.join(plain, "dist/bundle.js"));
+  write(path.join(plain, "node_modules/pkg/index.js"));
+  write(path.join(plain, ".git/HEAD"));
+  write(path.join(plain, "src/main.ts"));
+
+  // Default: dist/build fall back to the unconditional outside-Git name list
+  // like every other generated-output name, so they stay hidden.
+  assert.deepEqual(await listNames(plain), ["src"]);
+
+  // showBuildOutputs=1 (and the "true" spelling) exempt exactly those two
+  // names; node_modules/.git are never exemptable.
+  assert.deepEqual(await listNames(plain, "&showBuildOutputs=1"), ["build", "dist", "src"]);
+  assert.deepEqual(await listNames(plain, "&showBuildOutputs=true"), ["build", "dist", "src"]);
+  assert.deepEqual(await listNames(plain, "&showBuildOutputs=0"), ["src"]);
 });
 
-test("performance-critical names stay hidden whether or not the flag is set", () => {
-  const ignoredNamesBlock = sliceBetween("const IGNORED_NAMES", "const BUILD_OUTPUT_NAMES");
-  for (const name of ["node_modules", ".git", ".next", "__pycache__", "target", "vendor"]) {
-    assert.ok(ignoredNamesBlock.includes(`"${name}"`), `${name} must stay in IGNORED_NAMES`);
-  }
-  // Suffix filters are untouched and unconditional.
-  assert.match(source, /const IGNORED_SUFFIXES = \["\.pyc"\];/);
+test("a Git-tracked build/ stays visible with the flag off; a Git-ignored dist/ still needs the flag", async () => {
+  const repo = path.join(root, "repo-build-outputs");
+  write(path.join(repo, ".gitignore"), "dist/\n");
+  write(path.join(repo, "build/index.js"));
+  write(path.join(repo, "dist/bundle.js"), "bundle");
+  write(path.join(repo, "src/main.ts"));
+  git(repo, "init", "-q");
+  git(repo, "add", ".gitignore", "build", "src");
+
+  // getFileTreeVisibility already shows the tracked build/, independent of
+  // the fork's own flag: `isVisible(d.name) || (BUILD_OUTPUT_NAMES.has(...) &&
+  // showBuildOutputs)` short-circuits true on the first branch.
+  assert.deepEqual(await listNames(repo), ["build", "src", ".gitignore"]);
+
+  // dist/ is git-ignored (so getFileTreeVisibility hides it) and untracked;
+  // only the fork's flag can surface it, same as outside a Git work tree.
+  assert.deepEqual(await listNames(repo, "&showBuildOutputs=1"), ["build", "dist", "src", ".gitignore"]);
+
+  // Visibility only: an ignored file stays readable and downloadable by path
+  // whether or not the flag is set, because read/download never consult
+  // BUILD_OUTPUT_NAMES or getFileTreeVisibility at all (see the dedicated
+  // test below).
+  const readIgnored = await request(path.join(repo, "dist/bundle.js"), "read");
+  assert.equal(readIgnored.status, 200);
+  assert.equal((await readIgnored.json()).content, "bundle");
 });
 
-test("the flag exempts build/dist only inside the type=list branch", () => {
-  const listBlock = sliceBetween('// type === "list"', "return NextResponse.json({ entries, path: filePath });");
-  // The parameter is parsed from the query string only here...
-  assert.match(
-    listBlock,
-    /const rawShowBuildOutputs = request\.nextUrl\.searchParams\.get\("showBuildOutputs"\);/,
-  );
-  assert.match(listBlock, /const showBuildOutputs = rawShowBuildOutputs === "1" \|\| rawShowBuildOutputs === "true";/);
-  // ...and the filter chain consults it exactly for the two exempted names,
-  // with every other ignored name/suffix remaining unconditional.
-  assert.match(
-    listBlock,
-    /IGNORED_NAMES\.has\(d\.name\)\s*\n\s*\|\| \(BUILD_OUTPUT_NAMES\.has\(d\.name\) && !showBuildOutputs\)\s*\n\s*\|\| IGNORED_SUFFIXES\.some\(\(s\) => d\.name\.endsWith\(s\)\)/,
-  );
-  // The listing stays a single readdir with lazy expansion: no recursive
-  // traversal or artifact search was added.
-  assert.doesNotMatch(listBlock, /readdirSync[\s\S]*readdirSync/);
-  // No other request type reads the parameter: the only code-side read of
-  // the query parameter lives inside the list branch (the BUILD_OUTPUT_NAMES
-  // comment above mentions the flag, but comments are not reads).
-  const beforeList = source.slice(0, source.indexOf('// type === "list"'));
+test("showBuildOutputs is read exactly once, only inside the type=list branch", () => {
+  const listStart = source.indexOf('// type === "list"');
+  assert.notEqual(listStart, -1);
+  const beforeList = source.slice(0, listStart);
   assert.ok(
     !beforeList.includes('searchParams.get("showBuildOutputs")'),
     "showBuildOutputs must only be read in the type=list branch",
@@ -63,20 +124,54 @@ test("the flag exempts build/dist only inside the type=list branch", () => {
   );
 });
 
-test("the response shape and sorting of the list branch are unchanged", () => {
-  const listBlock = sliceBetween('// type === "list"', "return NextResponse.json({ entries, path: filePath });");
-  assert.match(listBlock, /return NextResponse\.json\(\{ entries, path: filePath \}\);/);
-  assert.match(listBlock, /if \(a\.isDir !== b\.isDir\) return a\.isDir \? -1 : 1;/);
-  assert.match(listBlock, /return a\.name\.localeCompare\(b\.name\);/);
+test("the list response shape and dirs-first alphabetical sort are unchanged", async () => {
+  const dir = path.join(root, "sorting");
+  write(path.join(dir, "b-file.txt"));
+  write(path.join(dir, "a-dir/x"));
+  write(path.join(dir, "a-file.txt"));
+  write(path.join(dir, "b-dir/x"));
+
+  const { entries, path: returnedPath } = await list(dir);
+  assert.equal(returnedPath, fs.realpathSync(dir));
+  assert.deepEqual(
+    entries.map((e) => [e.name, e.isDir]),
+    [["a-dir", true], ["b-dir", true], ["a-file.txt", false], ["b-file.txt", false]],
+  );
+  for (const entry of entries) {
+    assert.ok("size" in entry && "modified" in entry, "entry shape (name/isDir/size/modified) is unchanged");
+  }
 });
 
-test("download and read never gate on IGNORED_NAMES (build/ artifacts stay downloadable)", () => {
-  const downloadBlock = sliceBetween('if (type === "download")', 'if (type === "meta")');
-  assert.ok(!downloadBlock.includes("IGNORED_NAMES"), "download must not filter on IGNORED_NAMES");
-  assert.ok(!downloadBlock.includes("BUILD_OUTPUT_NAMES"), "download must not filter on BUILD_OUTPUT_NAMES");
-  const readBlock = sliceBetween('if (type === "read")', 'if (type === "download")');
-  assert.ok(!readBlock.includes("IGNORED_NAMES"), "read must not filter on IGNORED_NAMES");
-  assert.ok(!readBlock.includes("BUILD_OUTPUT_NAMES"), "read must not filter on BUILD_OUTPUT_NAMES");
+test("download and read never gate on build-output visibility (build/ artifacts stay downloadable)", async () => {
+  const plain = path.join(root, "downloadable-build-outputs");
+  write(path.join(plain, "build/app.bin"), "binary-ish-content");
+
+  // Hidden from the listing by default (no showBuildOutputs)...
+  assert.deepEqual(await listNames(plain), []);
+
+  // ...but still readable and downloadable by direct path, same as any other
+  // name getFileTreeVisibility or BUILD_OUTPUT_NAMES would hide from a list.
+  const read = await request(path.join(plain, "build/app.bin"), "read");
+  assert.equal(read.status, 200);
+  assert.equal((await read.json()).content, "binary-ish-content");
+
+  const download = await request(path.join(plain, "build/app.bin"), "download");
+  assert.equal(download.status, 200);
+
+  // Source-level guard against a regression: neither branch may reference the
+  // listing's filter helpers at all.
+  const downloadBlock = source.slice(
+    source.indexOf('if (type === "download")'),
+    source.indexOf('if (type === "meta")'),
+  );
+  const readBlock = source.slice(
+    source.indexOf('if (type === "read")'),
+    source.indexOf('if (type === "download")'),
+  );
+  for (const block of [downloadBlock, readBlock]) {
+    assert.ok(!block.includes("getFileTreeVisibility"), "must not filter on getFileTreeVisibility");
+    assert.ok(!block.includes("BUILD_OUTPUT_NAMES"), "must not filter on BUILD_OUTPUT_NAMES");
+  }
   // The allowed-roots boundary is the only path-based gate on downloads.
   assert.match(source, /isFilePathAllowed\(filePath, allowedRoots\)/);
 });

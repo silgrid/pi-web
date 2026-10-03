@@ -70,13 +70,22 @@ test("follow-up shortcuts preserve newline, IME, mobile and completion behavior"
     ["available built-in commands take priority", { altKey: true }, { slashMenuOpen: true, slashQuery: "copy", value: "/copy", displayedSlashCommands: [{ name: "copy", source: "builtin", availableWhileStreaming: true }] }, "send"],
     ["file completion takes priority", { altKey: true }, { atMenuOpen: true, atQuery: {} }, "file"],
     ["history selection takes priority", { altKey: true }, { historyMenuOpen: true }, "history"],
+    ["Ctrl+Enter mode: Enter inserts a newline", {}, { enterSendMode: "ctrlEnter", isStreaming: false }, "native"],
+    ["Ctrl+Enter mode: Ctrl+Enter sends", { ctrlKey: true }, { enterSendMode: "ctrlEnter", isStreaming: false }, "send"],
+    ["Ctrl+Enter mode: Cmd+Enter steers", { metaKey: true }, { enterSendMode: "ctrlEnter" }, "steer"],
+    ["Ctrl+Enter mode: composition grace blocks the newline", {}, { enterSendMode: "ctrlEnter", lastCompositionEndAtRef: { current: 950 } }, "prevented"],
+    ["Ctrl+Enter mode: Enter picks a file", {}, { enterSendMode: "ctrlEnter", atMenuOpen: true, atQuery: {} }, "file"],
+    ["Ctrl+Enter mode: Enter picks from history", {}, { enterSendMode: "ctrlEnter", historyMenuOpen: true }, "history"],
+    ["Ctrl+Enter mode: Enter completes an exact slash command instead of sending it", {}, { enterSendMode: "ctrlEnter", isStreaming: false, slashMenuOpen: true, slashQuery: "copy", value: "/copy", displayedSlashCommands: [{ name: "copy", source: "builtin" }] }, "slash"],
+    ["Ctrl+Enter mode: Ctrl+Enter sends an exact slash command", { ctrlKey: true }, { enterSendMode: "ctrlEnter", isStreaming: false, slashMenuOpen: true, slashQuery: "copy", value: "/copy", displayedSlashCommands: [{ name: "copy", source: "builtin" }] }, "send"],
+    ["mobile ignores Ctrl+Enter mode for plain Enter", {}, { enterSendMode: "ctrlEnter", isMobile: true }, "native"],
   ];
   for (const [name, keys, state, expected] of cases) {
     let action = "native";
     const handler = script.runInNewContext({
       Date: { now: () => 1000 },
       COMPOSITION_END_ENTER_GRACE_MS: 100,
-      isMobile: false, isStreaming: true,
+      isMobile: false, isStreaming: true, enterSendMode: "enter",
       isComposingRef: { current: false }, lastCompositionEndAtRef: { current: 0 },
       historyMenuOpen: false, inputHistory: ["previous"], historyActiveIndex: 0,
       slashMenuOpen: false, slashQuery: null, displayedSlashCommands: [{}], slashActiveIndex: 0,
@@ -116,7 +125,7 @@ test("file mention arrows wrap around the match list", () => {
     const handler = script.runInNewContext({
       Date: { now: () => 1000 },
       COMPOSITION_END_ENTER_GRACE_MS: 100,
-      isMobile: false, isStreaming: false,
+      isMobile: false, isStreaming: false, enterSendMode: "enter",
       isComposingRef: { current: false }, lastCompositionEndAtRef: { current: 0 },
       historyMenuOpen: false, inputHistory: [], historyActiveIndex: 0,
       slashMenuOpen: false, slashQuery: null, displayedSlashCommands: [], slashActiveIndex: 0,
@@ -841,4 +850,49 @@ test("the kept-draft notice strings exist in every locale catalog", async () => 
     assert.equal(typeof messages["chat.draftKeptBody"], "string", `${locale} must carry chat.draftKeptBody`);
     assert.ok(messages["chat.draftKeptBody"].length > 0, `${locale} body must not be empty`);
   }
+});
+
+test("only the chat composer offers saving a default model or reasoning level", () => {
+  const chatInputSource = readFileSync(new URL("./ChatInput.tsx", import.meta.url), "utf8");
+  const agentsConfigSource = readFileSync(new URL("./AgentsConfig.tsx", import.meta.url), "utf8");
+  assert.match(chatInputSource, /<ModelSelector[\s\S]*?defaultValue=\{defaultModel\}[\s\S]*?onSetDefault=\{onSetDefaultModel\}/);
+  // "auto" means "use the default", so it never gets a star of its own.
+  assert.match(chatInputSource, /star=\{onSetDefaultThinkingLevel && lvl !== "auto"/);
+  // A subagent profile's model is not the default for new chats.
+  assert.doesNotMatch(agentsConfigSource, /onSetDefault/);
+});
+
+test("selector rows keep the default star and the floating save button in one gutter", async () => {
+  const { SelectorRow } = await jiti.import("./SelectorRow.tsx");
+  const star = (isDefault) => ({ isDefault, saveLabel: "Save as default", defaultLabel: "Default", onSave: () => {} });
+  const row = (props) => renderToStaticMarkup(React.createElement(SelectorRow, {
+    active: false,
+    onSelect: () => {},
+    ...props,
+  }, "Alpha"));
+
+  const savable = row({ star: star(false) });
+  assert.match(savable, /role="option"/);
+  assert.match(savable, /aria-label="Save as default"/);
+  // Hidden until hover or focus, but kept out of the row's text by the gutter.
+  assert.match(savable, /opacity:0/);
+  assert.match(savable, /tabindex="-1"/);
+  assert.match(savable, /padding:7px 36px 7px 12px/);
+  assert.doesNotMatch(savable, /aria-label="Default"/);
+
+  // The default row shows a static marker in the same spot and no button.
+  const saved = row({ star: star(true) });
+  assert.match(saved, /role="img" aria-label="Default"/);
+  assert.match(saved, /fill="currentColor"/);
+  assert.doesNotMatch(saved, /Save as default/);
+
+  const plain = row({});
+  assert.doesNotMatch(plain, /Save as default|aria-label="Default"/);
+  assert.match(plain, /padding:7px 12px/);
+  // Rows without a star still line up with starred ones in the same menu.
+  assert.match(row({ gutter: true }), /padding:7px 36px 7px 12px/);
+
+  const active = row({ active: true });
+  assert.match(active, /aria-selected="true"/);
+  assert.doesNotMatch(active, /border-left/);
 });

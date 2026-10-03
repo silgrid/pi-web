@@ -11,7 +11,11 @@ const source = await readFile(new URL("./AppShell.tsx", import.meta.url), "utf8"
 test("the new-session tab defaults its cwd to the first pinned project, then the default directory, then the current workspace", () => {
   assert.match(source, /import \{ listCustomDirectories \} from "@\/lib\/custom-directories";/);
   assert.match(source, /const customDirs = listCustomDirectories\(\);\s*if \(customDirs\.length > 0\) return customDirs\[0\]\.path;/);
-  assert.match(source, /fetch\("\/api\/default-cwd", \{ method: "POST" \}\)[\s\S]*?if \(data\.cwd\) return data\.cwd;/);
+  // pi#87: the default directory must ALSO be selected through
+  // /api/cwd/validate (the route's documented contract) before it becomes the
+  // tab's cwd — otherwise a fresh server 403s every cwd-scoped query the new
+  // tab fires (project trust, models) before any session registers the root.
+  assert.match(source, /fetch\("\/api\/default-cwd", \{ method: "POST" \}\)[\s\S]*?if \(data\.cwd\) \{[\s\S]*?fetch\("\/api\/cwd\/validate", \{[\s\S]*?JSON\.stringify\(\{ cwd: data\.cwd \}\)[\s\S]*?return data\.cwd;/);
   assert.match(source, /newSessionCwd \?\? selectedSession\?\.cwd \?\? activeCwd \?\? null;\s*\}, \[newSessionCwd, selectedSession, activeCwd\]\);/);
   // The close-last auto page AND the fresh-entry new-session landing (pi#27)
   // both route through the resolver (pi#25 removed the tab-strip "+" and its

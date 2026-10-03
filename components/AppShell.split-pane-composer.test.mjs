@@ -11,13 +11,27 @@ import ts from "typescript";
 // AppShell created ONE shared chatInputRef and passed it only to the classic
 // ChatWindow; the split renderPane panes rendered ChatWindow with NO
 // chatInputRef, so ChatInput mounted with ref={undefined} and the imperative
-// handle never existed in split view. ChatWindow.handleEditContent
-// (chatInputRef?.current?.replaceMessage) was therefore a silent no-op:
-// the branch navigation happened, but the historical message was never
-// restored — the composer ended up EMPTY after the click in the empty-before
-// case, and a non-empty draft got no feedback at all (the silent skip users
-// read as "the click ate my input"). Mobile classic was immune because its
-// ChatWindow received the shared ref.
+// handle never existed in split view, so the pane's composer could never be
+// addressed by anything that goes through it.
+//
+// Upstream #1009 ("branch a history edit only when it is sent", picked up by
+// the pi#86 merge) subsequently moved handleEditContent itself out of
+// ChatWindow and into useAgentSession: the click no longer navigates the
+// branch immediately — it only calls opts.chatInputRef?.current?.replaceMessage
+// and stages the edit (setEdit); the navigate_tree move happens inside
+// handleSend, right before the staged message is actually sent, so a
+// cancelled or abandoned edit never leaves the session on another branch.
+// opts.chatInputRef is the exact same (pane-scoped) ref ChatWindow was given,
+// so the pi#33 fix (one ref per pane, see getPaneChatInputRef below) still
+// has to survive that relocation for replaceMessage to land in the right
+// pane's composer — that is what this file pins end to end.
+//
+// Without a pane-scoped ref, ChatInput mounted with ref={undefined} and the
+// imperative handle never existed in split view: the historical message was
+// never restored — the composer ended up EMPTY after the click in the
+// empty-before case, and a non-empty draft got no feedback at all (the
+// silent skip users read as "the click ate my input"). Mobile classic was
+// immune because its ChatWindow received the shared ref.
 //
 // No additional clearing writer exists for the has-text case: draftKey is
 // session?.id (stable across in-session navigate_tree), panes render with
@@ -33,6 +47,9 @@ const source = await readFile(new URL("./AppShell.tsx", import.meta.url), "utf8"
 const chatWindow = await readFile(new URL("./ChatWindow.tsx", import.meta.url), "utf8");
 const chatInput = await readFile(new URL("./ChatInput.tsx", import.meta.url), "utf8");
 const messageView = await readFile(new URL("./MessageView.tsx", import.meta.url), "utf8");
+// handleEditContent/replaceMessage's actual implementation lives here since
+// upstream #1009; see the file header for why this file still needs to read it.
+const useAgentSessionSource = await readFile(new URL("../hooks/useAgentSession.ts", import.meta.url), "utf8");
 
 // Extract the renderPane callback slice (same technique as
 // AppShell.split-pane-stats.test.mjs).
@@ -91,13 +108,25 @@ test("the classic layout keeps the shared handle (mobile regression pin)", () =>
   assert.match(source, /chatInputRef=\{chatInputRef\}/);
 });
 
-test("ChatWindow forwards the pane handle to ChatInput and the edit-from-here click", () => {
+test("ChatWindow forwards the pane handle to ChatInput, and the hook's edit-from-here click reaches it", () => {
   // ChatWindow must keep forwarding its (now pane-scoped) chatInputRef into
-  // ChatInput's imperative handle, and handleEditContent must keep routing
-  // "Edit from here" through it — the click sequence only needs the ref to
-  // actually reach a mounted composer.
+  // ChatInput's imperative handle...
   assert.match(chatWindow, /ref=\{chatInputRef\}/);
-  assert.match(chatWindow, /chatInputRef\?\.current\?\.replaceMessage\(message\)/);
+  // ...and into the useAgentSession hook call as the very same prop (opts.chatInputRef),
+  // since upstream #1009 moved handleEditContent off ChatWindow and into the hook.
+  assert.match(chatWindow, /useAgentSession\(\{[\s\S]*?chatInputRef,[\s\S]*?\}\);/);
+  // ChatWindow must not shadow the hook with a local reimplementation —
+  // handleEditContent/cancelEdit come straight out of the hook's destructure.
+  assert.doesNotMatch(chatWindow, /const handleEditContent = useCallback/);
+  assert.match(chatWindow, /handleSend, handleAbort, handleFork, handleEditContent, cancelEdit, handleModelChange,/);
+  // The hook's handleEditContent is what actually calls replaceMessage, using
+  // the exact opts.chatInputRef it was handed — i.e. the pane-scoped ref, not
+  // some other handle — so the pi#33 per-pane guarantee survives the move.
+  assert.match(
+    useAgentSessionSource,
+    /const handleEditContent = useCallback\(\(message: UserMessage, entryId: string\) => \{\s*\n\s*if \(!session\?\.id\) return;\s*\n\s*opts\.chatInputRef\?\.current\?\.replaceMessage\(message\);\s*\n\s*setEdit\(entryId\);/,
+    "the hook must restore the historical message into the same pane-scoped composer the click happened in",
+  );
   assert.match(chatInput, /replaceMessage\(message: UserMessage\) \{/);
 });
 
@@ -196,12 +225,25 @@ test("the draft survives the navigate sequence: no writer re-keys or remounts th
     /const previousDraftKey = draftKeyRef\.current;\s*\n\s*if \(previousDraftKey === draftKey\) return;/,
     "the re-key writer must remain a no-op while the draft key is unchanged",
   );
-  // Failed navigation (handleNavigate false) never reaches the composer:
-  // ChatWindow keeps routing through handleNavigate, and MessageView gates
-  // the restore on the navigated flag.
-  assert.match(chatWindow, /onNavigate=\{sessionBusy \? undefined : handleNavigate\}/);
+  // Upstream #1009 ("branch a history edit only when it is sent") removed
+  // onNavigate from this click path entirely: "Edit from here" now only
+  // stages the edit (handleEditContent, still gated by sessionBusy the same
+  // way the old onNavigate gate was), and MessageView calls onEditContent
+  // directly — there is no onNavigate left anywhere in ChatWindow to gate.
+  assert.doesNotMatch(chatWindow, /onNavigate=/);
+  assert.match(chatWindow, /onEditContent=\{sessionBusy \? undefined : handleEditContent\}/);
   assert.match(
     messageView,
-    /void onNavigate!\(entryId!\)\.then\(\(navigated\) => \{\s*\n\s*if \(navigated\) onEditContent\?\.\(editTarget\);/,
+    /onClick=\{\(\) => onEditContent!\(editTarget, entryId!\)\}/,
+  );
+  // Failed navigation (handleNavigate false) still never reaches a "sent"
+  // state: the branch move happens inside handleSend, right before the
+  // staged message is actually sent, and a rejected navigate re-stages the
+  // same edit and hands the typed text back to the composer instead of
+  // silently dropping it or advancing onto another branch.
+  assert.match(
+    useAgentSessionSource,
+    /if \(editEntryId\) \{[\s\S]*?setEdit\(null\);\s*\n\s*if \(!\(await handleNavigateRef\.current\?\.\(entryId\)\)\) \{\s*\n\s*setEdit\(entryId\);\s*\n\s*restoreSubmission\(message, images, composerDraftKey\);\s*\n\s*return;\s*\n\s*\}/,
+    "a rejected in-flight navigate must re-stage the edit and hand the typed text back to the composer",
   );
 });

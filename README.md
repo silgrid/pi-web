@@ -89,6 +89,7 @@ For port and hostname, command-line options override the corresponding environme
 | `PI_WEB_PASSWORD` | Enable browser password login; API clients may use Basic Auth with username `pi` | Authentication disabled |
 | `PI_WEB_IDLE_TIMEOUT_MS` | Session idle timeout in milliseconds, up to `2147483647`; `0` disables idle shutdown; invalid or out-of-range values use the default | `600000` (10 min) |
 | `PI_WEB_PUSH_ALLOWED_ENDPOINT_SUFFIXES` | Additional Web Push endpoint host suffixes (comma-separated) accepted by `/api/push/subscribe`, on top of the built-in browser push services (FCM, Mozilla autopush, Apple) | Unset |
+| `PI_WEB_SHUTDOWN_DEADLINE_MS` | How long extensions get to handle `session_shutdown` before a closing session is disposed anyway, in milliseconds up to `2147483647`; `0`, invalid or out-of-range values use the default | `5000` (5 s) |
 
 For example:
 

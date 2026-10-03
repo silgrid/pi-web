@@ -12,6 +12,14 @@ const eslintConfig = [
     ignores: ["desktop/**"],
   },
   {
+    // mobile/ is the Capacitor Android shell: Gradle build outputs,
+    // Capacitor's node_modules, and vendored platform scaffolding, all
+    // generated or third-party. None of it is this app's source; linting a
+    // build artifact (mergeDebugAssets/native-bridge.js) is what made the
+    // warning baseline nonzero in the first place.
+    ignores: ["mobile/**"],
+  },
+  {
     rules: {
       "react-hooks/immutability": "off",
       "react-hooks/refs": "off",

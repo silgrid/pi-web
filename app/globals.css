@@ -922,6 +922,17 @@ pre, code {
   margin: 4px 0;
 }
 
+/* A codemode card's script sits flush inside the card, which draws the border. */
+.tool-codemode-script .markdown-code-block {
+  margin: 0;
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+}
+.tool-codemode-script .markdown-code-block pre {
+  max-height: 360px;
+}
+
 .markdown-compaction-message {
   line-height: 1.5;
 }
@@ -2128,5 +2139,25 @@ span.token.table {
 @media (prefers-reduced-motion: reduce) {
   .chat-row-prepended {
     animation: none;
+  }
+}
+
+/* While the software keyboard is up (set by useViewportHeight), only a few
+   hundred pixels remain above it. Hand them to the conversation: collapse the
+   model/controls row and the extension status shelf, and drop the home
+   indicator inset the keyboard already covers. Both come back when the
+   keyboard closes. Phone landscape is wider than the mobile breakpoint but
+   leaves the least room of all, so short touch screens opt in too; tablets
+   keep their controls because the keyboard leaves them enough height. */
+@media (max-width: 640px), (pointer: coarse) and (max-height: 500px) {
+  html[data-keyboard-open] .chat-input-controls,
+  html[data-keyboard-open] .extension-status-shelf {
+    display: none !important;
+  }
+  html[data-keyboard-open] .chat-content {
+    padding-bottom: 0 !important;
+  }
+  html[data-keyboard-open] .chat-input-shell {
+    padding-bottom: 6px !important;
   }
 }

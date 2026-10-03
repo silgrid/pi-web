@@ -1,14 +1,6 @@
 import { NextResponse } from "next/server";
 import { mkdirSync } from "fs";
-import { homedir } from "os";
-import { join } from "path";
-import { allowFileRoot } from "@/lib/file-access";
-
-// Shared by GET and POST so both report/select exactly the same directory.
-function defaultCwdPath(): string {
-  const date = new Date().toISOString().slice(0, 10).replace(/-/g, "");
-  return join(homedir(), `pi-cwd-${date}`);
-}
+import { defaultCwdPath } from "@/lib/default-cwd";
 
 // GET /api/default-cwd
 // Reports today's default directory (~/pi-cwd-<YYYYMMDD>) WITHOUT creating
@@ -21,12 +13,12 @@ export async function GET() {
 }
 
 // POST /api/default-cwd
-// Creates ~/pi-cwd-<YYYYMMDD> if it doesn't exist and returns the path.
+// Creates ~/pi-cwd/<YYYYMMDD> (local date) if it doesn't exist and returns the path.
+// The client then selects it through /api/cwd/validate like any other directory.
 export async function POST() {
   try {
     const dir = defaultCwdPath();
     mkdirSync(dir, { recursive: true });
-    allowFileRoot(dir);
     return NextResponse.json({ cwd: dir });
   } catch (error) {
     return NextResponse.json({ error: String(error) }, { status: 500 });

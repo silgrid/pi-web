@@ -305,7 +305,9 @@ export async function addWorktree(cwd: string, branch: string): Promise<{ path: 
 
 export async function removeWorktree(cwd: string, worktreePath: string, force = false): Promise<void> {
   const worktrees = await listWorktrees(cwd);
-  const target = findWorktreeByPath(worktrees, worktreePath);
+  // Git reports worktrees by their real path; the caller's may run through a link
+  // (macOS's /var and /tmp are links to /private/...).
+  const target = findWorktreeByPath(worktrees, realPathOrSelf(worktreePath));
   if (!target) throw new Error(`Not a worktree of this repository: ${worktreePath}`);
   if (target.isMain) throw new Error("Cannot remove the main worktree");
 
@@ -315,6 +317,15 @@ export async function removeWorktree(cwd: string, worktreePath: string, force = 
     throw new Error(extractGitError(error));
   }
   invalidateProjectCache();
+}
+
+/**
+ * Git refuses to remove a dirty worktree, or one containing initialized
+ * submodules, without --force. A locked worktree needs a double force and is
+ * deliberately not matched: offering a single force there would just fail.
+ */
+export function worktreeRemovalRequiresForce(message: string): boolean {
+  return /contains modified or untracked files|is dirty|containing submodules/i.test(message);
 }
 
 function extractGitError(error: unknown): string {
