@@ -49,11 +49,13 @@ test("default cwd has no sidebar dropdown shortcut (dropped in pi#49 R2); AppShe
   const appShellSource = await readFile(new URL("./AppShell.tsx", import.meta.url), "utf8");
   assert.match(appShellSource, /const resolveNewSessionTabCwd = useCallback/);
   assert.match(appShellSource, /fetch\("\/api\/default-cwd", \{ method: "POST" \}\)/);
-  // The deviation: no /api/cwd/validate round trip backs this path, unlike
-  // commitCustomPath above which installs setValidatedProject(...) before
-  // moving the cwd.
+  // pi#87 closed the old deviation: the default directory now goes through
+  // the same /api/cwd/validate selection as commitCustomPath above, so a
+  // fresh server stops 403ing the cwd-scoped queries (project trust,
+  // models) the new tab fires before any session registers the root.
   const resolverStart = appShellSource.indexOf("const resolveNewSessionTabCwd = useCallback");
   const resolverEnd = appShellSource.indexOf("}, [newSessionCwd, selectedSession, activeCwd]);", resolverStart);
   const resolverSource = appShellSource.slice(resolverStart, resolverEnd);
-  assert.doesNotMatch(resolverSource, /cwd\/validate/);
+  assert.match(resolverSource, /api\/cwd\/validate/);
+  assert.match(resolverSource, /body: JSON\.stringify\(\{ cwd: data\.cwd \}\)/);
 });

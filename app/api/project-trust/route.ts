@@ -9,7 +9,7 @@ import { destroyRpcSessionsForCwd, hasBusyRpcSessionForCwd } from "@/lib/rpc-man
 
 export const dynamic = "force-dynamic";
 
-async function validateCwd(value: unknown): Promise<
+async function resolveCwd(value: unknown): Promise<
   { cwd: string } | { response: NextResponse }
 > {
   if (typeof value !== "string" || !value.trim()) {
@@ -24,16 +24,38 @@ async function validateCwd(value: unknown): Promise<
   } catch {
     return { response: NextResponse.json({ error: "Directory does not exist" }, { status: 400 }) };
   }
-
-  const allowedRoots = await getAllowedFileRoots();
-  if (!isExistingFilePathAllowed(cwd, allowedRoots)) {
-    return { response: NextResponse.json({ error: "Access denied" }, { status: 403 }) };
-  }
   return { cwd };
 }
 
+/**
+ * The trust ACTION is a registration step: it must stay inside the allowed
+ * roots, the same policy that governs every other write the operator makes
+ * about a project (cwd/validate, files, worktrees). A directory reaches the
+ * allowed roots exactly by being selected through those flows.
+ */
+async function validateCwdForTrust(value: unknown): Promise<
+  { cwd: string } | { response: NextResponse }
+> {
+  const result = await resolveCwd(value);
+  if ("response" in result) return result;
+
+  const allowedRoots = await getAllowedFileRoots();
+  if (!isExistingFilePathAllowed(result.cwd, allowedRoots)) {
+    return { response: NextResponse.json({ error: "Access denied" }, { status: 403 }) };
+  }
+  return { cwd: result.cwd };
+}
+
 export async function GET(req: Request) {
-  const result = await validateCwd(new URL(req.url).searchParams.get("cwd"));
+  // The GET is a status query, not an action: AppShell asks it for the cwd a
+  // new session will compose in — including one the operator has not yet
+  // selected through cwd/validate (the entry flow's default directory).
+  // Answering 403 there made the browser log an error on every fresh entry
+  // before any session registered the directory. The status itself carries
+  // no capability: it only reports whether the directory holds trust-requiring
+  // resources and whether a trust decision is recorded — it executes nothing
+  // and writes nothing. The POST below still refuses unregistered paths.
+  const result = await resolveCwd(new URL(req.url).searchParams.get("cwd"));
   if ("response" in result) return result.response;
   return NextResponse.json(getProjectTrustStatus(result.cwd, getAgentDir()));
 }
@@ -41,7 +63,7 @@ export async function GET(req: Request) {
 export async function POST(req: Request) {
   try {
     const body = await req.json() as { cwd?: unknown };
-    const result = await validateCwd(body.cwd);
+    const result = await validateCwdForTrust(body.cwd);
     if ("response" in result) return result.response;
 
     const agentDir = getAgentDir();

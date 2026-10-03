@@ -216,8 +216,12 @@ class ConnectAttempt {
 function delay(ms: number): { promise: Promise<void>; cancel: () => void } {
   let timer: NodeJS.Timeout | undefined;
   const promise = new Promise<void>((resolve) => {
+    // Ref'd on purpose: callers await this promise (a prompt's wait for its
+    // servers, the replace wait for a transport). An unref'd timer never
+    // fires when nothing else holds the event loop, so an otherwise-idle
+    // process would hang on the wait instead of timing out — exactly what
+    // CI's Node 22 test runner exposed.
     timer = setTimeout(resolve, ms);
-    timer.unref?.();
   });
   return { promise, cancel: () => clearTimeout(timer) };
 }

@@ -1103,11 +1103,27 @@ export function AppShell() {
     if (customDirs.length > 0) return customDirs[0].path;
     try {
       // POST is the established "use default directory" semantic (pi#18):
-      // it creates and allow-lists the directory, so the composer's cwd
-      // validation does not hit a 403 on a not-yet-created dir.
+      // it creates the directory; selection then goes through /api/cwd/validate
+      // like any other directory, which allow-lists it so the composer's cwd
+      // validation — and every cwd-scoped query the new tab fires (project
+      // trust, models) — does not hit a 403 on a not-yet-registered dir. The
+      // pi#27 entry flow used to skip that selection step, so a fresh server
+      // 403'd both queries before any session existed in the directory.
       const response = await fetch("/api/default-cwd", { method: "POST" });
       const data = await response.json() as { cwd?: string };
-      if (data.cwd) return data.cwd;
+      if (data.cwd) {
+        try {
+          await fetch("/api/cwd/validate", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ cwd: data.cwd }),
+          });
+        } catch {
+          // Best-effort: an offline failure defers root registration to the
+          // next validate/commit that touches this directory.
+        }
+        return data.cwd;
+      }
     } catch {
       // fall through to the current workspace
     }
