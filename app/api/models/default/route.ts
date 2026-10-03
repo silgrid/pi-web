@@ -51,6 +51,12 @@ export async function PUT(req: Request) {
   } catch {
     return Response.json({ error: "Invalid JSON body" }, { status: 400 });
   }
+  // A JSON-null body parses successfully and would surface as a TypeError
+  // (reading .cwd/.provider off null) instead of a controlled 400 (review
+  // finding: non-blocking, fixed alongside).
+  if (body === null || typeof body !== "object") {
+    return Response.json({ error: "Invalid JSON body" }, { status: 400 });
+  }
   const edit = parseEdit(body);
   if (!edit) {
     return Response.json({ error: "Expected provider and modelId, or a valid thinkingLevel" }, { status: 400 });
