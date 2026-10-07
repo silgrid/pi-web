@@ -13,6 +13,7 @@ import {
 } from "@/lib/file-paths";
 import type { GitFileStatus, GitFileStatusKind, GitStatusResponse } from "@/lib/git-types";
 import type { FileIndexEntry } from "@/lib/file-fuzzy";
+import { uploadFiles, type UploadConflictStrategy, type UploadError, type UploadResponse } from "@/lib/file-upload-client";
 import { buildSearchTree, type SearchTreeNode } from "@/lib/search-tree";
 import {
   getShowBuildOutputs,
@@ -67,21 +68,6 @@ export interface FileExplorerHandle {
 }
 
 type UploadPhase = "idle" | "checking" | "uploading";
-type UploadConflictStrategy = "error" | "overwrite" | "skip";
-
-interface UploadError {
-  name: string;
-  error: string;
-}
-
-interface UploadResponse {
-  uploaded?: string[];
-  skipped?: string[];
-  errors?: UploadError[];
-  conflicts?: string[];
-  nonReplaceable?: string[];
-  error?: string;
-}
 
 interface UploadSummary {
   uploaded: string[];
@@ -186,41 +172,6 @@ function GitStatusBadge({ status, t }: { status: GitFileStatus; t: Translate }) 
       {status.code}
     </span>
   );
-}
-
-function uploadFiles(
-  targetDirectory: string,
-  files: File[],
-  strategy: UploadConflictStrategy,
-  onProgress: (progress: number) => void,
-): Promise<{ status: number; data: UploadResponse }> {
-  return new Promise((resolve, reject) => {
-    const formData = new FormData();
-    files.forEach((file) => formData.append("files", file, file.name));
-
-    const xhr = new XMLHttpRequest();
-    xhr.open(
-      "POST",
-      `/api/files/${encodeFilePathForApi(targetDirectory)}?type=upload&conflict=${strategy}`,
-    );
-    xhr.upload.onprogress = (event) => {
-      if (event.lengthComputable && event.total > 0) {
-        onProgress(Math.round((event.loaded / event.total) * 100));
-      }
-    };
-    xhr.onerror = () => reject(new Error("Network error while uploading files"));
-    xhr.onabort = () => reject(new Error("Upload cancelled"));
-    xhr.onload = () => {
-      let data: UploadResponse = {};
-      try {
-        data = JSON.parse(xhr.responseText) as UploadResponse;
-      } catch {
-        if (xhr.responseText) data.error = xhr.responseText;
-      }
-      resolve({ status: xhr.status, data });
-    };
-    xhr.send(formData);
-  });
 }
 
 function MentionIcon({ size = 11 }: { size?: number }) {

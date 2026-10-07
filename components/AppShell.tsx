@@ -2992,6 +2992,7 @@ export function AppShell() {
               onContextUsageChange={handleContextUsageChange}
               externalSessionChange={externalSessionChange}
               onOpenFile={handleOpenLinkedFile}
+              onFilesUploaded={handleExplorerRefresh}
               onOpenSession={handleOpenSession}
               onAskInNewChat={handleAskInNewChat}
               quoteSelectionEnabled={quoteSelectionEnabled}

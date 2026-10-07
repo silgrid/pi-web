@@ -102,6 +102,7 @@ lib/
   draft-store.ts       local draft persistence helpers
   extension-ui-queue.ts  FIFO queues for extension dialogs and custom panels, keyed by request id
   file-access.ts       allowed file roots for /api/files and worktrees
+  file-upload-client.ts     browser upload to /api/files ?type=upload, shared by the explorer and chat drops
   linked-directory.ts  directory links that lead outside the allowed roots + the allow-link check
   default-cwd.ts       dated ~/pi-cwd/YYYYMMDD path for "Use default directory"
   file-paths.ts        client/server path encoding helpers
@@ -158,7 +159,7 @@ components/
 hooks/
   useAgentSession.ts  messages + streaming + SSE + fork/navigate/reconciliation logic
   useAudio.ts         completion sound + browser AudioContext unlock
-  useDragDrop.ts      shared drag/drop state
+  useDragDrop.ts      chat drop zone: dropped files and folders, in drop order
   useIsMobile.ts      responsive breakpoint hook
   useTheme.ts         theme state
 ```

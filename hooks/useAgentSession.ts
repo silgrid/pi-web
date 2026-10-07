@@ -2665,6 +2665,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     handleEditContent,
     // Present only while a history edit is pending.
     cancelEdit: editEntryId ? cancelEdit : undefined,
+    addNotice,
     setNoticePaused: setPausedNoticeId,
     handleToolPresetChange, handleThinkingLevelChange, handleSetDefaultModel, handleSetDefaultThinkingLevel, loadTools, loadSlashCommands, setActiveLeafId, setData, setMessages, loadContext,
     refreshFromDisk,
