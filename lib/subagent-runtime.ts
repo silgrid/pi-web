@@ -33,7 +33,7 @@ import {
 } from "./subagents";
 import type { SessionEntry } from "./types";
 import { buildSubagentPromptPlan } from "./subagent-prompt";
-import { createExactSystemPromptExtension } from "./exact-system-prompt";
+import { createSubagentSkillsBinding } from "./subagent-skills";
 import { appendSubagentInputFiles, loadSubagentInputFiles } from "./subagent-input";
 import { projectTrustReloadOptions } from "./project-trust";
 import { createSubagentCodemodeExtension, createSubagentMcpExtensions } from "./builtin-extensions";
@@ -63,7 +63,7 @@ export interface SubagentRuntimeDependencies {
   getSession(sessionId: string): HostSession | undefined;
   registerSession(
     inner: AgentSessionLike,
-    options?: { exactSystemPrompt?: string; chatOnly?: boolean; mcpHost?: McpHost },
+    options?: { exactSystemPrompt?: () => string; chatOnly?: boolean; mcpHost?: McpHost },
   ): HostSession | void;
   reopenSession(sessionId: string, sessionFile: string): Promise<HostSession>;
   resolveSessionPath(sessionId: string): Promise<string | null>;
@@ -282,6 +282,11 @@ export function createSubagentController(
       const mcpEnabled = profile.mcp === "on";
       const chatOnly = promptPlan.chatOnly;
       const { appendSystemPrompt, delegatedTask } = promptPlan;
+      const skillsBinding = createSubagentSkillsBinding({
+        loadSkills: profile.loadSkills,
+        skills: profile.skills,
+        exactSystemPrompt: promptPlan.exactSystemPrompt,
+      });
       const codemodeExtension = codemodeEnabled
         ? await createSubagentCodemodeExtension({
             agentDir,
@@ -299,15 +304,17 @@ export function createSubagentController(
             codemode: codemodeEnabled,
           })
         : undefined;
-      // The fork has no subagent skills binding: its exact-prompt factory below is the only
-      // other inline factory, and codemode's rides alongside it.
+      // The fork has no subagent skills binding: its exact prompt and the named skills' text
+      // are projected by the binding's compose factory, and codemode's rides alongside it.
       const extensionFactories = [
         ...(codemodeExtension ? [codemodeExtension] : []),
         ...(mcp ? [...mcp.extensions, createSubagentMcpPolicyExtension(() => mcpScope)] : []),
-        ...(promptPlan.exactSystemPrompt !== undefined
-          ? [createExactSystemPromptExtension(() => promptPlan.exactSystemPrompt)]
-          : []),
+        ...skillsBinding.loaderOptions.extensionFactories ?? [],
       ];
+      // The binding's own factory is in the array above; the rest of its loader options
+      // (noSkills, skillsOverride) spread into resourceLoaderOptions below.
+      const { extensionFactories: _skillsFactories, ...skillsLoaderOptions } =
+        skillsBinding.loaderOptions;
       if (!chatOnly) initTheme();
       const services = await createAgentSessionServices({
         cwd: childCwd,
@@ -316,7 +323,7 @@ export function createSubagentController(
         settingsManager,
         resourceLoaderOptions: {
           noExtensions: !profile.loadExtensions,
-          noSkills: !profile.loadSkills,
+          ...skillsLoaderOptions,
           // `builtin:tool-search` / `builtin:mcp` load under `noExtensions` too, as the CLI's
           // `-e builtin:<name>` does (`subagentExtensionLoaderOptions()` upstream).
           ...(mcpEnabled ? { additionalExtensionPaths: [...SUBAGENT_MCP_EXTENSION_PATHS] } : {}),
@@ -399,6 +406,7 @@ export function createSubagentController(
           ...(codemodeEnabled ? { codemode: true as const } : {}),
           ...(mcpEnabled ? { mcp: true as const } : {}),
           loadSkills: profile.loadSkills,
+          ...(profile.skills !== undefined ? { skills: [...profile.skills] } : {}),
           loadExtensions: profile.loadExtensions,
           ...(allExtensionTools ? { allExtensionTools: true } : {}),
         ...(promptPlan.exactSystemPrompt !== undefined ? { exactSystemPrompt: promptPlan.exactSystemPrompt } : {}),
@@ -417,9 +425,10 @@ export function createSubagentController(
         ...(thinking ? { thinkingLevel: thinking as ThinkingLevel } : {}),
         ...subagentToolOptions({ tools: activeTools, allExtensionTools, mcp: mcpEnabled }),
       });
+      skillsBinding.setActiveToolsGetter(() => inner.getActiveToolNames());
       const childSession = dependencies.registerSession(inner, {
-        ...(promptPlan.exactSystemPrompt !== undefined
-          ? { exactSystemPrompt: promptPlan.exactSystemPrompt }
+        ...(skillsBinding.getExactSystemPrompt !== undefined
+          ? { exactSystemPrompt: skillsBinding.getExactSystemPrompt }
           : {}),
         chatOnly,
         ...(mcp?.mcpHost ? { mcpHost: mcp.mcpHost } : {}),

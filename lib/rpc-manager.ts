@@ -49,6 +49,7 @@ import { createExactSystemPromptExtension } from "./exact-system-prompt";
 import { createPiWebBuiltinExtensions, createSubagentCodemodeExtension, createSubagentMcpExtensions } from "./builtin-extensions";
 import type { McpHost } from "./mcp-host";
 import { createReadOnlyMcpPolicyExtension, createSubagentMcpPolicyExtension } from "./mcp-read-only-policy";
+import { createSubagentSkillsBinding } from "./subagent-skills";
 import { isNestedToolExecutionEvent } from "./agent-event-wire";
 import {
   appendClearedSessionToolSelection,
@@ -2090,7 +2091,7 @@ const SUBAGENT_CONTROLLER = createSubagentController({
   registerSession: (inner, options) => {
     const wrapper = new AgentSessionWrapper(inner, {
       ...(options?.exactSystemPrompt !== undefined
-        ? { exactSystemPrompt: () => options.exactSystemPrompt! }
+        ? { exactSystemPrompt: options.exactSystemPrompt }
         : {}),
       chatOnly: options?.chatOnly,
       suppressCompletionNotifications: true,
@@ -2505,7 +2506,6 @@ export async function startRpcSession(
     // after the session is created, so the getter is filled in below.
     const exactSystemPromptRef: { current?: () => string } = {};
     const exactSystemPromptExtension = createExactSystemPromptExtension(() => exactSystemPromptRef.current?.());
-    const usesExactSystemPrompt = chatOnly || subagentResources?.exactSystemPrompt !== undefined;
     // codemode, tool-search, and mcp, as the pi CLI loads them, and the host that decides
     // which MCP servers the session connects (ADR 0006).
     const builtins = subagentResources || chatOnly
@@ -2526,6 +2526,23 @@ export async function startRpcSession(
           codemode: subagentResources.codemode === true,
         })
       : undefined;
+    const skillsBinding = subagentResources ? createSubagentSkillsBinding({
+      loadSkills: subagentResources.loadSkills,
+      skills: subagentResources.skills,
+      exactSystemPrompt: subagentResources.exactSystemPrompt
+        ?? (chatOnly ? subagentResources.appendSystemPrompt[0] ?? "" : undefined),
+    }) : undefined;
+    // The binding's own compose factory is merged into the extensionFactories below; the
+    // rest of its loader options (noSkills, skillsOverride) spread into resourceLoaderOptions.
+    const skillsExtensionFactories = skillsBinding?.loaderOptions.extensionFactories;
+    const skillsLoaderOptions = skillsBinding
+      ? {
+          noSkills: skillsBinding.loaderOptions.noSkills,
+          ...(skillsBinding.loaderOptions.skillsOverride
+            ? { skillsOverride: skillsBinding.loaderOptions.skillsOverride }
+            : {}),
+        }
+      : undefined;
     const services = await createAgentSessionServices({
       cwd: sessionCwd,
       agentDir,
@@ -2533,7 +2550,7 @@ export async function startRpcSession(
       resourceLoaderOptions: subagentResources
         ? {
             noExtensions: !subagentResources.loadExtensions,
-            noSkills: !subagentResources.loadSkills,
+            ...skillsLoaderOptions,
             // `builtin:tool-search` / `builtin:mcp` load under `noExtensions` too, as the CLI's
             // `-e builtin:<name>` does (`subagentExtensionLoaderOptions()` upstream).
             ...(subagentResources.mcp
@@ -2549,15 +2566,16 @@ export async function startRpcSession(
                 }
               : {}),
             appendSystemPrompt: subagentResources.appendSystemPrompt,
-            // The exact prompt goes through before_agent_start; codemode and MCP ride alongside it.
-            ...((subagentCodemode || subagentMcp || usesExactSystemPrompt)
+            // The exact prompt and the named skills' text go through before_agent_start
+            // (the binding's compose factory); codemode and MCP ride alongside it.
+            ...((subagentCodemode || subagentMcp || skillsExtensionFactories)
               ? {
                   extensionFactories: [
+                    ...(skillsExtensionFactories ?? []),
                     ...(subagentCodemode ? [subagentCodemode] : []),
                     ...(subagentMcp
                       ? [...subagentMcp.extensions, createSubagentMcpPolicyExtension(() => subagentResources)]
                       : []),
-                    ...(usesExactSystemPrompt ? [exactSystemPromptExtension] : []),
                   ],
                 }
               : {}),
@@ -2661,12 +2679,11 @@ export async function startRpcSession(
       );
     }
 
-    const exactSystemPrompt = subagentResources?.exactSystemPrompt !== undefined
-      ? () => subagentResources.exactSystemPrompt!
+    skillsBinding?.setActiveToolsGetter(() => inner.getActiveToolNames());
+    const exactSystemPrompt = subagentResources
+      ? skillsBinding!.getExactSystemPrompt
       : chatOnly
-        ? subagentResources
-          ? () => subagentResources.appendSystemPrompt[0] ?? ""
-          : () => contextFilesSystemPrompt(inner.resourceLoader.getAgentsFiles().agentsFiles)
+        ? () => contextFilesSystemPrompt(inner.resourceLoader.getAgentsFiles().agentsFiles)
         : undefined;
     exactSystemPromptRef.current = exactSystemPrompt;
     const mcpHost = builtins?.mcpHost ?? subagentMcp?.mcpHost;

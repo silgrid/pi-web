@@ -47,6 +47,19 @@ test("shows code mode as its own field with a plain-language hint", async () => 
   }
 });
 
+test("editor draft preserves named and empty selections independently of activation", () => {
+  const declaration = source.slice(source.indexOf("function editableProfile("), source.indexOf("function profileKey("));
+  const code = ts.transpileModule(declaration, { compilerOptions: { target: ts.ScriptTarget.ES2020 } }).outputText;
+  const editable = vm.runInNewContext(`${code}; editableProfile`);
+  for (const skills of [["review", "audit"], []]) {
+    const draft = editable({ name: "reviewer", tools: [], loadSkills: false, skills });
+    assert.equal(draft.loadSkills, false);
+    assert.deepEqual(Array.from(draft.skills ?? ["LOST"]), skills);
+    draft.skills.push("new");
+    assert.notEqual(draft.skills.length, skills.length);
+  }
+});
+
 test("keeps same-name profiles selectable by scope and groups writable sources first", () => {
   assert.match(source, /return `\$\{profile\.scope\}:\$\{profile\.name\}`/);
   assert.match(source, /\["project", "global", "workspace", "builtin"\] as const/);
@@ -156,6 +169,21 @@ test("uses the same form controls for editable and readonly profiles", () => {
   assert.match(source, /<Toggle label=\{t\("agents\.loadExtensions"\)\} disabled=\{disabled\}/);
   assert.match(source, /<select\s+aria-label=\{t\("agents\.codemode"\)\}[\s\S]*?disabled=\{disabled\}/);
   assert.doesNotMatch(source, /ReadonlyValue|readonlyPromptStyle|agents-readonly/);
+});
+
+test("shows a profile file's skills list read-only under the skills switch", async () => {
+  const messages = {};
+  for (const locale of ["en", "zh-CN", "zh-TW"]) {
+    messages[locale] = await readFile(new URL(`../lib/i18n/messages/${locale}.ts`, import.meta.url), "utf8");
+  }
+  assert.match(source, /\{draft\.loadSkills && draft\.skills !== undefined && \(/);
+  assert.match(source, /t\("agents\.skillsOnly", \{ skills: draft\.skills\.join\(", "\) \}\)/);
+  assert.match(source, /: t\("agents\.skillsNone"\)/);
+  for (const text of Object.values(messages)) {
+    assert.match(text, /"agents\.skillsOnly": "[^"]*\{skills\}[^"]*"/);
+    assert.match(text, /"agents\.skillsNone": "/);
+  }
+  assert.match(messages["zh-CN"], /"agents\.skillsOnly": "只加载：\{skills\}"/);
 });
 
 test("shows disabled controls with a gray background", () => {
