@@ -107,6 +107,8 @@ export const zhCNLocale: LocalePlugin = {
     "agents.resources": "资源",
     "agents.loadSkills": "加载技能",
     "agents.loadExtensions": "加载扩展",
+    "agents.skillsOnly": "只加载：{skills}",
+    "agents.skillsNone": "不加载任何技能：profile 文件里的 skills 列表为空",
     "agents.model": "指定模型",
     "agents.modelsLoading": "正在加载模型...",
     "agents.modelUnavailable": "{model}（不可用）",

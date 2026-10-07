@@ -107,6 +107,8 @@ export const zhTWLocale: LocalePlugin = {
     "agents.resources": "資源",
     "agents.loadSkills": "載入技能",
     "agents.loadExtensions": "載入擴充功能",
+    "agents.skillsOnly": "只載入：{skills}",
+    "agents.skillsNone": "不載入任何技能：profile 檔案中的 skills 清單為空",
     "agents.model": "指定模型",
     "agents.modelsLoading": "正在載入模型...",
     "agents.modelUnavailable": "{model}（無法使用）",

@@ -107,6 +107,8 @@ export const enLocale: LocalePlugin = {
     "agents.resources": "Resources",
     "agents.loadSkills": "Load skills",
     "agents.loadExtensions": "Load extensions",
+    "agents.skillsOnly": "Loads only: {skills}",
+    "agents.skillsNone": "Loads no skills: the skills list in the profile file is empty",
     "agents.model": "Model override",
     "agents.modelsLoading": "Loading models...",
     "agents.modelUnavailable": "{model} (unavailable)",

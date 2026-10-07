@@ -30,6 +30,8 @@ export interface SubagentProfile {
   extensionTools?: string[];
   /** Raw `ext:` deny selectors, resolved against the loaded extensions at spawn time. */
   disallowedExtensionTools?: string[];
+  /** Omitted = SDK on-demand discovery; [] = explicitly no selected skills. */
+  skills?: string[];
   loadSkills: boolean;
   loadExtensions: boolean;
   model?: string;
@@ -63,6 +65,7 @@ export interface SubagentMetadata {
 
 export interface SubagentResourceSnapshot {
   version: 1;
+  skills?: string[];
   appendSystemPrompt: string[];
   tools: string[];
   loadSkills: boolean;
@@ -71,6 +74,7 @@ export interface SubagentResourceSnapshot {
 }
 
 export interface SubagentSessionResources {
+  skills?: string[];
   appendSystemPrompt: string[];
   tools: string[];
   loadSkills: boolean;
@@ -205,6 +209,38 @@ function resourceBoolean(value: unknown, fallback: boolean): boolean {
   return Array.isArray(value) || typeof value === "string" ? true : fallback;
 }
 
+/**
+ * Skill names from a list or a comma-separated string, trimmed and deduplicated. Empty
+ * and non-string items are dropped, as pi-subagents does: a stray comma must not make
+ * the whole profile unreadable.
+ */
+export function subagentSkillNames(value: unknown): string[] {
+  const items: unknown[] = Array.isArray(value) ? value : typeof value === "string" ? value.split(",") : [];
+  return [...new Set(items
+    .filter((item): item is string => typeof item === "string")
+    .map((item) => item.trim())
+    .filter(Boolean))];
+}
+
+/**
+ * The skills a profile names in `skills:`. `undefined` keeps the SDK's on-demand catalog:
+ * the key is absent or empty, or holds a switch spelling (`true`, `all`, `none`, ...) that
+ * `load_skills` falls back to and a save keeps in step with it.
+ */
+function profileSkills(value: unknown): string[] | undefined {
+  if (Array.isArray(value)) return subagentSkillNames(value);
+  if (typeof value !== "string" || OWNED_ALIAS_VALUES.has(value.trim().toLowerCase())) return undefined;
+  const names = subagentSkillNames(value);
+  return names.length > 0 ? names : undefined;
+}
+
+/** `load_skills`, else the `skills` alias, where `none` and `false` switch skills off. */
+function profileLoadSkills(data: Record<string, unknown> | null): boolean {
+  const value = data?.load_skills ?? data?.skills;
+  if (typeof value === "string" && ["none", "false"].includes(value.trim().toLowerCase())) return false;
+  return resourceBoolean(value, false);
+}
+
 function stringList(value: unknown): string[] {
   const values = Array.isArray(value)
     ? value
@@ -286,6 +322,7 @@ function parseProfileFile(filePath: string, scope: SubagentScope): SubagentProfi
     const thinkingValue = stringValue(data?.thinking) as ThinkingLevel | undefined;
     const maxTurnsValue = typeof data?.max_turns === "number" ? Math.floor(data.max_turns) : undefined;
     const tools = parseTools(data?.tools, DEFAULT_TOOLS);
+    const skills = profileSkills(data?.skills);
     const disallowedTools = new Set(parseTools(data?.disallowed_tools, []));
     // The deny list is also handed to the runtime, which resolves both sides against the
     // loaded extensions. This parse-time filter is only the cheap literal fast path: it
@@ -316,7 +353,8 @@ function parseProfileFile(filePath: string, scope: SubagentScope): SubagentProfi
       tools: tools.filter((tool) => !disallowedTools.has(tool)),
       ...(hadExtensionSelectors || extensionTools.length > 0 ? { extensionTools } : {}),
       ...(disallowedExtensionTools.length > 0 ? { disallowedExtensionTools } : {}),
-      loadSkills: resourceBoolean(data?.load_skills ?? data?.skills, false),
+      ...(skills !== undefined ? { skills } : {}),
+      loadSkills: profileLoadSkills(data),
       loadExtensions: resourceBoolean(data?.load_extensions ?? data?.extensions, extensionTools.length > 0),
       ...(stringValue(data?.model) ? { model: stringValue(data?.model) } : {}),
       ...(thinkingValue && THINKING_LEVELS.has(thinkingValue) ? { thinking: thinkingValue } : {}),
@@ -466,7 +504,15 @@ export function saveSubagentProfile(
     run_in_background: profile.runInBackground,
     prompt_mode: promptMode,
   };
-  syncFlagAlias(managed, "skills", stored.skills, loadSkills);
+  const skills = profile.skills === undefined ? profileSkills(stored.skills) : subagentSkillNames(profile.skills);
+  if (skills !== undefined) {
+    const storedSkills = profileSkills(stored.skills);
+    managed.skills = storedSkills !== undefined && JSON.stringify(storedSkills) === JSON.stringify(skills)
+      ? stored.skills
+      : skills;
+  } else {
+    syncFlagAlias(managed, "skills", stored.skills, loadSkills);
+  }
   syncFlagAlias(managed, "extensions", stored.extensions, loadExtensions);
   if (model) managed.model = model;
   if (profile.thinking) managed.thinking = profile.thinking;
@@ -488,6 +534,7 @@ export function saveSubagentProfile(
     description,
     systemPrompt,
     tools,
+    ...(skills !== undefined ? { skills } : {}),
     ...(extensionTools.length > 0 ? { extensionTools } : {}),
     loadSkills,
     loadExtensions,
@@ -537,6 +584,8 @@ export function readSubagentSessionResources(
   const data = subagentMetadataData(entries);
   if (!data) return null;
   const snapshot = data.resourceSnapshot;
+  // A malformed list narrows to what it names, never back to the whole catalog.
+  const skills = isRecord(snapshot) && "skills" in snapshot ? subagentSkillNames(snapshot.skills) : undefined;
   const loadSkills = isRecord(snapshot) && snapshot.loadSkills === true;
   const loadExtensions = isRecord(snapshot) && snapshot.loadExtensions === true;
   if (
@@ -553,6 +602,7 @@ export function readSubagentSessionResources(
     )
   ) {
     return {
+      ...(skills !== undefined ? { skills } : {}),
       appendSystemPrompt: [...snapshot.appendSystemPrompt],
       tools: [...new Set(snapshot.tools)],
       loadSkills,
