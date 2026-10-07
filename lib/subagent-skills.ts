@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { formatSkillsForPrompt, type DefaultResourceLoader, type InlineExtension, type Skill } from "@earendil-works/pi-coding-agent";
 import { parseFrontmatter } from "./frontmatter";
-import { subagentSkillNames } from "./subagents";
+import { subagentNameList } from "./subagents";
 
 /** One discovery binding and one prompt projection, shared by spawn and reopen. */
 export function createSubagentSkillsBinding(options: {
@@ -10,7 +10,7 @@ export function createSubagentSkillsBinding(options: {
   exactSystemPrompt?: string;
 }) {
   // `load_skills: false` wins over a list.
-  const names = options.loadSkills && options.skills !== undefined ? subagentSkillNames(options.skills) : undefined;
+  const names = options.loadSkills && options.skills !== undefined ? subagentNameList(options.skills) : undefined;
   let discovered: Skill[] = [];
   let activeTools: () => readonly string[] = () => [];
   let effectiveExactPrompt = options.exactSystemPrompt;

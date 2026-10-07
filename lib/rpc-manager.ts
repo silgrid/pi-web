@@ -35,6 +35,7 @@ import {
   listSubagentProfiles,
   readSubagentRun,
   readSubagentSessionResources,
+  subagentExtensionLoaderOptions,
   SUBAGENT_CONTROL_TOOL_NAMES,
 } from "./subagents";
 import { createSubagentController } from "./subagent-runtime";
@@ -2422,7 +2423,7 @@ export async function startRpcSession(
       settingsManager,
       resourceLoaderOptions: subagentResources
         ? {
-            noExtensions: !subagentResources.loadExtensions,
+            ...subagentExtensionLoaderOptions(subagentResources),
             ...skillsBinding!.loaderOptions,
             noPromptTemplates: true,
             noThemes: true,

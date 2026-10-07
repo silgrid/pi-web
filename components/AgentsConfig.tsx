@@ -85,6 +85,7 @@ function editableProfile(profile: SubagentProfile): EditableProfile {
     loadSkills: profile.loadSkills,
     ...(profile.skills !== undefined ? { skills: [...profile.skills] } : {}),
     loadExtensions: profile.loadExtensions,
+    ...(profile.extensions !== undefined ? { extensions: [...profile.extensions] } : {}),
     promptMode: profile.promptMode,
     ...(profile.model ? { model: profile.model } : {}),
     ...(profile.thinking ? { thinking: profile.thinking } : {}),
@@ -603,12 +604,19 @@ export function AgentsConfig({
                       <Toggle label={t("agents.loadSkills")} disabled={disabled} checked={draft.loadSkills} onChange={(checked) => update("loadSkills", checked)} />
                       <Toggle label={t("agents.loadExtensions")} disabled={disabled} checked={draft.loadExtensions} onChange={(checked) => update("loadExtensions", checked)} />
                     </div>
-                    {/* A `skills:` list is edited in the profile file; show what it loads. */}
+                    {/* `skills:` and `extensions:` lists are edited in the profile file; show what they load. */}
                     {draft.loadSkills && draft.skills !== undefined && (
                       <span style={{ color: "var(--text-dim)", fontSize: 11, lineHeight: 1.4, overflowWrap: "anywhere" }}>
                         {draft.skills.length > 0
                           ? t("agents.skillsOnly", { skills: draft.skills.join(", ") })
                           : t("agents.skillsNone")}
+                      </span>
+                    )}
+                    {draft.loadExtensions && draft.extensions !== undefined && (
+                      <span style={{ color: "var(--text-dim)", fontSize: 11, lineHeight: 1.4, overflowWrap: "anywhere" }}>
+                        {draft.extensions.length > 0
+                          ? t("agents.extensionsOnly", { extensions: draft.extensions.join(", ") })
+                          : t("agents.extensionsNone")}
                       </span>
                     )}
                   </Field>
