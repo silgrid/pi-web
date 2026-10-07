@@ -58,6 +58,10 @@ test("editor draft preserves named and empty selections independently of activat
     draft.skills.push("new");
     assert.notEqual(draft.skills.length, skills.length);
   }
+  for (const extensions of [["codegraph"], []]) {
+    const draft = editable({ name: "reviewer", tools: [], loadExtensions: true, extensions });
+    assert.deepEqual(Array.from(draft.extensions ?? ["LOST"]), extensions);
+  }
 });
 
 test("keeps same-name profiles selectable by scope and groups writable sources first", () => {
@@ -171,7 +175,7 @@ test("uses the same form controls for editable and readonly profiles", () => {
   assert.doesNotMatch(source, /ReadonlyValue|readonlyPromptStyle|agents-readonly/);
 });
 
-test("shows a profile file's skills list read-only under the skills switch", async () => {
+test("shows a profile file's skills and extensions lists read-only under the switches", async () => {
   const messages = {};
   for (const locale of ["en", "zh-CN", "zh-TW"]) {
     messages[locale] = await readFile(new URL(`../lib/i18n/messages/${locale}.ts`, import.meta.url), "utf8");
@@ -179,11 +183,18 @@ test("shows a profile file's skills list read-only under the skills switch", asy
   assert.match(source, /\{draft\.loadSkills && draft\.skills !== undefined && \(/);
   assert.match(source, /t\("agents\.skillsOnly", \{ skills: draft\.skills\.join\(", "\) \}\)/);
   assert.match(source, /: t\("agents\.skillsNone"\)/);
+  assert.match(source, /\{draft\.loadExtensions && draft\.extensions !== undefined && \(/);
+  assert.match(source, /t\("agents\.extensionsOnly", \{ extensions: draft\.extensions\.join\(", "\) \}\)/);
+  assert.match(source, /: t\("agents\.extensionsNone"\)/);
   for (const text of Object.values(messages)) {
     assert.match(text, /"agents\.skillsOnly": "[^"]*\{skills\}[^"]*"/);
     assert.match(text, /"agents\.skillsNone": "/);
+    assert.match(text, /"agents\.extensionsOnly": "[^"]*\{extensions\}[^"]*"/);
+    assert.match(text, /"agents\.extensionsNone": "/);
   }
-  assert.match(messages["zh-CN"], /"agents\.skillsOnly": "只加载：\{skills\}"/);
+  // The two lines sit side by side, so each names what it lists.
+  assert.match(messages["zh-CN"], /"agents\.skillsOnly": "只加载这些技能：\{skills\}"/);
+  assert.match(messages["zh-CN"], /"agents\.extensionsOnly": "只加载这些扩展：\{extensions\}"/);
 });
 
 test("shows disabled controls with a gray background", () => {

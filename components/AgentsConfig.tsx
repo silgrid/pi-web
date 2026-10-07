@@ -89,6 +89,7 @@ function editableProfile(profile: SubagentProfile): EditableProfile {
     loadExtensions: profile.loadExtensions,
     codemode: profile.codemode ?? "off",
     mcp: profile.mcp ?? "off",
+    ...(profile.extensions !== undefined ? { extensions: [...profile.extensions] } : {}),
     promptMode: profile.promptMode,
     ...(profile.model ? { model: profile.model } : {}),
     ...(profile.thinking ? { thinking: profile.thinking } : {}),
@@ -639,12 +640,19 @@ export function AgentsConfig({
                         {t("agents.codemodeHint")}
                       </span>
                     </div>
-                    {/* A `skills:` list is edited in the profile file; show what it loads. */}
+                    {/* `skills:` and `extensions:` lists are edited in the profile file; show what they load. */}
                     {draft.loadSkills && draft.skills !== undefined && (
                       <span style={{ color: "var(--text-dim)", fontSize: 11, lineHeight: 1.4, overflowWrap: "anywhere" }}>
                         {draft.skills.length > 0
                           ? t("agents.skillsOnly", { skills: draft.skills.join(", ") })
                           : t("agents.skillsNone")}
+                      </span>
+                    )}
+                    {draft.loadExtensions && draft.extensions !== undefined && (
+                      <span style={{ color: "var(--text-dim)", fontSize: 11, lineHeight: 1.4, overflowWrap: "anywhere" }}>
+                        {draft.extensions.length > 0
+                          ? t("agents.extensionsOnly", { extensions: draft.extensions.join(", ") })
+                          : t("agents.extensionsNone")}
                       </span>
                     )}
                   </Field>

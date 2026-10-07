@@ -37,7 +37,7 @@ import {
   hasSubagentResourceSnapshot,
   readSubagentRun,
   readSubagentSessionResources,
-  SUBAGENT_MCP_EXTENSION_PATHS,
+  subagentExtensionLoaderOptions,
   subagentToolOptions,
   SUBAGENT_CONTROL_TOOL_NAMES,
 } from "./subagents";
@@ -2549,13 +2549,8 @@ export async function startRpcSession(
       settingsManager,
       resourceLoaderOptions: subagentResources
         ? {
-            noExtensions: !subagentResources.loadExtensions,
+            ...subagentExtensionLoaderOptions(subagentResources),
             ...skillsLoaderOptions,
-            // `builtin:tool-search` / `builtin:mcp` load under `noExtensions` too, as the CLI's
-            // `-e builtin:<name>` does (`subagentExtensionLoaderOptions()` upstream).
-            ...(subagentResources.mcp
-              ? { additionalExtensionPaths: [...SUBAGENT_MCP_EXTENSION_PATHS] }
-              : {}),
             noPromptTemplates: true,
             noThemes: true,
             noContextFiles: true,

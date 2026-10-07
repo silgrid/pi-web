@@ -24,7 +24,7 @@ import {
   SUBAGENT_STATUS_TYPE,
   SUBAGENT_RESULT_TYPE,
   selectSubagentExtensionTools,
-  SUBAGENT_MCP_EXTENSION_PATHS,
+  subagentExtensionLoaderOptions,
   subagentToolOptions,
   withSubagentExtensionTools,
   type SubagentMetadata,
@@ -313,8 +313,12 @@ export function createSubagentController(
       ];
       // The binding's own factory is in the array above; the rest of its loader options
       // (noSkills, skillsOverride) spread into resourceLoaderOptions below.
-      const { extensionFactories: _skillsFactories, ...skillsLoaderOptions } =
-        skillsBinding.loaderOptions;
+      const skillsLoaderOptions = {
+        noSkills: skillsBinding.loaderOptions.noSkills,
+        ...(skillsBinding.loaderOptions.skillsOverride
+          ? { skillsOverride: skillsBinding.loaderOptions.skillsOverride }
+          : {}),
+      };
       if (!chatOnly) initTheme();
       const services = await createAgentSessionServices({
         cwd: childCwd,
@@ -322,11 +326,12 @@ export function createSubagentController(
         modelRuntime: parentModelRuntime,
         settingsManager,
         resourceLoaderOptions: {
-          noExtensions: !profile.loadExtensions,
+          ...subagentExtensionLoaderOptions({
+            loadExtensions: profile.loadExtensions,
+            extensions: profile.extensions,
+            mcp: mcpEnabled,
+          }),
           ...skillsLoaderOptions,
-          // `builtin:tool-search` / `builtin:mcp` load under `noExtensions` too, as the CLI's
-          // `-e builtin:<name>` does (`subagentExtensionLoaderOptions()` upstream).
-          ...(mcpEnabled ? { additionalExtensionPaths: [...SUBAGENT_MCP_EXTENSION_PATHS] } : {}),
           noPromptTemplates: true,
           noThemes: true,
           noContextFiles: true,
@@ -408,6 +413,7 @@ export function createSubagentController(
           loadSkills: profile.loadSkills,
           ...(profile.skills !== undefined ? { skills: [...profile.skills] } : {}),
           loadExtensions: profile.loadExtensions,
+          ...(profile.extensions !== undefined ? { extensions: [...profile.extensions] } : {}),
           ...(allExtensionTools ? { allExtensionTools: true } : {}),
         ...(promptPlan.exactSystemPrompt !== undefined ? { exactSystemPrompt: promptPlan.exactSystemPrompt } : {}),
         },
