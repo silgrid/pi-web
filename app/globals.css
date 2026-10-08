@@ -197,7 +197,8 @@ html, body {
   overflow: hidden;
   background: var(--bg);
   color: var(--text);
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-family: var(--font-ui);
+  font-weight: var(--font-ui-weight);
   font-size: 14px;
   overscroll-behavior: none;
 }
@@ -724,11 +725,22 @@ button.extension-widget-trigger:focus-visible {
 }
 
 :root {
-  --font-mono: var(--font-noto-mono), 'JetBrains Mono', 'Fira Code', 'Consolas', ui-monospace, 'PingFang SC', 'Microsoft YaHei', monospace;
+  --font-ui-default: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --font-mono-default: var(--font-noto-mono), 'JetBrains Mono', 'Fira Code', 'Consolas', ui-monospace, 'PingFang SC', 'Microsoft YaHei', monospace;
+  --font-ui: var(--font-ui-default);
+  --font-mono: var(--font-mono-default);
+  --font-ui-weight: 400;
+  --font-mono-weight: 400;
 }
 
 pre, code {
   font-family: var(--font-mono);
+  font-weight: var(--font-mono-weight);
+}
+
+/* Inline code inside a heading or emphasis keeps that surrounding emphasis. */
+.markdown-body :is(h1, h2, h3, h4, h5, h6, strong, b) code {
+  font-weight: inherit;
 }
 
 /* react-markdown output styles */

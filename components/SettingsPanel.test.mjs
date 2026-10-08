@@ -69,9 +69,13 @@ test("keeps language selection in General settings", () => {
   assert.match(panelSource, /setLocale\(plugin\.id/);
 });
 
-test("groups chat display controls together without row backgrounds", () => {
+test("groups fonts, chat font size and width in one section, chat behavior in another, without row backgrounds", () => {
   const appearanceSection = panelSource.slice(
     panelSource.indexOf('{t("settings.appearance")}'),
+    panelSource.indexOf('{t("settings.typography")}'),
+  );
+  const typographySection = panelSource.slice(
+    panelSource.indexOf('{t("settings.typography")}'),
     panelSource.indexOf('{t("settings.chat")}'),
   );
   const chatSection = panelSource.slice(
@@ -79,11 +83,17 @@ test("groups chat display controls together without row backgrounds", () => {
     panelSource.indexOf('{t("settings.sessionFilter")}'),
   );
 
-  assert.doesNotMatch(appearanceSection, /settings-chat-content/);
+  assert.doesNotMatch(appearanceSection, /settings-chat-content|<FontSettings/);
+  assert.match(typographySection, /className="settings-chat-options"[\s\S]*<FontSettings \/>/);
+  assert.equal((typographySection.match(/className="settings-chat-option settings-chat-range-option"/g) ?? []).length, 2);
+  for (const key of ["chatContentWidth", "chatContentFontSize", "fontDescription"]) {
+    assert.match(typographySection, new RegExp(`t\\("settings\\.${key}"\\)`));
+  }
   assert.match(chatSection, /className="settings-chat-options"/);
-  assert.equal((chatSection.match(/className="settings-chat-option(?: |")/g) ?? []).length, 5);
+  assert.doesNotMatch(chatSection, /settings-chat-content/);
+  assert.equal((chatSection.match(/className="settings-chat-option(?: |")/g) ?? []).length, 3);
   assert.equal((chatSection.match(/<ConfigSwitch/g) ?? []).length, 2);
-  for (const key of ["thinkingExpandedDefault", "chatContentWidth", "chatContentFontSize", "quoteSelection", "enterSendMode", "enterSendModeEnter", "enterSendModeCtrlEnter"]) {
+  for (const key of ["thinkingExpandedDefault", "quoteSelection", "enterSendMode", "enterSendModeEnter", "enterSendModeCtrlEnter"]) {
     assert.match(chatSection, new RegExp(`t\\("settings\\.${key}"\\)`));
   }
   assert.doesNotMatch(panelSource, /ThinkingIcon|settings-thinking-/);
