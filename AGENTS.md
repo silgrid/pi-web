@@ -99,6 +99,7 @@ app/api/
 lib/
   agent-client.ts      typed fetch helper for /api/agent commands
   default-preferences.ts  write defaultModel/defaultThinkingLevel; detect project-level shadowing
+  deferred-provider-models.ts  models of providers an extension registers only at session_start, re-added to listings
   draft-store.ts       local draft persistence helpers
   extension-ui-queue.ts  FIFO queues for extension dialogs and custom panels, keyed by request id
   file-access.ts       allowed file roots for /api/files and worktrees
