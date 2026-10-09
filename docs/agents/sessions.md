@@ -45,6 +45,9 @@ The chat renders the last `visibleCount` rows, kept at least the loaded message 
 ## Process details start open without an answer (`ProcessDetailsGroup`, `components/ChatWindow.tsx`)
 A grouped turn's Process details start collapsed only when the answer shown under them has text or an image (`collapsesProcessDetails()`, `lib/message-display.ts`). A turn that ends on an error or truncation notice alone, e.g. empty `stopReason: "error"` replies after text and a trailing tool call, still shows that notice but keeps them open: the earlier text is inside them (#906). The group is keyed on this decision, so a leaf switch that changes it resets the group; a search hit inside opens it (`reveal`).
 
+## Process details start open without an answer (`ProcessDetailsGroup`, `components/ChatWindow.tsx`)
+A grouped turn's Process details start collapsed only when the answer shown under them has text or an image (`collapsesProcessDetails()`, `lib/message-display.ts`). A turn that ends on an error or truncation notice alone, e.g. empty `stopReason: "error"` replies after text and a trailing tool call, still shows that notice but keeps them open: the earlier text is inside them (#906). The group is keyed on this decision, so a leaf switch that changes it resets the group; a search hit inside opens it (`reveal`).
+
 ## Compaction summary card (`CompactionMessageView`, `components/MessageView.tsx`)
 Collapsed by default, as pi's TUI `CompactionSummaryMessageComponent` (#1026): the header, "Conversation compacted" and pi's "Compacted from N tokens" (`details.tokensBefore`, set by the reader). The title is the toggle (a button with `aria-expanded`); the description, the summary Markdown and the file lists mount only when expanded. Session search indexes only user and assistant `message` entries (`lib/session-search.ts`), so no hit lands inside a summary and the card needs no `reveal` like Process details.
 
