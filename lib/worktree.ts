@@ -88,12 +88,19 @@ function repoRootFromCommonDir(commonDir: string): string {
  * under the main repo instead of letting them dangle as a phantom project.
  * The dir name is the sanitized branch name — close enough for display.
  *
+ * Inference is by that naming convention and a sibling that is a repository
+ * (`<repoRoot>/.git`, or a bare clone), never by `git worktree list`: `git worktree remove`
+ * deletes the directory *and* its admin entry, so nothing survives to ask. It names one
+ * folder and nothing else — the parent of the cwd with a `-worktrees` suffix stripped.
+ * `/api/models`, which answers *for* such a cwd, takes the repo as just another cwd and
+ * re-checks it against the allowed roots itself.
+ *
  * The sibling derivation is tried first; when the derived sibling root has no
  * `.git` (e.g. the container sits inside a monorepo, or the checkout uses an
  * unusual .git layout), a git `rev-parse` fallback lets git name the actual
  * repository root so the removed path still merges into its parent.
  */
-async function inferRemovedWorktree(cwd: string): Promise<ProjectInfo | null> {
+export async function inferRemovedWorktree(cwd: string): Promise<ProjectInfo | null> {
   const parent = dirname(cwd);
   if (!parent.endsWith("-worktrees")) return null;
   const repoRoot = parent.slice(0, -"-worktrees".length);
