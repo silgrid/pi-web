@@ -20,11 +20,11 @@ import {
 import {
   readSubagentRun,
   resolveSubagentProfile,
-  SUBAGENT_CONTROL_TOOL_NAMES,
   SUBAGENT_META_TYPE,
   SUBAGENT_STATUS_TYPE,
   SUBAGENT_RESULT_TYPE,
   selectSubagentExtensionTools,
+  subagentToolOptions,
   withSubagentExtensionTools,
   type SubagentMetadata,
   type SubagentResultMetadata,
@@ -267,6 +267,15 @@ export function createSubagentController(
           : {}),
       });
 
+      // Fork adaptation of upstream's `!profile.extensionTools?.length`: an explicit
+      // selection emptied by the deny list still grants nothing here (fork review fix),
+      // so only a truly absent selection admits every extension tool (#883). A profile
+      // with deny selectors keeps the name allowlist for the same reason `ext:` selectors
+      // do: the SDK admits tools by name only, with no source-aware hook, so a late-
+      // registered tool cannot be matched against the deny list (#883 + fork deny fix).
+      const allExtensionTools = profile.loadExtensions
+        && profile.extensionTools === undefined
+        && !profile.disallowedExtensionTools?.length;
       const extensionToolNames = !profile.loadExtensions
         ? []
         : profile.extensionTools !== undefined
@@ -311,7 +320,8 @@ export function createSubagentController(
           appendSystemPrompt: [...appendSystemPrompt],
           tools: [...activeTools],
           loadSkills: profile.loadSkills,
-        loadExtensions: profile.loadExtensions,
+          loadExtensions: profile.loadExtensions,
+          ...(allExtensionTools ? { allExtensionTools: true } : {}),
         ...(promptPlan.exactSystemPrompt !== undefined ? { exactSystemPrompt: promptPlan.exactSystemPrompt } : {}),
         },
         ...(isolatedWorktree ? { worktreePath: isolatedWorktree.path, worktreeBranch: isolatedWorktree.branch } : {}),
@@ -326,8 +336,7 @@ export function createSubagentController(
         sessionManager,
         model: requestedModel ?? parentModel,
         ...(thinking ? { thinkingLevel: thinking as ThinkingLevel } : {}),
-        tools: activeTools,
-        excludeTools: [...SUBAGENT_CONTROL_TOOL_NAMES],
+        ...subagentToolOptions({ tools: activeTools, allExtensionTools }),
       });
       dependencies.registerSession(inner, {
         ...(promptPlan.exactSystemPrompt !== undefined
