@@ -500,6 +500,21 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
     : undefined;
   const searchHistoryRef = useRef({ entryIds, historyCursor, hasEarlierMessages });
   searchHistoryRef.current = { entryIds, historyCursor, hasEarlierMessages };
+  // The cursor of the older page asked for last, kept until the next cursor
+  // renders: the page lands, and loadingOlderRef clears, a moment before that
+  // render, and an observer report in between still holds this cursor.
+  const requestedCursorRef = useRef<string | null>(null);
+  const loadOlderPage = useCallback(async (sid: string, before: string, options?: { tail?: number; signal?: AbortSignal }) => {
+    requestedCursorRef.current = before;
+    const context = await loadContext(sid, activeLeafId, before, options);
+    // Nothing landed, so the same page may be asked for again.
+    if (!context && requestedCursorRef.current === before) requestedCursorRef.current = null;
+    return context;
+  }, [activeLeafId, loadContext]);
+  useEffect(() => {
+    // A reloaded history can come back to a cursor asked for before.
+    if (historyCursor !== requestedCursorRef.current) requestedCursorRef.current = null;
+  }, [historyCursor]);
 
   useLayoutEffect(() => {
     const sessionId = session?.id;
@@ -552,7 +567,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
       let hasMore = initialHistory.hasEarlierMessages;
       try {
         while (hasMore && before && !controller.signal.aborted) {
-          const context = await loadContext(sessionId, activeLeafId, before, { signal: controller.signal });
+          const context = await loadOlderPage(sessionId, before, { signal: controller.signal });
           if (controller.signal.aborted) return;
           if (!context) {
             scrollToBottom("instant");
@@ -583,7 +598,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
       // A branch change cancels restoration and must reveal the new context.
       setPendingScrollRestore(null);
     };
-  }, [activeLeafId, loadContext, loading, pendingScrollRestore, scrollToBottom, searchTarget, session?.id]);
+  }, [activeLeafId, loadOlderPage, loading, pendingScrollRestore, scrollToBottom, searchTarget, session?.id]);
 
   useLayoutEffect(() => {
     const position = pendingScrollRestore;
@@ -618,7 +633,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
           container.querySelector<HTMLElement>("[data-entry-id]")?.dataset.entryId ?? null,
         );
         // ponytail: one extra page of 200 entries; deeper or other-branch hits just open the session.
-        const context = await loadContext(searchTarget.sessionId, activeLeafId, history.historyCursor, { tail: 200, signal: controller.signal });
+        const context = await loadOlderPage(searchTarget.sessionId, history.historyCursor, { tail: 200, signal: controller.signal });
         loadingOlderRef.current = false;
         found = Boolean(context?.entryIds.includes(searchTarget.entryId));
       }
@@ -633,7 +648,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
     };
     void locate();
     return () => controller.abort();
-  }, [searchTarget, loading, activeLeafId, sessionBusy, loadContext, onSearchTargetHandled, scrollContainerRef]);
+  }, [searchTarget, loading, sessionBusy, loadOlderPage, onSearchTargetHandled, scrollContainerRef]);
 
   useLayoutEffect(() => {
     if (!pendingSearchScroll || pendingSearchScroll !== searchTarget) return;
@@ -671,7 +686,8 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
         const history = searchHistoryRef.current;
         if (!history.hasEarlierMessages) return;
         const oldestId = history.historyCursor;
-        if (!oldestId) return;
+        // Its page already landed; the next cursor has not rendered yet (#1149).
+        if (!oldestId || oldestId === requestedCursorRef.current) return;
         const sid = session?.id ?? sessionIdRef.current;
         if (!sid) return;
         loadingOlderRef.current = true;
@@ -681,7 +697,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
           container.scrollTop,
           container.querySelector<HTMLElement>("[data-entry-id]")?.dataset.entryId ?? null,
         );
-        void loadContext(sid, activeLeafId, oldestId)
+        void loadOlderPage(sid, oldestId)
           .then((context) => {
             // pi#83: mark the prepended page's entries so their rows fade in.
             if (context) markPrepended(context.entryIds);
@@ -701,7 +717,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
     // an older page can exist), so the observer must be created when it flips;
     // the history cursor deliberately stays OUT of the deps — recreating the
     // observer per page delivered the cascading initial callbacks (see above).
-  }, [hasEarlierMessages, session, activeLeafId, loadContext, sessionIdRef, scrollContainerRef, markPrepended]);
+  }, [hasEarlierMessages, session, activeLeafId, loadOlderPage, sessionIdRef, scrollContainerRef, markPrepended]);
 
   // Keep the rendered window at least as large as what's loaded, so prepended
   // (older) pages stay visible instead of being sliced off the top.
