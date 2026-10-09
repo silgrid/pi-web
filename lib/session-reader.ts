@@ -13,8 +13,8 @@ import { sessionPathKey } from "./session-path";
 import { MAX_TOOL_RESULT_IMAGE_BYTES, TOOL_RESULT_IMAGE_MIMES } from "./tool-result-images";
 import { resolveProject, type ProjectInfo } from "./worktree";
 import { readSubagentRun, SUBAGENT_META_TYPE } from "./subagents";
-import { listSessionsIncremental, type ScannedSessionInfo } from "./session-list-scanner";
-import { ensureSessionWatcher } from "./session-watcher";
+import { checkSessionMembership, listSessionsIncremental, type ScannedSessionInfo } from "./session-list-scanner";
+import { ensureSessionWatcher, getSessionWatcherStatus } from "./session-watcher";
 import { isRecord } from "./type-guards";
 
 export { getAgentDir };
@@ -419,6 +419,17 @@ export function invalidateSessionListCache(): void {
 }
 
 export function getSessionListVersion(): number {
+  // Upstream #1100 starts a filename check from this poll to discover session
+  // files another process creates or deletes. The fork (pi#2) already
+  // discovers those with fs.watch (lib/session-watcher.ts), which also reports
+  // the writes themselves for the open view. One discovery mechanism at a
+  // time: the check runs only while no live watcher covers the root, so the
+  // two never double-invalidate — a check bump would land before the
+  // watcher's debounced write report and decouple the version from it.
+  const watcher = getSessionWatcherStatus();
+  if (watcher === null || watcher.degraded) {
+    void checkSessionMembership(defaultSessionsDir(), invalidateSessionListCache);
+  }
   return globalThis.__piSessionListGeneration ?? 0;
 }
 
