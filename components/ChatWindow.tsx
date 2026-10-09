@@ -31,6 +31,7 @@ import type { ToolEntry } from "@/lib/tool-presets";
 import { findChatScrollAnchor, type ChatScrollPosition } from "@/lib/chat-scroll-position";
 import {
   captureScrollAnchor,
+  getNextVisibleCount,
   getPromptAnchorSpacerHeight,
   getVisibleRenderWindow,
   isScrollAtTail,
@@ -476,7 +477,9 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
   useEffect(() => () => {
     if (prependedTimerRef.current !== null) window.clearTimeout(prependedTimerRef.current);
   }, []);
-  const sentinelRef = useRef<HTMLDivElement>(null);
+  // State, not a ref: the sentinel can appear with nothing else changing (a
+  // finished turn regrouped into more rows), and must get an observer then.
+  const [sentinel, setSentinel] = useState<HTMLDivElement | null>(null);
   const messageContentRef = useRef<HTMLDivElement | null>(null);
   const prevScrollAnchorRef = useRef<ScrollAnchorSnapshot | null>(null);
   const loadingOlderRef = useRef(false);
@@ -660,23 +663,32 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
   // IntersectionObserver on the sentinel div at the top of the message list.
   // When it becomes visible, load the next page of older messages.
   useEffect(() => {
-    const sentinel = sentinelRef.current;
     const container = scrollContainerRef.current;
     if (!sentinel || !container) return;
     const observer = new IntersectionObserver(
       (entries) => {
         if (!entries[0]?.isIntersecting) return;
-        // No older history loaded yet: fetch the previous page from the server
-        // and prepend it (loadContext handles prepend + scroll anchoring).
-        // Skip while a page is already loading or nothing older exists.
-        // Cursor state is read from searchHistoryRef so the observer is NOT
-        // re-created on every page: a re-created observer delivers an initial
-        // intersection callback while the sentinel is still in view, which
-        // chained fetch after fetch without any debounce and walked the view
-        // back into distant history once anchoring failed (pi#16).
+        // Skip while a page is already loading.
         if (loadingOlderRef.current) return;
+        // Cursor state is read from searchHistoryRef, so the deps need no history
+        // cursor; a re-created observer's initial report can only re-fetch a page
+        // whose cursor is not the one #1149's requestedCursorRef still holds.
         const history = searchHistoryRef.current;
-        if (!history.hasEarlierMessages) return;
+        if (!history.hasEarlierMessages) {
+          // Everything is loaded, yet the sentinel shows: the messages render as
+          // more rows than the window holds (an answer and its thinking are
+          // two), so widen the window. The observer is renewed with it, in case
+          // the sentinel stays in view (#896).
+          prevScrollAnchorRef.current = captureScrollAnchor(
+            container.scrollHeight,
+            container.scrollTop,
+            container.querySelector<HTMLElement>("[data-entry-id]")?.dataset.entryId ?? null,
+          );
+          setVisibleCount((current) => getNextVisibleCount(current));
+          return;
+        }
+        // Fetch the previous page from the server and prepend it (loadContext
+        // handles prepend + scroll anchoring).
         const oldestId = history.historyCursor;
         // Its page already landed; the next cursor has not rendered yet (#1149).
         if (!oldestId || oldestId === requestedCursorRef.current) return;
@@ -705,11 +717,12 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
     );
     observer.observe(sentinel);
     return () => observer.disconnect();
-    // hasEarlierMessages gates the sentinel's existence (it renders only while
-    // an older page can exist), so the observer must be created when it flips;
-    // the history cursor deliberately stays OUT of the deps — recreating the
-    // observer per page delivered the cascading initial callbacks (see above).
-  }, [hasEarlierMessages, session, activeLeafId, loadOlderPage, sessionIdRef, scrollContainerRef, markPrepended]);
+    // The sentinel is state, so a newly mounted one is observed at once; the
+    // visibleCount dep renews the observer when the window grows. The history
+    // cursor deliberately stays OUT of the deps — cursor state is read from
+    // searchHistoryRef, and #1149's requestedCursorRef dedupe keeps a re-created
+    // observer from re-fetching the page that just landed (pi#16's cascade).
+  }, [sentinel, visibleCount, hasEarlierMessages, session, activeLeafId, loadOlderPage, sessionIdRef, scrollContainerRef, markPrepended]);
 
   // Keep the rendered window at least as large as what's loaded, so prepended
   // (older) pages stay visible instead of being sliced off the top.
@@ -1332,7 +1345,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
               return (
                 <>
                   {hasMore && (
-                     <div ref={sentinelRef} className="py-3 text-center text-xs text-text-muted" aria-live="polite">
+                     <div ref={setSentinel} className="py-3 text-center text-xs text-text-muted" aria-live="polite">
                        {loadingOlder ? (
                          <span className="chat-load-earlier-spinner" role="status" aria-label={t("chat.loadingEarlier")}>
                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true" style={{ display: "inline-block", verticalAlign: "-2px" }}>

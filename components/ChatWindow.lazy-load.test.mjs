@@ -4,7 +4,7 @@ import test from "node:test";
 import { Script, createContext } from "node:vm";
 import ts from "typescript";
 
-const { captureScrollAnchor } = await import("../lib/chat-lazy-load.ts");
+const { captureScrollAnchor, getNextVisibleCount } = await import("../lib/chat-lazy-load.ts");
 
 const source = ts.createSourceFile("ChatWindow.tsx", await readFile(new URL("./ChatWindow.tsx", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
 const nodes = [];
@@ -23,21 +23,21 @@ const forgetCursor = compile(hook("useEffect", "requestedCursorRef.current = nul
 
 // Mounts the observer effect with the given history state; `reachTop()` is the
 // sentinel coming into view, `render(cursor)` the next cursor rendering. The
-// fork reads cursor state from searchHistoryRef at callback time (the observer
-// is deliberately not re-created per page, pi#16), so render() updates that ref
-// as a re-render would.
+// fork reads cursor state from searchHistoryRef at callback time, so render()
+// updates that ref as a re-render would.
 function mount({ hasEarlierMessages, landed = true }) {
-  const calls = { loads: [] };
+  const calls = { visibleCount: 50, loads: [] };
   const history = { hasEarlierMessages, historyCursor: "older" };
   let observed = null;
   const context = createContext({
-    sentinelRef: { current: {} }, scrollContainerRef: { current: { scrollHeight: 4000, scrollTop: 0, querySelector: () => null } },
+    sentinel: {}, scrollContainerRef: { current: { scrollHeight: 4000, scrollTop: 0, querySelector: () => null } },
     loadingOlderRef: { current: false }, prevScrollAnchorRef: { current: null }, requestedCursorRef: { current: null },
     searchHistoryRef: { current: history }, historyCursor: history.historyCursor,
     session: { id: "a" }, sessionIdRef: { current: "a" }, activeLeafId: "leaf",
-    captureScrollAnchor,
+    captureScrollAnchor, getNextVisibleCount,
     setLoadingOlder: () => {},
     markPrepended: () => {},
+    setVisibleCount: (update) => { calls.visibleCount = update(calls.visibleCount); },
     loadContext: (...args) => { calls.loads.push(args); return Promise.resolve(landed ? { oldestEntryId: "oldest" } : undefined); },
     IntersectionObserver: class { constructor(callback) { observed = callback; } observe() {} disconnect() {} },
   });
@@ -68,15 +68,17 @@ async function reachTop(state) {
 
 const cursors = (calls) => calls.loads.map((args) => args[2]);
 
-test("with every message loaded, reaching the top fetches nothing (the sentinel only renders while an older page can exist)", async () => {
+test("with every message loaded, reaching the top widens the window over rows still hidden", async () => {
   const state = await reachTop({ hasEarlierMessages: false });
   assert.deepEqual(state.loads, []);
-  assert.equal(state.anchor, null);
+  assert.equal(state.visibleCount, 100);
+  assert.deepEqual(state.anchor, { distance: 4000, scrollHeight: 4000, firstEntryId: null });
 });
 
 test("with older history on the server, reaching the top fetches the previous page", async () => {
-  const { loads, anchor } = await reachTop({ hasEarlierMessages: true });
+  const { loads, visibleCount, anchor } = await reachTop({ hasEarlierMessages: true });
   assert.deepEqual(loads.map((args) => [...args]), [["a", "leaf", "older", undefined]]);
+  assert.equal(visibleCount, 50);
   assert.ok(anchor, "the prepend is anchored so the viewport does not jump");
 });
 
@@ -104,8 +106,10 @@ test("a page that did not land, or a cursor a reload brought back, is fetched ag
   assert.deepEqual(cursors(reloaded.calls), ["older", "older"]);
 });
 
-test("the observer is re-created when hasEarlierMessages flips (it gates the sentinel's existence) and the history cursor stays out of the deps (pi#16)", () => {
+test("the observer is renewed when the sentinel mounts or the window grows", () => {
   const names = deps.elements.map((element) => element.getText(source));
-  assert.ok(names.includes("hasEarlierMessages"), "a sentinel that appears with older history needs an observer");
-  assert.ok(!names.includes("historyCursor"), "recreating the observer per page delivered cascading initial callbacks (pi#16)");
+  assert.ok(names.includes("sentinel"), "a sentinel that appears later needs an observer");
+  assert.ok(names.includes("visibleCount"), "a sentinel still in view after the window grew needs a new observation");
+  assert.ok(!names.includes("historyCursor"), "the history cursor stays out of the deps: cursor state is read from searchHistoryRef, and #1149's dedupe keeps a re-created observer from re-fetching the landed page (pi#16)");
+  assert.match(source.getFullText(), /<div ref=\{setSentinel\}/);
 });
