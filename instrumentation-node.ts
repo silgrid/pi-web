@@ -1,9 +1,13 @@
-import { configureHttpDispatcher } from "@/lib/http-dispatcher";
+import { configureHttpDispatcher, readHttpIdleTimeoutMs } from "@/lib/http-dispatcher";
 import { closeAllAgentEventStreams } from "@/lib/agent-event-stream";
 import { ensureSessionWatcher } from "@/lib/session-watcher";
 
 export function registerNodeInstrumentation(): void {
-  configureHttpDispatcher();
+  // The pi CLI applies settings' `httpIdleTimeoutMs` to the same undici
+  // body/header timeouts, so a Web UI session gets the timeout the user
+  // configured. Without it the built-in five minutes aborts a provider stream
+  // that stays quiet for longer, which a CLI session tolerates.
+  configureHttpDispatcher(readHttpIdleTimeoutMs());
 
   // Start the external-write watcher so TUI (or other pi process) session
   // writes invalidate the session list cache without a manual reload (pi#2).
