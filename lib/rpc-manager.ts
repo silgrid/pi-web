@@ -36,6 +36,7 @@ import {
   hasSubagentResourceSnapshot,
   readSubagentRun,
   readSubagentSessionResources,
+  SUBAGENT_MCP_EXTENSION_PATHS,
   subagentToolOptions,
   SUBAGENT_CONTROL_TOOL_NAMES,
 } from "./subagents";
@@ -44,9 +45,9 @@ import { isBuiltInSubagentsEnabled } from "./subagent-settings";
 import { resolveShellTools } from "./powershell-settings";
 import { CHAT_ONLY_RESOURCE_LOADER_OPTIONS, contextFilesSystemPrompt } from "./chat-only";
 import { createExactSystemPromptExtension } from "./exact-system-prompt";
-import { createPiWebBuiltinExtensions, createSubagentCodemodeExtension } from "./builtin-extensions";
+import { createPiWebBuiltinExtensions, createSubagentCodemodeExtension, createSubagentMcpExtensions } from "./builtin-extensions";
 import type { McpHost } from "./mcp-host";
-import { createReadOnlyMcpPolicyExtension } from "./mcp-read-only-policy";
+import { createReadOnlyMcpPolicyExtension, createSubagentMcpPolicyExtension } from "./mcp-read-only-policy";
 import { isNestedToolExecutionEvent } from "./agent-event-wire";
 import {
   appendClearedSessionToolSelection,
@@ -488,6 +489,37 @@ export class AgentSessionWrapper {
 
   async waitUntilReady(): Promise<void> {
     await this.waitForExtensionsBound();
+  }
+
+  /**
+   * A subagent run prompts the SDK session directly (`lib/subagent-runtime.ts`), past `send()`:
+   * connect the session's MCP servers first, as a sent prompt does, once session_start has bound
+   * the host. Stop (`abort`) ends the wait as it ends a sent prompt's, and so does `signal`.
+   * Resolves whether the run may start.
+   */
+  async prepareMcpForRun(signal: AbortSignal): Promise<boolean> {
+    const mcpHost = this.mcpHost;
+    if (!mcpHost || this.inner.isStreaming) return !signal.aborted;
+    const controller = new AbortController();
+    const stop = () => controller.abort();
+    if (signal.aborted) stop();
+    signal.addEventListener("abort", stop, { once: true });
+    // Registered before the binding is awaited, so a Stop meanwhile already ends it.
+    const waited = (async () => {
+      await this.waitForExtensionsBound();
+      if (!controller.signal.aborted) await mcpHost.prepareForPrompt(controller.signal);
+    })().catch((error: unknown) => {
+      console.error("[pi-web] MCP servers could not be prepared:", error instanceof Error ? error.message : error);
+    });
+    const wait = { controller, done: waited };
+    this.mcpPromptWait = wait;
+    try {
+      await waited;
+    } finally {
+      signal.removeEventListener("abort", stop);
+      if (this.mcpPromptWait === wait) this.mcpPromptWait = null;
+    }
+    return !controller.signal.aborted;
   }
 
   private ensureExtensionsBound(): Promise<void> {
@@ -2001,8 +2033,10 @@ const SUBAGENT_CONTROLLER = createSubagentController({
         : {}),
       chatOnly: options?.chatOnly,
       suppressCompletionNotifications: true,
+      ...(options?.mcpHost ? { mcpHost: options.mcpHost } : {}),
     });
     registerRpcWrapper(wrapper);
+    return wrapper;
   },
   reopenSession: async (sessionId, sessionFile) =>
     (await startRpcSession(sessionId, sessionFile, undefined)).session,
@@ -2362,7 +2396,7 @@ export async function startRpcSession(
     appendSessionToolSelection(sessionManager, requestedToolNames);
   }
   const subagentLoadsResources = Boolean(
-    subagentResources?.loadExtensions || subagentResources?.loadSkills || subagentResources?.codemode,
+    subagentResources?.loadExtensions || subagentResources?.loadSkills || subagentResources?.codemode || subagentResources?.mcp,
   );
   const chatOnly = selectedToolNames?.length === 0 && !subagentLoadsResources;
   // Server-side bridge to the session's pi-background-tasks package; only
@@ -2421,6 +2455,14 @@ export async function startRpcSession(
           projectTrusted: () => settingsManager.isProjectTrusted(),
         })
       : undefined;
+    const subagentMcp = subagentResources?.mcp
+      ? await createSubagentMcpExtensions({
+          agentDir,
+          cwd: sessionCwd,
+          projectTrusted: () => settingsManager.isProjectTrusted(),
+          codemode: subagentResources.codemode === true,
+        })
+      : undefined;
     const services = await createAgentSessionServices({
       cwd: sessionCwd,
       agentDir,
@@ -2429,6 +2471,11 @@ export async function startRpcSession(
         ? {
             noExtensions: !subagentResources.loadExtensions,
             noSkills: !subagentResources.loadSkills,
+            // `builtin:tool-search` / `builtin:mcp` load under `noExtensions` too, as the CLI's
+            // `-e builtin:<name>` does (`subagentExtensionLoaderOptions()` upstream).
+            ...(subagentResources.mcp
+              ? { additionalExtensionPaths: [...SUBAGENT_MCP_EXTENSION_PATHS] }
+              : {}),
             noPromptTemplates: true,
             noThemes: true,
             noContextFiles: true,
@@ -2439,11 +2486,14 @@ export async function startRpcSession(
                 }
               : {}),
             appendSystemPrompt: subagentResources.appendSystemPrompt,
-            // The exact prompt goes through before_agent_start; codemode rides alongside it.
-            ...((subagentCodemode || usesExactSystemPrompt)
+            // The exact prompt goes through before_agent_start; codemode and MCP ride alongside it.
+            ...((subagentCodemode || subagentMcp || usesExactSystemPrompt)
               ? {
                   extensionFactories: [
                     ...(subagentCodemode ? [subagentCodemode] : []),
+                    ...(subagentMcp
+                      ? [...subagentMcp.extensions, createSubagentMcpPolicyExtension(() => subagentResources)]
+                      : []),
                     ...(usesExactSystemPrompt ? [exactSystemPromptExtension] : []),
                   ],
                 }
@@ -2535,6 +2585,7 @@ export async function startRpcSession(
           : () => contextFilesSystemPrompt(inner.resourceLoader.getAgentsFiles().agentsFiles)
         : undefined;
     exactSystemPromptRef.current = exactSystemPrompt;
+    const mcpHost = builtins?.mcpHost ?? subagentMcp?.mcpHost;
     const wrapper = new AgentSessionWrapper(inner, {
       exactSystemPrompt,
       chatOnly,
@@ -2545,7 +2596,7 @@ export async function startRpcSession(
         });
       },
       suppressCompletionNotifications: Boolean(subagentResources),
-      ...(builtins?.mcpHost ? { mcpHost: builtins.mcpHost } : {}),
+      ...(mcpHost ? { mcpHost } : {}),
     });
     const realSessionId = inner.sessionId as string;
     registerRpcWrapper(wrapper);

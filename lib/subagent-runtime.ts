@@ -24,6 +24,7 @@ import {
   SUBAGENT_STATUS_TYPE,
   SUBAGENT_RESULT_TYPE,
   selectSubagentExtensionTools,
+  SUBAGENT_MCP_EXTENSION_PATHS,
   subagentToolOptions,
   withSubagentExtensionTools,
   type SubagentMetadata,
@@ -35,7 +36,9 @@ import { buildSubagentPromptPlan } from "./subagent-prompt";
 import { createExactSystemPromptExtension } from "./exact-system-prompt";
 import { appendSubagentInputFiles, loadSubagentInputFiles } from "./subagent-input";
 import { projectTrustReloadOptions } from "./project-trust";
-import { createSubagentCodemodeExtension } from "./builtin-extensions";
+import { createSubagentCodemodeExtension, createSubagentMcpExtensions } from "./builtin-extensions";
+import type { McpHost } from "./mcp-host";
+import { createSubagentMcpPolicyExtension } from "./mcp-read-only-policy";
 import { resolveShellTools } from "./powershell-settings";
 import { isBuiltInSubagentsEnabled, readSubagentSettings } from "./subagent-settings";
 import { SubagentQueue } from "./subagent-queue";
@@ -49,14 +52,19 @@ interface HostSession {
   isAlive(): boolean;
   isRunning(): boolean;
   waitUntilReady(): Promise<void>;
+  /**
+   * Connect the session's MCP servers before a run prompts the SDK session directly, past the
+   * wrapper's `send()`; false when Stop or `signal` ended the wait and the run must not start.
+   */
+  prepareMcpForRun?(signal: AbortSignal): Promise<boolean>;
 }
 
 export interface SubagentRuntimeDependencies {
   getSession(sessionId: string): HostSession | undefined;
   registerSession(
     inner: AgentSessionLike,
-    options?: { exactSystemPrompt?: string; chatOnly?: boolean },
-  ): void;
+    options?: { exactSystemPrompt?: string; chatOnly?: boolean; mcpHost?: McpHost },
+  ): HostSession | void;
   reopenSession(sessionId: string, sessionFile: string): Promise<HostSession>;
   resolveSessionPath(sessionId: string): Promise<string | null>;
   invalidateSessionList(): void;
@@ -75,6 +83,8 @@ type StoredSubagentExecution = {
   completion: Promise<SubagentRunInfo>;
   abortRequested: boolean;
   cancelQueued?: () => boolean;
+  /** Ends the wait for the child's MCP servers before its prompt (`prepareChildMcp()`). */
+  mcpWait?: AbortController;
 };
 
 declare global {
@@ -97,6 +107,25 @@ function lastAssistantError(sessionManager: { getEntries?: () => unknown }): str
     return typeof entry.message.errorMessage === "string" && entry.message.errorMessage ? entry.message.errorMessage : "Provider returned an error";
   }
   return undefined;
+}
+
+/**
+ * A child with `mcp: on` connects its servers before its prompt, as a prompt sent to the wrapper
+ * does. The parent's Stop and `abort()` end the wait through `stored.mcpWait`, the child's own
+ * Stop through the wrapper; either way the run is aborted before it starts.
+ */
+async function prepareChildMcp(session: HostSession | void, stored: StoredSubagentExecution): Promise<void> {
+  if (!session?.prepareMcpForRun) return;
+  const controller = new AbortController();
+  stored.mcpWait = controller;
+  try {
+    if (stored.abortRequested) controller.abort();
+    if (await session.prepareMcpForRun(controller.signal)) return;
+  } finally {
+    stored.mcpWait = undefined;
+  }
+  stored.abortRequested = true;
+  throw new Error("Stopped while connecting MCP servers");
 }
 
 function getSubagentRuns(): Map<string, StoredSubagentExecution> {
@@ -247,6 +276,10 @@ export function createSubagentController(
       // A chat-only profile remains chat-only when inheritance is selected. An explicit `on`
       // is rejected above so it cannot silently grant a script capability to tools:none.
       const codemodeEnabled = !promptPlan.chatOnly && wantsCodemode;
+      if (promptPlan.chatOnly && profile.mcp === "on") {
+        throw new Error("MCP cannot be enabled for a chat-only subagent profile");
+      }
+      const mcpEnabled = profile.mcp === "on";
       const chatOnly = promptPlan.chatOnly;
       const { appendSystemPrompt, delegatedTask } = promptPlan;
       const codemodeExtension = codemodeEnabled
@@ -256,10 +289,21 @@ export function createSubagentController(
             projectTrusted: () => settingsManager.isProjectTrusted(),
           })
         : undefined;
+      // The policy reads the child's tools once they are resolved below.
+      const mcpScope: { tools: readonly string[]; allExtensionTools?: boolean } = { tools: [] };
+      const mcp = mcpEnabled
+        ? await createSubagentMcpExtensions({
+            agentDir,
+            cwd: childCwd,
+            projectTrusted: () => settingsManager.isProjectTrusted(),
+            codemode: codemodeEnabled,
+          })
+        : undefined;
       // The fork has no subagent skills binding: its exact-prompt factory below is the only
       // other inline factory, and codemode's rides alongside it.
       const extensionFactories = [
         ...(codemodeExtension ? [codemodeExtension] : []),
+        ...(mcp ? [...mcp.extensions, createSubagentMcpPolicyExtension(() => mcpScope)] : []),
         ...(promptPlan.exactSystemPrompt !== undefined
           ? [createExactSystemPromptExtension(() => promptPlan.exactSystemPrompt)]
           : []),
@@ -273,6 +317,9 @@ export function createSubagentController(
         resourceLoaderOptions: {
           noExtensions: !profile.loadExtensions,
           noSkills: !profile.loadSkills,
+          // `builtin:tool-search` / `builtin:mcp` load under `noExtensions` too, as the CLI's
+          // `-e builtin:<name>` does (`subagentExtensionLoaderOptions()` upstream).
+          ...(mcpEnabled ? { additionalExtensionPaths: [...SUBAGENT_MCP_EXTENSION_PATHS] } : {}),
           noPromptTemplates: true,
           noThemes: true,
           noContextFiles: true,
@@ -285,7 +332,7 @@ export function createSubagentController(
           appendSystemPrompt,
           ...(extensionFactories.length > 0 ? { extensionFactories } : {}),
         },
-        ...((profile.loadExtensions || profile.loadSkills || codemodeEnabled)
+        ...((profile.loadExtensions || profile.loadSkills || codemodeEnabled || mcpEnabled)
           ? { resourceLoaderReloadOptions: projectTrustReloadOptions(childCwd, agentDir) }
           : {}),
       });
@@ -328,6 +375,8 @@ export function createSubagentController(
         settingsManager.getDefaultTools(),
       );
       if (codemodeEnabled && !activeTools.includes("codemode")) activeTools.push("codemode");
+      mcpScope.tools = activeTools;
+      mcpScope.allExtensionTools = allExtensionTools;
 
       const sessionManager = isolatedWorktree
         ? SessionManager.create(childCwd, undefined, { parentSession: parent.sessionFile })
@@ -348,6 +397,7 @@ export function createSubagentController(
           appendSystemPrompt: [...appendSystemPrompt],
           tools: [...activeTools],
           ...(codemodeEnabled ? { codemode: true as const } : {}),
+          ...(mcpEnabled ? { mcp: true as const } : {}),
           loadSkills: profile.loadSkills,
           loadExtensions: profile.loadExtensions,
           ...(allExtensionTools ? { allExtensionTools: true } : {}),
@@ -365,13 +415,14 @@ export function createSubagentController(
         sessionManager,
         model: requestedModel ?? parentModel,
         ...(thinking ? { thinkingLevel: thinking as ThinkingLevel } : {}),
-        ...subagentToolOptions({ tools: activeTools, allExtensionTools }),
+        ...subagentToolOptions({ tools: activeTools, allExtensionTools, mcp: mcpEnabled }),
       });
-      dependencies.registerSession(inner, {
+      const childSession = dependencies.registerSession(inner, {
         ...(promptPlan.exactSystemPrompt !== undefined
           ? { exactSystemPrompt: promptPlan.exactSystemPrompt }
           : {}),
         chatOnly,
+        ...(mcp?.mcpHost ? { mcpHost: mcp.mcpHost } : {}),
       });
 
       const initialRun: SubagentRunInfo = {
@@ -418,6 +469,7 @@ export function createSubagentController(
       const handleParentAbort = () => {
         stored.abortRequested = true;
         if (stored.run.status === "queued") stored.cancelQueued?.();
+        else if (stored.mcpWait) stored.mcpWait.abort();
         else void inner.abort();
       };
       if (!runInBackground) request.signal?.addEventListener("abort", handleParentAbort, { once: true });
@@ -439,6 +491,7 @@ export function createSubagentController(
         dependencies.invalidateSessionList();
         let result: SubagentRunInfo;
         try {
+          await prepareChildMcp(childSession, stored);
           await inner.prompt(delegatedTask, { source: "rpc" });
           const text = inner.getLastAssistantText()?.trim();
           const aborted = stored.abortRequested && !maxTurnsReached;
@@ -565,6 +618,7 @@ export function createSubagentController(
     const handleParentAbort = () => {
       stored.abortRequested = true;
       if (stored.run.status === "queued") stored.cancelQueued?.();
+      else if (stored.mcpWait) stored.mcpWait.abort();
       else void wrapper!.inner.abort();
     };
     if (!runInBackground) request.signal?.addEventListener("abort", handleParentAbort, { once: true });
@@ -583,6 +637,7 @@ export function createSubagentController(
       request.onUpdate?.(stored.run);
       let result: SubagentRunInfo;
       try {
+        await prepareChildMcp(wrapper, stored);
         await wrapper!.inner.prompt(request.task, { source: "rpc" });
         const text = wrapper!.inner.getLastAssistantText()?.trim();
         const providerError = stored.abortRequested ? undefined : lastAssistantError(manager);
@@ -697,6 +752,12 @@ export function createSubagentController(
     if (stored?.run.status === "queued") {
       stored.abortRequested = true;
       if (!stored.cancelQueued?.()) throw new Error("Subagent is no longer queued");
+      return;
+    }
+    // Still connecting its MCP servers: no run to stop yet, so the wait ends instead.
+    if (stored?.mcpWait) {
+      stored.abortRequested = true;
+      stored.mcpWait.abort();
       return;
     }
     if (!wrapper?.isAlive() || !wrapper.isRunning()) throw new Error("Subagent is not running");

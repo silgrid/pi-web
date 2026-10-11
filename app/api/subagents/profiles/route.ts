@@ -86,6 +86,7 @@ export async function PATCH(req: Request) {
       loadSkills: source.loadSkills,
       loadExtensions: source.loadExtensions,
       codemode: source.codemode,
+      mcp: source.mcp,
       promptMode: source.promptMode,
       model: source.model,
       thinking: source.thinking,
