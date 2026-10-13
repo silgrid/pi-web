@@ -425,6 +425,7 @@ export const zhTWLocale: LocalePlugin = {
     "sidebar.newSessionActivity": "工作階段有新活動",
     "sidebar.deleteSession": "刪除 {title}？",
     "sidebar.rename": "重新命名",
+    "sidebar.openInNewTab": "在新分頁開啟",
     "sidebar.delete": "刪除",
     "sidebar.deleteWithShiftClick": "刪除（按住 Shift 點選可跳過確認）",
     "sidebar.expandSubagents": "展開子代理",
