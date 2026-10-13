@@ -1,7 +1,10 @@
 import {
+  CONFIG_DIR_NAME,
   createCodemodeExtension,
   createMcpExtension,
   createToolSearchExtension,
+  DefaultPackageManager,
+  SettingsManager,
   type ExtensionAPI,
   type ExtensionContext,
   type ExtensionFactory,
@@ -9,17 +12,19 @@ import {
   type LoadedMcpConfig,
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
+import { join } from "node:path";
 import { McpHost, type McpHostOptions } from "./mcp-host";
 import { createPiWebMcpTransportFactory } from "./mcp-transport";
 import { loadPiSdkInternals, type PiSdkInternals, type PiSdkInternalsResult } from "./pi-sdk-internals";
+import { PROJECT_SETTINGS_MAX_BYTES, readRegularFileText } from "./regular-file";
 
 // The built-in extensions the pi CLI prepends from a module the SDK does not
 // export (ADR 0006, "Loading"). Normal sessions load them under the CLI's
 // names, so `-builtin:<name>`, project overrides, `noExtensions`, and
 // replacement by a third-party extension that registers `/mcp`, `codemode`, or
 // `tool_search` behave as in the CLI. `llama.cpp` is not among them: it serves
-// a local model server, not a feature of the session. Chat-only and subagent
-// sessions load none of them.
+// a local model server, not a feature of the session. Chat-only sessions load
+// none of them; a subagent only what its profile turns on.
 
 export const MCP_DISABLE_VARIABLE = "PI_WEB_DISABLE_MCP";
 
@@ -193,6 +198,116 @@ export function createMcpExtensionConfigLoader(
 }
 
 // ---------------------------------------------------------------------------
+// Whether the settings switch a built-in off
+//
+// Ported verbatim from upstream (81cc285's lineage): the subagent codemode
+// factory below reads these switches, and the fork had no equivalent.
+// ---------------------------------------------------------------------------
+
+export const BUILTIN_EXTENSION_NAMES = ["codemode", "tool-search", "mcp"] as const;
+export type BuiltinExtensionName = typeof BUILTIN_EXTENSION_NAMES[number];
+
+export interface BuiltinExtensionSwitch {
+  enabled: boolean;
+  /** The settings file whose `extensions` entry turns it off. */
+  settingsPath?: string;
+  /**
+   * What the global settings alone make of it. Present only when a trusted
+   * project's `extensions` list was read; otherwise the switch itself is the
+   * global answer. A global setting, such as Code mode's Always on, is weighed
+   * against this, never against whichever project Settings was opened from.
+   */
+  global?: { enabled: boolean; settingsPath?: string };
+}
+
+/**
+ * A settings file's `extensions` list, read as SettingsManager reads it: a
+ * byte-order mark is allowed, and a file that does not parse counts as empty.
+ * A FIFO or a device there throws instead of blocking the server on a read
+ * nothing answers, as does a project file past `PROJECT_SETTINGS_MAX_BYTES`.
+ */
+function readSettingsExtensions(path: string, maxBytes?: number): string[] | undefined {
+  const text = readRegularFileText(path, maxBytes);
+  if (text === undefined) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text);
+  } catch {
+    return undefined;
+  }
+  const extensions = typeof parsed === "object" && parsed !== null ? (parsed as { extensions?: unknown }).extensions : undefined;
+  return Array.isArray(extensions) ? extensions.filter((entry): entry is string => typeof entry === "string") : undefined;
+}
+
+type SettingsScope = "global" | "project";
+
+async function resolveBuiltinSwitches(
+  options: { agentDir: string; cwd: string; projectTrusted: boolean },
+  lists: Partial<Record<SettingsScope, string[]>>,
+  paths: Record<SettingsScope, string>,
+): Promise<Record<BuiltinExtensionName, BuiltinExtensionSwitch>> {
+  const { agentDir, cwd, projectTrusted } = options;
+  const storage: Parameters<typeof SettingsManager.fromStorage>[0] = {
+    withLock: (scope, fn) => {
+      const extensions = lists[scope];
+      fn(extensions ? JSON.stringify({ extensions }) : undefined);
+    },
+  };
+  const packageManager = new DefaultPackageManager({
+    cwd,
+    agentDir,
+    settingsManager: SettingsManager.fromStorage(storage, { projectTrusted }),
+    builtinExtensions: [...BUILTIN_EXTENSION_NAMES],
+  });
+  // Nothing is missing without packages; skip rather than install if that ever changes.
+  const resolved = await packageManager.resolve(async () => "skip");
+  const switches = {} as Record<BuiltinExtensionName, BuiltinExtensionSwitch>;
+  for (const name of BUILTIN_EXTENSION_NAMES) {
+    const resource = resolved.extensions.find((extension) => extension.path === `builtin:${name}`);
+    const enabled = resource?.enabled ?? true;
+    switches[name] = enabled
+      ? { enabled }
+      : { enabled, settingsPath: resource?.metadata.scope === "project" ? paths.project : paths.global };
+  }
+  return switches;
+}
+
+/**
+ * Whether the `extensions` settings leave each built-in on, read from the
+ * files as the session's resource loader would: `-builtin:mcp` (or a `!`
+ * pattern matching it) in the global settings turns it off, and a matching
+ * `+`, `-` or `!` entry in a trusted project's settings overrides that. The
+ * SDK's package manager decides, so its pattern rules apply exactly; it is
+ * given only the two `extensions` lists, never `packages`, so it cannot
+ * install or even look up a package. It still scans the extension, skill,
+ * prompt and theme folders it auto-discovers, which only reads them. When a
+ * trusted project has a list of its own, the global list is resolved a second
+ * time on its own for each switch's `global` answer.
+ */
+export async function readBuiltinExtensionSwitches(options: {
+  agentDir: string;
+  /** Without one, only the global settings count. */
+  cwd?: string;
+  projectTrusted: boolean;
+}): Promise<Record<BuiltinExtensionName, BuiltinExtensionSwitch>> {
+  const { agentDir } = options;
+  const projectTrusted = options.cwd !== undefined && options.projectTrusted;
+  const cwd = options.cwd ?? agentDir;
+  const paths = {
+    global: join(agentDir, "settings.json"),
+    project: join(cwd, CONFIG_DIR_NAME, "settings.json"),
+  };
+  const global = readSettingsExtensions(paths.global);
+  // The project file is the repository's, read by a GET: capped, and never a FIFO.
+  const project = projectTrusted ? readSettingsExtensions(paths.project, PROJECT_SETTINGS_MAX_BYTES) : undefined;
+  const switches = await resolveBuiltinSwitches({ agentDir, cwd, projectTrusted }, { global, project }, paths);
+  if (project === undefined) return switches;
+  const globalSwitches = await resolveBuiltinSwitches({ agentDir, cwd, projectTrusted: false }, { global }, paths);
+  for (const name of BUILTIN_EXTENSION_NAMES) switches[name].global = globalSwitches[name];
+  return switches;
+}
+
+// ---------------------------------------------------------------------------
 // The list
 // ---------------------------------------------------------------------------
 
@@ -202,8 +317,112 @@ export function createMcpExtensionConfigLoader(
  */
 const unavailableExtension: ExtensionFactory = () => {};
 
-function builtin(name: string, factory: ExtensionFactory): InlineExtension {
+function builtin(name: BuiltinExtensionName, factory: ExtensionFactory): InlineExtension {
   return { name, factory, replaceable: true, builtin: true };
+}
+
+/**
+ * `tool-search`, `mcp`, and the host that decides which servers `mcp` connects, in the CLI's
+ * order. Servers whose tools only scripts reach register as `deferred` while
+ * `codemodeAvailable()` is false. `gate` wraps each built-in's factory.
+ */
+function createMcpBuiltins(
+  mcp: McpRuntimeResult,
+  options: {
+    agentDir: string;
+    codemodeAvailable: () => boolean;
+    mcpHost?: Pick<McpHostOptions, "idleMs" | "promptWaitMs">;
+    gate?: (name: BuiltinExtensionName, factory: ExtensionFactory) => ExtensionFactory;
+  },
+): PiWebBuiltinExtensions {
+  const gate = options.gate ?? ((_name, factory) => factory);
+  const mcpHost = mcp.available
+    ? new McpHost({
+        ...options.mcpHost,
+        agentDir: options.agentDir,
+        internals: mcp.internals,
+        codemodeAvailable: options.codemodeAvailable,
+      })
+    : undefined;
+  const extensions = [
+    builtin("tool-search", gate("tool-search", createToolSearchExtension())),
+    builtin("mcp", gate(
+      "mcp",
+      mcp.available && mcpHost
+        ? createMcpExtension({
+            loadConfig: createMcpExtensionConfigLoader(mcp.internals, options.agentDir),
+            createTransport: mcpHost.wrapTransportFactory(createPiWebMcpTransportFactory(mcp.internals)),
+            // The host already waited, and Stop ends its wait. The extension's own wait for
+            // servers with `direct` tools, at a session's first prompt, ignores Stop.
+            startupWaitMs: 0,
+            // `/mcp login` already shows the address in the chat; a browser
+            // opened on the server host is one a remote user never sees.
+            openUrl: () => {},
+          })
+        : unavailableExtension,
+    )),
+  ];
+  if (mcpHost) extensions.push(mcpHost.extension());
+  return { extensions, mcpHost };
+}
+
+/**
+ * Code mode for a subagent whose profile turns it on. A plain inline extension, not
+ * `builtin:codemode`: a child that loads no extensions runs with `noExtensions`, which drops
+ * named built-ins too. Its factory reads the `-builtin:codemode` switch on every load instead,
+ * so the settings that switch Code mode off for normal sessions switch it off here as well.
+ */
+export async function createSubagentCodemodeExtension(options: {
+  agentDir: string;
+  cwd: string;
+  projectTrusted: () => boolean;
+}): Promise<InlineExtension> {
+  const sandbox = await checkCodemodeSandbox();
+  if (!sandbox.available) throw new Error(`Code mode is unavailable: ${sandbox.reason}`);
+  const codemode = createCodemodeExtension();
+  return {
+    name: "codemode",
+    replaceable: true,
+    factory: async (pi) => {
+      const switches = await readBuiltinExtensionSwitches({
+        agentDir: options.agentDir,
+        cwd: options.cwd,
+        projectTrusted: options.projectTrusted(),
+      });
+      if (switches.codemode.enabled) await codemode(pi);
+    },
+  };
+}
+
+/**
+ * MCP for a subagent whose profile turns it on (`mcp: on`): `builtin:tool-search` and
+ * `builtin:mcp` with a host of the child's own, as a normal session loads them. The child names
+ * both in `additionalExtensionPaths` (`SUBAGENT_MCP_EXTENSION_PATHS`), which loads a built-in
+ * under `noExtensions` as well, but also past a `-builtin:` setting, so each factory reads its
+ * switch on every load, as the child's Code mode does. `codemode` servers are reachable from
+ * scripts only when the child has Code mode; otherwise they register as `deferred`.
+ */
+export async function createSubagentMcpExtensions(options: {
+  agentDir: string;
+  cwd: string;
+  projectTrusted: () => boolean;
+  codemode: boolean;
+  /** Timing overrides for tests. */
+  mcpHost?: Pick<McpHostOptions, "idleMs" | "promptWaitMs">;
+}): Promise<PiWebBuiltinExtensions> {
+  return createMcpBuiltins(await loadMcpRuntime(), {
+    agentDir: options.agentDir,
+    codemodeAvailable: () => options.codemode,
+    ...(options.mcpHost ? { mcpHost: options.mcpHost } : {}),
+    gate: (name, factory) => async (pi) => {
+      const switches = await readBuiltinExtensionSwitches({
+        agentDir: options.agentDir,
+        cwd: options.cwd,
+        projectTrusted: options.projectTrusted(),
+      });
+      if (switches[name].enabled) await factory(pi);
+    },
+  });
 }
 
 export interface PiWebBuiltinExtensionsOptions {
@@ -224,30 +443,13 @@ export async function createPiWebBuiltinExtensions(
   options: PiWebBuiltinExtensionsOptions,
 ): Promise<PiWebBuiltinExtensions> {
   const [sandbox, mcp] = await Promise.all([checkCodemodeSandbox(), loadMcpRuntime()]);
-  const mcpHost = mcp.available
-    ? new McpHost({
-        ...options.mcpHost,
-        agentDir: options.agentDir,
-        internals: mcp.internals,
-        codemodeAvailable: () => sandbox.available,
-      })
-    : undefined;
-  const extensions = [
-    builtin("codemode", sandbox.available ? createCodemodeExtension() : unavailableExtension),
-    builtin("tool-search", createToolSearchExtension()),
-    builtin(
-      "mcp",
-      mcp.available && mcpHost
-        ? createMcpExtension({
-            loadConfig: createMcpExtensionConfigLoader(mcp.internals, options.agentDir),
-            createTransport: mcpHost.wrapTransportFactory(createPiWebMcpTransportFactory(mcp.internals)),
-            // `/mcp login` already shows the address in the chat; a browser
-            // opened on the server host is one a remote user never sees.
-            openUrl: () => {},
-          })
-        : unavailableExtension,
-    ),
-  ];
-  if (mcpHost) extensions.push(mcpHost.extension());
-  return { extensions, mcpHost };
+  const { extensions, mcpHost } = createMcpBuiltins(mcp, {
+    agentDir: options.agentDir,
+    codemodeAvailable: () => sandbox.available,
+    ...(options.mcpHost ? { mcpHost: options.mcpHost } : {}),
+  });
+  return {
+    extensions: [builtin("codemode", sandbox.available ? createCodemodeExtension() : unavailableExtension), ...extensions],
+    mcpHost,
+  };
 }
