@@ -110,6 +110,7 @@ lib/
   enabled-models.ts    pure minimal-edit engine for the `enabledModels` pattern list
   enabled-models-runtime.ts  SDK adapter: per-pattern resolution, provider kinds, settings IO
   markdown.ts          shared markdown helpers
+  prism-languages.ts   loadPrismLanguages(): every Prism language in a chunk of its own, loaded when a highlighter first needs it
   gfm-autolink-email-loader.cjs  bundler loader: remark-gfm's email regex without a lookbehind literal (#753)
   node-cli.ts          locate bundled npm-cli.js / npx-cli.js so npm/npx spawn without a shell (Windows npm.cmd)
   npx.ts               npx runner used by skill install
@@ -157,9 +158,11 @@ components/
 
 hooks/
   useAgentSession.ts  messages + streaming + SSE + fork/navigate/reconciliation logic
+  useStreamingSelector.ts  one value of the streaming store (lib/streaming-message.ts): a chunk re-renders only its subscribers
   useAudio.ts         completion sound + browser AudioContext unlock
   useDragDrop.ts      shared drag/drop state
   useIsMobile.ts      responsive breakpoint hook
+  usePrismLanguages.ts  true once the Prism languages are loaded; starts the load for a highlighter
   useTheme.ts         theme state
 ```
 

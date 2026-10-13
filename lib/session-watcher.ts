@@ -209,24 +209,32 @@ function flushPending(state: WatcherState): void {
   }
   if (!state.recursive || state.pendingRescan) {
     state.pendingRescan = false;
-    rescanSubdirectoryWatchers(state);
+    if (rescanSubdirectoryWatchers(state)) {
+      // A project subdirectory appeared or vanished: a membership change in
+      // its own right. The recursive layout reports the new file directly
+      // (its change events carry the full relative path); the per-subdirectory
+      // layout must not stay silent about the directory itself.
+      invalidateSessionListCache();
+    }
   }
 }
 
-function rescanSubdirectoryWatchers(state: WatcherState): void {
-  if (state.recursive) return;
+function rescanSubdirectoryWatchers(state: WatcherState): boolean {
+  if (state.recursive) return false;
   let entries;
   try {
     entries = readdirSync(state.root, { withFileTypes: true });
   } catch {
-    return;
+    return false;
   }
+  let membershipChanged = false;
   const known = new Set<string>();
   for (const entry of entries) {
     if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
     const dir = join(state.root, entry.name);
     known.add(dir);
     if ([...state.watchers].some((watcher) => (watcher as unknown as { __piWebWatchDir?: string }).__piWebWatchDir === dir)) continue;
+    membershipChanged = true;
     try {
       const watcher = watch(dir);
       (watcher as unknown as { __piWebWatchDir?: string }).__piWebWatchDir = dir;
@@ -239,6 +247,7 @@ function rescanSubdirectoryWatchers(state: WatcherState): void {
   for (const watcher of [...state.watchers]) {
     const dir = (watcher as unknown as { __piWebWatchDir?: string }).__piWebWatchDir;
     if (dir !== undefined && !known.has(dir)) {
+      membershipChanged = true;
       state.watchers.delete(watcher);
       try {
         watcher.close();
@@ -247,6 +256,7 @@ function rescanSubdirectoryWatchers(state: WatcherState): void {
       }
     }
   }
+  return membershipChanged;
 }
 
 function createWatchers(state: WatcherState): void {

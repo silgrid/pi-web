@@ -88,6 +88,7 @@ test("New restores the draft after session navigation and workspace auto-restore
         activeProjectKeyRef: { current: cwd },
         workspaceRestoreTokenRef: { current: 0 },
         suppressCwdBumpRef: { current: false },
+        skipWorkspaceRestoreRef: { current: false },
         branchLeafChangeFnRef: { current: null },
         liveFollowFrameRef: { current: null },
         bashRecoveryIdRef: { current: 0 },
@@ -183,3 +184,4 @@ test("New restores the draft after session navigation and workspace auto-restore
     });
   }
 });
+
