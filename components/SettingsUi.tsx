@@ -570,6 +570,7 @@ export function ConfigSwitch({
   loading = false,
   size = "default",
   label,
+  describedBy,
   onChange,
 }: {
   checked: boolean;
@@ -577,6 +578,8 @@ export function ConfigSwitch({
   loading?: boolean;
   size?: "default" | "small";
   label: string;
+  /** The id of visible text about the switch, such as why it is disabled; never only its tooltip. */
+  describedBy?: string;
   onChange: (checked: boolean) => void;
 }) {
   const inactive = disabled || loading;
@@ -587,6 +590,7 @@ export function ConfigSwitch({
       aria-checked={checked}
       aria-busy={loading || undefined}
       aria-label={label}
+      aria-describedby={describedBy}
       title={label}
       disabled={inactive}
       className={`config-switch${size === "small" ? " is-small" : ""}${loading ? " is-loading" : ""}`}
