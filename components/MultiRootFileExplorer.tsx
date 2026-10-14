@@ -140,11 +140,20 @@ export const MultiRootFileExplorer = forwardRef<MultiRootFileExplorerHandle, Pro
     onChangesCountChangeRef.current = onChangesCountChange;
     const onUploadBusyChangeRef = useRef(onUploadBusyChange);
     onUploadBusyChangeRef.current = onUploadBusyChange;
+    // The deterministic target section's key (computed at targetRoot below,
+    // same resolution rule as openFileSearch), kept in a ref so the
+    // child-driven re-notify callbacks — which must not re-render this
+    // component — read the live value. Same render-phase ref pattern as the
+    // on*Change refs above.
+    const targetKeyRef = useRef<string | null>(null);
 
     const notifyChanges = useCallback(() => {
-      let sum = 0;
-      for (const count of changesByKey.current.values()) sum += count;
-      onChangesCountChangeRef.current?.(sum);
+      // The header badge reports the deterministic TARGET section's count
+      // (wi pi#101: 多根 = 当前展开/选中根的计数), not a sum across mounted
+      // sections. A collapsed section mounts no FileExplorer and reports
+      // nothing, so a target that is not expanded counts as 0.
+      const targetKey = targetKeyRef.current;
+      onChangesCountChangeRef.current?.(targetKey != null ? (changesByKey.current.get(targetKey) ?? 0) : 0);
     }, []);
 
     const notifyUploadBusy = useCallback(() => {
@@ -200,6 +209,13 @@ export const MultiRootFileExplorer = forwardRef<MultiRootFileExplorerHandle, Pro
       roots.find((root) => expandedKeys.has(root.key) && !staleRoots.has(root.root))
       ?? roots.find((root) => !staleRoots.has(root.root))
       ?? null;
+    targetKeyRef.current = targetRoot?.key ?? null;
+    // Expansion flips move the target: re-notify so the header count
+    // follows the newly targeted root without waiting for a child callback.
+    useEffect(() => {
+      notifyChanges();
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [targetKeyRef.current]);
 
     // Review-FAIL blocker 1 fix: openUploadPicker may need to expand the
     // target section first (collapsed sections mount no FileExplorer, so

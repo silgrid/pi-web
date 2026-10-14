@@ -39,16 +39,30 @@ test("refreshKey propagates to every mounted section's FileExplorer", () => {
   assert.match(source, /refreshKey\?: number;/);
 });
 
-test("the aggregated changes badge sums across mounted sections and upload busy ORs", () => {
+test("the changes badge reports the deterministic target section's count and upload busy ORs", () => {
   assert.match(source, /onChangesCountChange\?: \(count: number\) => void;/);
   assert.match(source, /const changesByKey = useRef\(new Map<string, number>\(\)\);/);
   assert.match(
     source,
     /const handleSectionChanges = useCallback\(\(key: string\) => \(count: number\) => \{[\s\S]*?changesByKey\.current\.set\(key, count\);[\s\S]*?notifyChanges\(\);/,
   );
+  // wi pi#101 semantics: 多根 = 当前展开/选中根的计数. The badge reports the
+  // target section's count — the same resolution rule as openFileSearch —
+  // instead of summing across every mounted section.
   assert.match(
     source,
-    /const notifyChanges = useCallback\(\(\) => \{[\s\S]*?onChangesCountChangeRef\.current\?\.\(sum\);/,
+    /const targetKeyRef = useRef<string \| null>\(null\);/,
+  );
+  assert.match(
+    source,
+    /const notifyChanges = useCallback\(\(\) => \{[\s\S]*?const targetKey = targetKeyRef\.current;[\s\S]*?onChangesCountChangeRef\.current\?\.\(targetKey != null \? \(changesByKey\.current\.get\(targetKey\) \?\? 0\) : 0\);/,
+  );
+  // The target key is derived from the deterministic target root and
+  // re-notifies on expansion flips.
+  assert.match(source, /targetKeyRef\.current = targetRoot\?\.key \?\? null;/);
+  assert.match(
+    source,
+    /useEffect\(\(\) => \{[\s\S]*?notifyChanges\(\);[\s\S]*?\}, \[targetKeyRef\.current\]\);/,
   );
   assert.match(source, /busy = busy \|\| value;/);
   // Aggregate entries for removed roots are pruned so the badge never counts
