@@ -978,7 +978,16 @@ export function SessionSidebar({ selectedSessionId, highlightSessionId, followHi
   const filesPlacement = useFilesPlacement();
   const isMobile = useIsMobile();
   const stackedSidebarLayout = !isMobile && filesPlacement === "stacked";
-  const [sidebarTab, setSidebarTab] = useState<"sessions" | "files">("sessions");
+  // Verification rewind (mobile e2e regression, plan step-4): the repo's
+  // mobile contract keeps the multi-root explorer reachable without a tab
+  // click — the mobile e2e loop resolves [data-explorer-section] right after
+  // opening the sidebar. So when the viewport forces tabs, the default tab
+  // is "files" (Sessions stays one tap away); desktop tabs mode (the user's
+  // placement choice) defaults to "sessions". An explicit tab click always
+  // wins over the default, and the choice survives layout switches like any
+  // other sidebar state (no remount).
+  const [sidebarTabChoice, setSidebarTab] = useState<"sessions" | "files" | null>(null);
+  const sidebarTab = sidebarTabChoice ?? (isMobile ? "files" : "sessions");
   const sessionsPaneHidden = !stackedSidebarLayout && sidebarTab !== "sessions";
   const filesPaneHidden = !stackedSidebarLayout && sidebarTab !== "files";
   const [explorerKey, setExplorerKey] = useState(0);

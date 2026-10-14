@@ -23,7 +23,15 @@ test("the sidebar derives the layout from the preference AND the mobile breakpoi
   // Upstream's rule, verbatim semantics: stacked = desktop AND "stacked"
   // preference — so mobile forces tabs regardless of the stored value.
   assert.match(source, /const stackedSidebarLayout = !isMobile && filesPlacement === "stacked";/);
-  assert.match(source, /const \[sidebarTab, setSidebarTab\] = useState<"sessions" \| "files">\("sessions"\);/);
+  // Verification rewind (mobile e2e regression, plan step-4): the tab
+  // choice is user-explicit state with a viewport-derived default — when
+  // the mobile breakpoint forces tabs, the default tab is "files" so the
+  // multi-root explorer stays reachable without a tab click (the repo's
+  // mobile e2e contract, [data-explorer-section] right after opening the
+  // sidebar); desktop tabs mode (the user's placement choice) defaults to
+  // "sessions". An explicit tab click always wins.
+  assert.match(source, /const \[sidebarTabChoice, setSidebarTab\] = useState<"sessions" \| "files" \| null>\(null\);/);
+  assert.match(source, /const sidebarTab = sidebarTabChoice \?\? \(isMobile \? "files" : "sessions"\);/);
   assert.match(source, /const sessionsPaneHidden = !stackedSidebarLayout && sidebarTab !== "sessions";/);
   assert.match(source, /const filesPaneHidden = !stackedSidebarLayout && sidebarTab !== "files";/);
 });
