@@ -63,6 +63,7 @@ import { DismissButton } from "./DismissButton";
 import { SessionSearch } from "./SessionSearch";
 import {
   ARCHIVED_SESSIONS_STORAGE_KEY,
+  groupArchivedSessionsByProject,
   loadArchivedSessionIds,
   pruneArchivedSessionIds,
   saveArchivedSessionIds,
@@ -229,6 +230,9 @@ const SESSION_PANE_MAX_HEIGHT = 1600;
 /** Stable empty set for the server-filter match fallback (a mismatched key
  *  must read as "no server matches", never as a new Set per render). */
 const EMPTY_SERVER_FILTER_MATCH: ReadonlySet<string> = new Set<string>();
+/** Stable empty list for the archived-slice memo (pi#103): the no-archive
+ *  case must not allocate a fresh array per render. */
+const EMPTY_ARCHIVED_SESSIONS: readonly SessionInfo[] = [];
 
 function loadLastCustomCwd(): string {
   if (typeof window === "undefined") return "";
@@ -1155,6 +1159,37 @@ export function SessionSidebar({ selectedSessionId, highlightSessionId, followHi
     window.addEventListener("storage", onArchiveStorage);
     return () => window.removeEventListener("storage", onArchiveStorage);
   }, []);
+
+  // The archived slice of the FULL universe — the archive view's rows and the
+  // global 「已归档 N」 count both derive from it. Deliberately global (never
+  // scoped to selectedProject): N counts every archived session across all
+  // projects and stays stable across project switches.
+  const archivedSessions = useMemo(
+    () => archivedSessionIds.size === 0
+      ? EMPTY_ARCHIVED_SESSIONS
+      : allSessions.filter((session) => archivedSessionIds.has(session.id)),
+    [allSessions, archivedSessionIds],
+  );
+  // The view's grouping: one group per project root, freshest project first
+  // (lib/session-archive.ts — pure, so the grouping is unit-testable without
+  // React). Labels reuse the pinned-group convention (displayCwd, full path
+  // in title) so each project's directory name is visible.
+  const archivedGroups = useMemo(
+    () => groupArchivedSessionsByProject(archivedSessions),
+    [archivedSessions],
+  );
+
+  // Archive view (wi pi#103): open state of the replacement view. Purely
+  // presentational local state — the view's contents are a pure function of
+  // the archive set, so opening/closing never touches persistence.
+  const [archiveViewOpen, setArchiveViewOpen] = useState(false);
+  // Auto-return: when the last archived session leaves the set while the
+  // view is open (unarchived one by one, pruned externally, force-unarchived
+  // by running activity), the view has nothing left to show — it closes and
+  // the normal sessions list restores exactly.
+  useEffect(() => {
+    if (archiveViewOpen && archivedSessions.length === 0) setArchiveViewOpen(false);
+  }, [archiveViewOpen, archivedSessions.length]);
 
   useEffect(() => {
     let stopped = false;
@@ -2129,6 +2164,74 @@ export function SessionSidebar({ selectedSessionId, highlightSessionId, followHi
         }}
       >
         <SessionSearch open={sessionSearchOpen} query={sessionSearchQuery} selectedSessionId={selectedSessionId} onSelectSession={handleSelectSessionFromList}>
+        {archiveViewOpen ? (
+          /* Archive view (wi pi#103): temporarily REPLACES the sessions pane
+             list region — the normal rows stop rendering while the view is
+             open (replacement, not an inline block). A prominent back button
+             restores the list; the body groups the archived sessions by
+             project. Row operations are limited to open (view-only) and
+             unarchive — no delete, rename, open-in-new-tab or context menu,
+             and no fold/motion animation (spec non-goal). */
+          <div style={{ flex: "1 1 auto", minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+            <button
+              type="button"
+              onClick={() => setArchiveViewOpen(false)}
+              title={t("sidebar.archiveBack")}
+              aria-label={t("sidebar.archiveBack")}
+              style={{
+                display: "flex", alignItems: "center", gap: 6,
+                flexShrink: 0, width: "100%",
+                padding: "8px 14px",
+                background: "var(--bg-hover)", border: "none",
+                borderBottom: "1px solid var(--border)",
+                color: "var(--text)", cursor: "pointer",
+                fontSize: 12, fontWeight: 600, textAlign: "left",
+              }}
+            >
+              {/* ← glyph — the e2e locator contract accepts Back/返回/←. */}
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+                <line x1="19" y1="12" x2="5" y2="12" />
+                <polyline points="12 19 5 12 12 5" />
+              </svg>
+              {t("sidebar.archiveBack")}
+            </button>
+            <div className="scrollbar-subtle" style={{ flex: "1 1 auto", minHeight: 0, overflowY: "auto" }}>
+              {archivedGroups.map((group) => (
+                <div key={group.root}>
+                  {/* Group label: the pinned-group path-derived convention —
+                      display text carries the directory (basename visible),
+                      the title attr carries the full path. */}
+                  <div
+                    title={group.root}
+                    style={{
+                      padding: "8px 14px 3px",
+                      fontSize: 10,
+                      fontWeight: 600,
+                      letterSpacing: "0.05em",
+                      textTransform: "uppercase",
+                      color: "var(--text-dim)",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    {displayCwd(group.root, homeDir)}
+                  </div>
+                  {group.sessions.map((session) => (
+                    <ArchiveSessionRow
+                      key={session.id}
+                      session={session}
+                      isSelected={session.id === selectedSessionId}
+                      isUnread={unreadSessionIds.has(session.id)}
+                      onOpen={handleSelectSessionFromList}
+                      onUnarchived={unarchiveSession}
+                    />
+                  ))}
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : (
         <div
           ref={listScrollRef}
           onScroll={handleListScroll}
@@ -2276,6 +2379,7 @@ export function SessionSidebar({ selectedSessionId, highlightSessionId, followHi
           </div>
         )}
         </div>
+        )}
         </SessionSearch>
         {hiddenSessionCount > 0 && (
           /* Hidden-sessions toggle (wi pi#73, refines pi#65): relocated to the
@@ -2307,6 +2411,43 @@ export function SessionSidebar({ selectedSessionId, highlightSessionId, followHi
             />
             {t("sidebar.showHiddenSessions", { count: hiddenSessionCount })}
           </label>
+        )}
+        {archivedSessions.length > 0 && (
+          /* 「已归档 N」 entry (wi pi#103): the GLOBAL archive count — never
+             scoped to the selected project — so it is stable across project
+             switches. Entirely hidden at N=0 (the count includes the label,
+             aria-label and button). Activating it opens the replacement
+             archive view above. */
+          <button
+            type="button"
+            onClick={() => setArchiveViewOpen(true)}
+            title={t("sidebar.archivedSessions", { count: archivedSessions.length })}
+            aria-label={t("sidebar.archivedSessions", { count: archivedSessions.length })}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 5,
+              width: "100%",
+              padding: "4px 14px",
+              flexShrink: 0,
+              fontSize: 10,
+              color: "var(--text-dim)",
+              background: "none",
+              border: "none",
+              borderTop: "1px solid var(--border)",
+              cursor: "pointer",
+              textAlign: "left",
+              userSelect: "none",
+            }}
+          >
+            {/* An archive box, matching the row action's glyph family. */}
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+              <rect x="3" y="3" width="18" height="4" rx="1" />
+              <path d="M5 7v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7" />
+              <path d="M10 12h4" />
+            </svg>
+            {t("sidebar.archivedSessions", { count: archivedSessions.length })}
+          </button>
         )}
       </div>
 
@@ -2534,6 +2675,133 @@ function UnreadSessionIndicator() {
         </circle>
       </svg>
     </span>
+  );
+}
+
+/** Archive view row (wi pi#103): mirrors SessionItem's normal-view row
+ *  markup — same fixed height (SESSION_LIST_ITEM_HEIGHT), deep-link anchor
+ *  title, unread indicator, relative time — but offers ONLY view-only open
+ *  and unarchive. No delete, rename, open-in-new-tab or context-menu action:
+ *  the archive view is a curation surface, not a second session manager.
+ *  Clicking (or the anchor) opens the session through the normal open path
+ *  and never mutates the archive set. */
+function ArchiveSessionRow({
+  session,
+  isSelected,
+  isUnread,
+  onOpen,
+  onUnarchived,
+}: {
+  session: SessionInfo;
+  isSelected: boolean;
+  isUnread: boolean;
+  onOpen: (session: SessionInfo) => void;
+  onUnarchived: (id: string) => void;
+}) {
+  const { locale, t } = useI18n();
+  // Same title derivation as SessionItem: stored name, else the collapsed
+  // first message, else the id head.
+  const displayFirstMessage = session.firstMessageDisplay
+    ?? skillExpansionToCommand(session.firstMessage)
+    ?? session.firstMessage;
+  const title = session.name || displayFirstMessage.slice(0, 50) || session.id.slice(0, 12);
+  return (
+    <div
+      onClick={() => onOpen(session)}
+      style={{
+        height: SESSION_LIST_ITEM_HEIGHT,
+        display: "flex",
+        alignItems: "center",
+        paddingLeft: 14,
+        paddingRight: 8,
+        cursor: "pointer",
+        background: isSelected ? "var(--bg-selected)" : "transparent",
+        borderLeft: isSelected ? "2px solid var(--accent)" : "2px solid transparent",
+        transition: "background 0.1s",
+        gap: 6,
+        overflow: "hidden",
+      }}
+    >
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 5,
+            minWidth: 0,
+            fontSize: 12,
+            fontWeight: isSelected ? 500 : 400,
+            lineHeight: 1.4,
+            color: "var(--text)",
+          }}
+          title={title}
+        >
+          {/* A real link (middle-click / Ctrl-click still work) whose plain
+              activation opens the session VIEW-ONLY — the archive set is
+              never touched here. */}
+          <a
+            href={sessionDeepLink(session.id)}
+            style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0, color: "inherit", textDecoration: "none", cursor: "inherit" }}
+            onClick={(event) => {
+              event.stopPropagation();
+              if (!isPlainActivation(event)) return;
+              event.preventDefault();
+              onOpen(session);
+            }}
+          >
+            {title}
+          </a>
+        </div>
+        <div style={{ marginTop: 2, display: "flex", alignItems: "center", gap: 8, color: "var(--text-dim)", fontSize: 11, minWidth: 0 }}>
+          {/* Unread indication: passive unread does NOT unarchive — the dot
+              shows here so the archived session's new activity stays visible. */}
+          {isUnread ? (
+            <UnreadSessionIndicator />
+          ) : (
+            <span title={session.modified}>{formatRelativeTime(session.modified, locale)}</span>
+          )}
+          <span>
+            {session.detailsPending ? "…" : t("sidebar.messagesCount", { count: session.messageCount })}
+          </span>
+        </div>
+      </div>
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          onUnarchived(session.id);
+        }}
+        title={t("sidebar.unarchive")}
+        aria-label={t("sidebar.unarchive")}
+        style={{
+          display: "flex", alignItems: "center", justifyContent: "center",
+          width: 32, height: 32, padding: 0, flexShrink: 0,
+          background: "var(--bg-hover)", border: "1px solid var(--border)",
+          borderRadius: 7, color: "var(--text-muted)",
+          cursor: "pointer",
+          transition: "background 0.12s, color 0.12s, border-color 0.12s",
+        }}
+        onMouseEnter={(e) => {
+          e.currentTarget.style.background = "var(--bg-selected)";
+          e.currentTarget.style.color = "var(--accent)";
+          e.currentTarget.style.borderColor = "rgba(37,99,235,0.35)";
+        }}
+        onMouseLeave={(e) => {
+          e.currentTarget.style.background = "var(--bg-hover)";
+          e.currentTarget.style.color = "var(--text-muted)";
+          e.currentTarget.style.borderColor = "var(--border)";
+        }}
+      >
+        {/* Unarchive: the archive box with its lid open and an arrow leaving
+            it upward. Label is an e2e locator contract:
+            取消归档 / 取消封存 / Unarchive, exactly. */}
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M5 7v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7" />
+          <path d="M12 15V4" />
+          <path d="M8.5 7.5 12 4l3.5 3.5" />
+        </svg>
+      </button>
+    </div>
   );
 }
 
