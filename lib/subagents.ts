@@ -18,6 +18,8 @@ export const SUBAGENT_RESULT_TYPE = "pi-web:subagent-result";
 export const SUBAGENT_CONTROL_TOOL_NAMES = ["Agent", "get_subagent_result", "steer_subagent"] as const;
 
 export type SubagentStatus = SubagentSessionStatus;
+export type SubagentCodemode = "inherit" | "on" | "off";
+export type SubagentMcp = "on" | "off";
 export type SubagentScope = "builtin" | "global" | "workspace" | "project";
 export type SubagentWritableScope = Extract<SubagentScope, "global" | "project">;
 
@@ -32,6 +34,10 @@ export interface SubagentProfile {
   disallowedExtensionTools?: string[];
   loadSkills: boolean;
   loadExtensions: boolean;
+  /** Whether this profile enables Pi Web's codemode tool. Omitted profiles are disabled. */
+  codemode?: SubagentCodemode;
+  /** Whether its children connect the servers in `mcp.json`. Omitted profiles do not. */
+  mcp?: SubagentMcp;
   model?: string;
   thinking?: ThinkingLevel;
   maxTurns?: number;
@@ -67,6 +73,10 @@ export interface SubagentResourceSnapshot {
   tools: string[];
   loadSkills: boolean;
   loadExtensions: boolean;
+  codemode?: true;
+  mcp?: true;
+  /** Extensions load without `ext:` selectors: every tool they register is admitted (#883). */
+  allExtensionTools?: true;
   exactSystemPrompt?: string;
 }
 
@@ -75,6 +85,9 @@ export interface SubagentSessionResources {
   tools: string[];
   loadSkills: boolean;
   loadExtensions: boolean;
+  codemode?: true;
+  mcp?: true;
+  allExtensionTools?: true;
   exactSystemPrompt?: string;
 }
 
@@ -110,6 +123,9 @@ export interface SubagentRunInfo {
 
 const DEFAULT_TOOLS = ["read", "bash", "edit", "write", "grep", "find", "ls"];
 const BUILTIN_TOOLS = new Set(DEFAULT_TOOLS);
+// `powershell` is platform-added by resolveShellTools and therefore is absent from
+// profile parsing's portable allow-list, but valid historical snapshots may contain it.
+const SNAPSHOT_BUILTIN_TOOLS = new Set([...BUILTIN_TOOLS, "powershell"]);
 const SUBAGENT_CONTROL_TOOLS = new Set<string>(SUBAGENT_CONTROL_TOOL_NAMES);
 const THINKING_LEVELS = new Set<ThinkingLevel>(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 
@@ -126,6 +142,8 @@ const MANAGED_FRONTMATTER_KEYS = new Set([
   "tools",
   "load_skills",
   "load_extensions",
+  "codemode",
+  "mcp",
   "enabled",
   "inherit_context",
   "run_in_background",
@@ -147,6 +165,29 @@ const FRONTMATTER_OPEN_RE = /^(?:\uFEFF)?---[ \t]*(?:\r\n|\n|\r)/;
  */
 const OWNED_ALIAS_VALUES = new Set(["none", "all", "true", "false"]);
 
+function parseCodemode(value: unknown): SubagentCodemode {
+  if (value === "on" || value === true) return "on";
+  if (value === "inherit") return "inherit";
+  return "off";
+}
+
+function validateSavedCodemode(value: unknown): SubagentCodemode {
+  if (value === undefined || value === "inherit" || value === "on" || value === "off") {
+    return value === undefined ? "off" : value;
+  }
+  throw new Error("codemode must be one of: inherit, on, off");
+}
+
+function parseMcp(value: unknown): SubagentMcp {
+  return value === "on" || value === true ? "on" : "off";
+}
+
+/** Undefined when the request names none (an older client): the save then keeps the file's value. */
+function validateSavedMcp(value: unknown): SubagentMcp | undefined {
+  if (value === undefined || value === "on" || value === "off") return value;
+  throw new Error("mcp must be one of: on, off");
+}
+
 const BUILTIN_PROFILES: SubagentProfile[] = [
   {
     name: "general-purpose",
@@ -156,6 +197,8 @@ const BUILTIN_PROFILES: SubagentProfile[] = [
     tools: DEFAULT_TOOLS,
     loadSkills: false,
     loadExtensions: false,
+    codemode: "off",
+    mcp: "off",
     promptMode: "append",
     inheritContext: false,
     runInBackground: false,
@@ -170,6 +213,8 @@ const BUILTIN_PROFILES: SubagentProfile[] = [
     tools: [...PRESET_READ_ONLY],
     loadSkills: false,
     loadExtensions: false,
+    codemode: "off",
+    mcp: "off",
     promptMode: "append",
     inheritContext: false,
     runInBackground: false,
@@ -184,6 +229,8 @@ const BUILTIN_PROFILES: SubagentProfile[] = [
     tools: [...PRESET_READ_ONLY],
     loadSkills: false,
     loadExtensions: false,
+    codemode: "off",
+    mcp: "off",
     promptMode: "append",
     inheritContext: false,
     runInBackground: false,
@@ -286,6 +333,7 @@ function parseProfileFile(filePath: string, scope: SubagentScope): SubagentProfi
     const thinkingValue = stringValue(data?.thinking) as ThinkingLevel | undefined;
     const maxTurnsValue = typeof data?.max_turns === "number" ? Math.floor(data.max_turns) : undefined;
     const tools = parseTools(data?.tools, DEFAULT_TOOLS);
+    const codemode = parseCodemode(data?.codemode);
     const disallowedTools = new Set(parseTools(data?.disallowed_tools, []));
     // The deny list is also handed to the runtime, which resolves both sides against the
     // loaded extensions. This parse-time filter is only the cheap literal fast path: it
@@ -318,6 +366,8 @@ function parseProfileFile(filePath: string, scope: SubagentScope): SubagentProfi
       ...(disallowedExtensionTools.length > 0 ? { disallowedExtensionTools } : {}),
       loadSkills: resourceBoolean(data?.load_skills ?? data?.skills, false),
       loadExtensions: resourceBoolean(data?.load_extensions ?? data?.extensions, extensionTools.length > 0),
+      codemode,
+      mcp: parseMcp(data?.mcp),
       ...(stringValue(data?.model) ? { model: stringValue(data?.model) } : {}),
       ...(thinkingValue && THINKING_LEVELS.has(thinkingValue) ? { thinking: thinkingValue } : {}),
       ...(maxTurnsValue && maxTurnsValue > 0 ? { maxTurns: maxTurnsValue } : {}),
@@ -447,6 +497,8 @@ export function saveSubagentProfile(
   const model = profile.model?.trim() || undefined;
   const loadSkills = profile.loadSkills === true;
   const loadExtensions = profile.loadExtensions === true;
+  const codemode = validateSavedCodemode(profile.codemode);
+  const requestedMcp = validateSavedMcp(profile.mcp);
   const promptMode = profile.promptMode === "replace" ? "replace" : "append";
   const dir = assertWritableProfileDirectory(cwd, scope);
   mkdirSync(dir, { recursive: true });
@@ -455,12 +507,16 @@ export function saveSubagentProfile(
   }
   const filePath = join(dir, `${name}.md`);
   const stored = readStoredFrontmatter(filePath);
+  const mcp = requestedMcp ?? parseMcp(stored.mcp);
   const managed: Record<string, unknown> = {
     description,
     display_name: displayName,
     tools: composeToolsField([...tools, ...extensionTools], stored.tools),
     load_skills: loadSkills,
     load_extensions: loadExtensions,
+    codemode,
+    // Written once on, or once the file names it; profiles that never used MCP stay without the key.
+    ...(mcp === "on" || stored.mcp !== undefined ? { mcp } : {}),
     enabled: profile.enabled,
     inherit_context: profile.inheritContext,
     run_in_background: profile.runInBackground,
@@ -491,6 +547,8 @@ export function saveSubagentProfile(
     ...(extensionTools.length > 0 ? { extensionTools } : {}),
     loadSkills,
     loadExtensions,
+    codemode,
+    mcp,
     ...(model ? { model } : { model: undefined }),
     ...(maxTurns ? { maxTurns } : { maxTurns: undefined }),
     promptMode,
@@ -530,6 +588,15 @@ function subagentMetadataData(entries: readonly SessionEntry[]): ValidSubagentMe
   return data as ValidSubagentMetadataData;
 }
 
+export function hasSubagentResourceSnapshot(entries: readonly SessionEntry[]): boolean {
+  return entries.some((entry) =>
+    entry.type === "custom"
+    && entry.customType === SUBAGENT_META_TYPE
+    && isRecord(entry.data)
+    && "resourceSnapshot" in entry.data
+  );
+}
+
 /** Restore the isolated prompt and tool scope used by a persisted subagent session. */
 export function readSubagentSessionResources(
   entries: readonly SessionEntry[],
@@ -539,17 +606,21 @@ export function readSubagentSessionResources(
   const snapshot = data.resourceSnapshot;
   const loadSkills = isRecord(snapshot) && snapshot.loadSkills === true;
   const loadExtensions = isRecord(snapshot) && snapshot.loadExtensions === true;
+  const codemode = isRecord(snapshot) && snapshot.codemode === true;
+  const mcp = isRecord(snapshot) && snapshot.mcp === true;
   if (
     isRecord(snapshot)
     && snapshot.version === 1
     && Array.isArray(snapshot.appendSystemPrompt)
     && snapshot.appendSystemPrompt.every((item) => typeof item === "string")
+    && (!("codemode" in snapshot) || typeof snapshot.codemode === "boolean")
+    && (!("mcp" in snapshot) || typeof snapshot.mcp === "boolean")
     && Array.isArray(snapshot.tools)
     && snapshot.tools.every((item) =>
       typeof item === "string"
       && item.length > 0
       && !SUBAGENT_CONTROL_TOOLS.has(item)
-      && (BUILTIN_TOOLS.has(item) || loadExtensions)
+      && ((item === "codemode" && codemode) || SNAPSHOT_BUILTIN_TOOLS.has(item) || loadExtensions)
     )
   ) {
     return {
@@ -557,6 +628,9 @@ export function readSubagentSessionResources(
       tools: [...new Set(snapshot.tools)],
       loadSkills,
       loadExtensions,
+      ...(codemode ? { codemode: true as const } : {}),
+      ...(mcp ? { mcp: true as const } : {}),
+      ...(loadExtensions && snapshot.allExtensionTools === true ? { allExtensionTools: true as const } : {}),
       ...(typeof snapshot.exactSystemPrompt === "string" ? { exactSystemPrompt: snapshot.exactSystemPrompt } : {}),
     };
   }
@@ -571,6 +645,52 @@ export function withSubagentExtensionTools(
     ...profileTools,
     ...[...extensionToolNames].filter((name) => !SUBAGENT_CONTROL_TOOLS.has(name)),
   ])];
+}
+
+/** Every tool the SDK builds in (its `allToolNames`, which the package does not export). */
+export const SDK_BUILTIN_TOOLS: readonly string[] = ["read", "bash", "powershell", "edit", "write", "grep", "find", "ls"];
+/** MCP tools by the SDK's `isMcpToolName()`: `mcp__*` and its three resource tools. */
+const MCP_TOOL_PATTERNS = ["mcp__*", "list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource"];
+
+/**
+ * The SDK tool options of a child, shared by spawn and reopen. A `tools` allowlist is fixed when
+ * the session is created, so it admits only tools registered by then: one an extension registers
+ * at `session_start` or later would never be callable (#883). A child that loads extensions
+ * without `ext:` selectors therefore gets no allowlist: its built-ins are added to none
+ * (`noTools: "builtin"`) and the rest excluded, so no extension can switch them on. `ext:`
+ * selectors keep the allowlist, since the SDK admits tools by name, not by source.
+ */
+export function subagentToolOptions(resources: { tools: readonly string[]; allExtensionTools?: boolean; mcp?: boolean }) {
+  const excludeTools: string[] = [...SUBAGENT_CONTROL_TOOL_NAMES];
+  if (!resources.allExtensionTools && resources.mcp) {
+    // MCP tools register as their servers connect, long after the allowlist is fixed, so it
+    // admits them by name; `createSubagentMcpPolicyExtension()` keeps out those of extensions the
+    // profile did not select. Without Code mode, `codemode` servers register as `deferred`,
+    // which only `tool_search` declares to the model.
+    const discovery = resources.tools.includes("codemode") ? [] : ["tool_search"];
+    return { tools: [...new Set([...resources.tools, ...discovery, ...MCP_TOOL_PATTERNS])], excludeTools };
+  }
+  if (!resources.allExtensionTools) {
+    // An allowlist that names no MCP tool keeps every MCP tool registered for codemode scripts
+    // and tool_search, as pi's `--tools` does, so a script could reach one an extension the
+    // profile did not select registers. A child's allowlist is its whole scope: exclude them.
+    const namesMcp = resources.tools.some((name) => name.startsWith("mcp__"));
+    return {
+      tools: [...resources.tools],
+      excludeTools: namesMcp
+        ? excludeTools
+        : [...excludeTools, ...MCP_TOOL_PATTERNS.filter((name) => !resources.tools.includes(name))],
+    };
+  }
+  const builtins = resources.tools.filter((name) => SDK_BUILTIN_TOOLS.includes(name));
+  // Code mode registers inactive (`defaultActive: false`), so a child that has it names it too.
+  const added = resources.tools.includes("codemode") ? [...builtins, "codemode"] : builtins;
+  return {
+    noTools: "builtin" as const,
+    // Only `+name` entries: they add to the default selection instead of forming an allowlist.
+    ...(added.length > 0 ? { tools: added.map((name) => `+${name}`) } : {}),
+    excludeTools: [...excludeTools, ...SDK_BUILTIN_TOOLS.filter((name) => !builtins.includes(name))],
+  };
 }
 
 interface SubagentExtensionLike {
@@ -719,6 +839,26 @@ export function selectSubagentExtensionTools(
     }));
   }
   return [...new Set(selected)];
+}
+
+/**
+ * The built-ins a child with `mcp: on` loads, by the paths the pi CLI's `-e builtin:<name>`
+ * takes: listed there, they load under `noExtensions` too, with the `builtin:mcp` path the MCP
+ * host and the read-only policy recognise. Their factories come from
+ * `createSubagentMcpExtensions()`.
+ */
+export const SUBAGENT_MCP_EXTENSION_PATHS: readonly string[] = ["builtin:tool-search", "builtin:mcp"];
+
+/**
+ * The extension half of a child's resource loader options, shared by spawn and reopen.
+ * Fork note: the `extensions:` list scoping (`scopeSubagentExtensions`) is an upstream feature
+ * this batch does not carry, so the override branch is omitted.
+ */
+export function subagentExtensionLoaderOptions(resources: { loadExtensions: boolean; mcp?: boolean }) {
+  return {
+    noExtensions: !resources.loadExtensions,
+    ...(resources.mcp ? { additionalExtensionPaths: [...SUBAGENT_MCP_EXTENSION_PATHS] } : {}),
+  };
 }
 
 export function readSubagentRun(entries: readonly SessionEntry[], sessionId: string, sessionPath: string): SubagentRunInfo | null {

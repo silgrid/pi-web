@@ -14,6 +14,7 @@ import { checkExtensionDialogSizing, checkExtensionDialogs, extensionSource } fr
 import { checkChatAppearance } from "./chat-appearance.mjs";
 import { checkCodeBackground } from "./code-background.mjs";
 import { checkSplitPane } from "./split-pane-pass.mjs";
+import { checkModelDiscovery } from "./model-discovery.mjs";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const mode = process.env.E2E_SERVER_MODE || "dev";
@@ -561,6 +562,10 @@ try {
         compactedTitle: "E2E prompt outside the compacted page",
         longTailText: text(4999),
       });
+      await page.setViewportSize(viewport);
+      const showSidebar = page.getByRole("button", { name: "Show sidebar", exact: true });
+      if (await showSidebar.isVisible()) await showSidebar.click();
+      await checkModelDiscovery(page);
     }
     await page.goto(`${base}/?session=${CODE_BACKGROUND}`, { waitUntil: "domcontentloaded" });
     await page.locator(".markdown-code-block pre").waitFor();

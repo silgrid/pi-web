@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useId, useRef } from "react";
 import { useI18n } from "@/hooks/useI18n";
 import type { ModelCatalogPreset, ModelCatalogRecommendation } from "@/lib/model-catalog";
 import type { DiscoveredModel } from "@/lib/model-discovery";
@@ -45,6 +45,7 @@ import {
 import {
   EnabledModelsBanner,
   EnabledModelsProviderSwitch,
+  EnabledModelsProviderSwitchNote,
   EnabledModelsSection,
   useEnabledModels,
   type EnabledModelsController,
@@ -317,12 +318,8 @@ function ProviderDetail({ name, editingName, provider, onChange, onEditingNameCh
   const [selectedModelIds, setSelectedModelIds] = useState<string[]>([]);
   const discoveryRequestIdRef = useRef(0);
   const selectShownRef = useRef<HTMLInputElement>(null);
+  const switchNoteId = useId();
   const set = <K extends keyof ProviderEntry>(k: K, v: ProviderEntry[K]) => onChange({ ...provider, [k]: v });
-
-  useEffect(() => {
-    if (!provider.api) onChange({ ...provider, api: "openai-completions" });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [provider.api]);
 
   useEffect(() => {
     discoveryRequestIdRef.current += 1;
@@ -399,15 +396,18 @@ function ProviderDetail({ name, editingName, provider, onChange, onEditingNameCh
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-      <ConfigDetailHeader>
-        <ConfigDetailHeaderInfo>
-          <SectionTitle>{t("i18n.provider")}</SectionTitle>
-        </ConfigDetailHeaderInfo>
-        <ConfigDetailActions>
-          <EnabledModelsProviderSwitch providerId={name} controller={enabledModels} />
-          <ConfigButton variant="danger" size="small" onClick={onDelete}>{t("i18n.delete")}</ConfigButton>
-        </ConfigDetailActions>
-      </ConfigDetailHeader>
+      <div className="config-detail-heading">
+        <ConfigDetailHeader>
+          <ConfigDetailHeaderInfo>
+            <SectionTitle>{t("i18n.provider")}</SectionTitle>
+          </ConfigDetailHeaderInfo>
+          <ConfigDetailActions>
+            <EnabledModelsProviderSwitch providerId={name} controller={enabledModels} noteId={switchNoteId} />
+            <ConfigButton variant="danger" size="small" onClick={onDelete}>{t("i18n.delete")}</ConfigButton>
+          </ConfigDetailActions>
+        </ConfigDetailHeader>
+        <EnabledModelsProviderSwitchNote providerId={name} controller={enabledModels} id={switchNoteId} />
+      </div>
 
        <Field label={t("i18n.providerName")}>
         <TextInput value={editingName} onChange={onEditingNameChange} placeholder="provider-name" mono />
@@ -436,7 +436,7 @@ function ProviderDetail({ name, editingName, provider, onChange, onEditingNameCh
       </Field>
 
       <Field label="API">
-        <Select value={provider.api ?? "openai-completions"} onChange={(v) => set("api", v)} options={API_OPTIONS} required />
+        <Select value={provider.api ?? ""} onChange={(v) => set("api", v || undefined)} options={API_OPTIONS} />
       </Field>
 
       <Field label="Headers">
