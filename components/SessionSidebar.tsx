@@ -2163,7 +2163,7 @@ export function SessionSidebar({ selectedSessionId, highlightSessionId, followHi
           overflow: "hidden",
         }}
       >
-        <SessionSearch open={sessionSearchOpen} query={sessionSearchQuery} selectedSessionId={selectedSessionId} onSelectSession={handleSelectSessionFromList}>
+        <SessionSearch open={sessionSearchOpen} query={sessionSearchQuery} selectedSessionId={selectedSessionId} archivedSessionIds={archivedSessionIds} onSelectSession={handleSelectSessionFromList}>
         {archiveViewOpen ? (
           /* Archive view (wi pi#103): temporarily REPLACES the sessions pane
              list region — the normal rows stop rendering while the view is
