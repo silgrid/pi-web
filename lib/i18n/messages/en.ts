@@ -437,6 +437,7 @@ export const enLocale: LocalePlugin = {
     "sidebar.newSessionActivity": "New session activity",
     "sidebar.deleteSession": "Delete {title}?",
     "sidebar.rename": "Rename",
+    "sidebar.archive": "Archive",
     "sidebar.openInNewTab": "Open in new tab",
     "sidebar.delete": "Delete",
     "sidebar.deleteWithShiftClick": "Delete (Shift+click to delete without confirmation)",

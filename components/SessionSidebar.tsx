@@ -1899,6 +1899,7 @@ export function SessionSidebar({ selectedSessionId, highlightSessionId, followHi
           onSessionDeleted?.(id);
           loadSessions();
         }}
+        onArchived={archiveSession}
       />
     );
   };
@@ -2576,6 +2577,7 @@ function SessionItem({
   onFocus,
   onRenamed,
   onDeleted,
+  onArchived,
   depth = 0,
   hasChildren = false,
   collapsed = false,
@@ -2595,6 +2597,9 @@ function SessionItem({
   onFocus?: () => void;
   onRenamed?: () => void;
   onDeleted?: (id: string) => void;
+  /** Archive action (wi pi#103): mutates only the client-side archive
+   *  set — never tabs, selection, or the delete path. */
+  onArchived?: (id: string) => void;
   depth?: number;
   hasChildren?: boolean;
   collapsed?: boolean;
@@ -3013,6 +3018,49 @@ function SessionItem({
                   <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
                 </svg>
               </button>
+              {/* Archive (wi pi#103): hidden for RUNNING sessions — running
+                  activity must force-unarchive (see the sidebar effect), so
+                  offering the action on a running row would be undone
+                  immediately. Local set mutation only: the click stops
+                  propagation (no row selection, no tab change — archiving an
+                  open session keeps its chat tab) and adds the id to the
+                  client-side archive set. The label is an e2e locator
+                  contract: 归档 / 封存 / Archive, exactly. */}
+              {!isRunning && (
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onArchived?.(session.id);
+                  }}
+                  title={t("sidebar.archive")}
+                  aria-label={t("sidebar.archive")}
+                  style={{
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                    width: 32, height: 32, padding: 0,
+                    background: "var(--bg-hover)", border: "1px solid var(--border)",
+                    borderRadius: 7, color: "var(--text-muted)",
+                    cursor: "pointer", flexShrink: 0,
+                    transition: "background 0.12s, color 0.12s, border-color 0.12s",
+                  }}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.background = "var(--bg-selected)";
+                    e.currentTarget.style.color = "var(--accent)";
+                    e.currentTarget.style.borderColor = "rgba(37,99,235,0.35)";
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.background = "var(--bg-hover)";
+                    e.currentTarget.style.color = "var(--text-muted)";
+                    e.currentTarget.style.borderColor = "var(--border)";
+                  }}
+                >
+                  {/* An archive box: a tray over a body with a slot. */}
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <rect x="3" y="3" width="18" height="4" rx="1" />
+                    <path d="M5 7v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7" />
+                    <path d="M10 12h4" />
+                  </svg>
+                </button>
+              )}
             </div>
           )}
         </>
