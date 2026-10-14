@@ -28,6 +28,10 @@ import {
 import { ModelsConfig } from "./ModelsConfig";
 import { setupPushSubscription } from "@/lib/push-client";
 import {
+  setFilesPlacement,
+  useFilesPlacement,
+} from "@/lib/files-placement";
+import {
   DEFAULT_SESSION_FILTER_PATTERNS,
   loadSessionFilterPatterns,
   loadShowFilteredSessions,
@@ -80,6 +84,7 @@ function GeneralSettings({ sessionId, onSessionReloaded, quoteSelectionEnabled, 
   const { preference, setThemePreference } = useTheme();
   const { width: chatContentWidth, setWidth: setChatContentWidth, fontSize, setFontSize } = useChatAppearance();
   const enterSendMode = useEnterSendMode();
+  const filesPlacement = useFilesPlacement();
   const [shellSettings, setShellSettings] = useState<ToolSettingsResponse | null>(null);
   const [shellSaving, setShellSaving] = useState(false);
   const [shellError, setShellError] = useState<string | null>(null);
@@ -391,6 +396,44 @@ function GeneralSettings({ sessionId, onSessionReloaded, quoteSelectionEnabled, 
           />
         </div>
         <p className="settings-general-description">{t("settings.sessionAgeDaysDescription")}</p>
+      </section>
+
+      <section className="settings-general-section">
+        <h3 className="settings-general-heading">{t("settings.sidebarLayout")}</h3>
+        <p className="settings-general-description">{t("settings.sidebarLayoutDescription")}</p>
+        {/* Files placement (wi B3): a two-option radio row in General (the
+            WI's stated location — no sidebar shortcut). The live store
+            setter persists AND broadcasts, so the sidebar swaps its layout
+            immediately; the hook value re-renders this row in sync. Stacked
+            is the default and today's behavior; this commit only stores and
+            reads the value (the sidebar layout change lands separately). */}
+        <div className="settings-chat-option settings-chat-switch-option" role="radiogroup" aria-label={t("settings.sidebarLayout")}>
+          <span>{t("settings.sidebarLayout")}</span>
+          <div className="settings-send-mode-options">
+            <label className="settings-send-mode-option">
+              <input
+                type="radio"
+                name="files-placement"
+                value="stacked"
+                checked={filesPlacement === "stacked"}
+                onChange={() => setFilesPlacement("stacked")}
+                className="sr-only"
+              />
+              <span className="settings-send-mode-label">{t("settings.filesPlacementStacked")}</span>
+            </label>
+            <label className="settings-send-mode-option">
+              <input
+                type="radio"
+                name="files-placement"
+                value="tabs"
+                checked={filesPlacement === "tabs"}
+                onChange={() => setFilesPlacement("tabs")}
+                className="sr-only"
+              />
+              <span className="settings-send-mode-label">{t("settings.filesPlacementTabs")}</span>
+            </label>
+          </div>
+        </div>
       </section>
 
       {shellSettings?.isWindows && (

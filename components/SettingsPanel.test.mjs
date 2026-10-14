@@ -220,3 +220,63 @@ test("the session filter strings exist in all three locales", async () => {
     }
   }
 });
+
+// ---------------------------------------------------------------------------
+// Files placement (wi B3): the sidebar-layout preference lives in General
+// settings as a two-option radio row backed by the live store (no sidebar
+// shortcut, per the work item).
+// ---------------------------------------------------------------------------
+
+test("the general area hosts the files-placement radio row backed by the live store", () => {
+  assert.match(
+    panelSource,
+    /import \{\s*setFilesPlacement,\s*useFilesPlacement,\s*\} from "@\/lib\/files-placement";/,
+  );
+  assert.match(panelSource, /const filesPlacement = useFilesPlacement\(\);/);
+  const section = panelSource.slice(
+    panelSource.indexOf('{t("settings.sidebarLayout")}'),
+    panelSource.indexOf("{shellSettings?.isWindows && ("),
+  );
+  // The section renders in GeneralSettings (after the session filter),
+  // with heading + description + a two-option radiogroup.
+  assert.ok(section.includes('t("settings.sidebarLayoutDescription")'));
+  assert.match(section, /role="radiogroup" aria-label=\{t\("settings\.sidebarLayout"\)\}/);
+  assert.equal((section.match(/name="files-placement"/g) ?? []).length, 2);
+  assert.match(section, /value="stacked"/);
+  assert.match(section, /value="tabs"/);
+  assert.match(section, /checked=\{filesPlacement === "stacked"\}/);
+  assert.match(section, /checked=\{filesPlacement === "tabs"\}/);
+  // Every change routes through the LIVE store setter, which persists and
+  // broadcasts, so the sidebar reacts without prop drilling; the hook value
+  // re-renders this row in sync.
+  assert.match(section, /onChange=\{\(\) => setFilesPlacement\("stacked"\)\}/);
+  assert.match(section, /onChange=\{\(\) => setFilesPlacement\("tabs"\)\}/);
+  // No dedicated CSS or new navigation entry: the row reuses the existing
+  // send-mode radio classes inside a General section.
+  assert.match(panelSource, /className="settings-general-heading">\{t\("settings\.sidebarLayout"\)\}/);
+  assert.match(section, /className="settings-send-mode-options"/);
+  const generalBody = panelSource.slice(
+    panelSource.indexOf("function GeneralSettings"),
+    panelSource.indexOf("export function SettingsPanel"),
+  );
+  assert.match(generalBody, /settings\.sidebarLayout/);
+});
+
+test("the files-placement strings exist in all three locales", async () => {
+  for (const locale of ["en", "zh-CN", "zh-TW"]) {
+    const source = await readFile(new URL(`../lib/i18n/messages/${locale}.ts`, import.meta.url), "utf8");
+    for (const key of [
+      "settings.sidebarLayout",
+      "settings.sidebarLayoutDescription",
+      "settings.filesPlacementStacked",
+      "settings.filesPlacementTabs",
+      // The sidebar tab labels land with the layout change; the keys ship
+      // with the preference so the message files move once.
+      "sidebar.tabsLabel",
+      "sidebar.tabSessions",
+      "sidebar.tabFiles",
+    ]) {
+      assert.match(source, new RegExp(`"${key}": "`), `${locale} must carry ${key}`);
+    }
+  }
+});
