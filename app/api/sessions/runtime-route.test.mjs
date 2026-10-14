@@ -178,6 +178,7 @@ test("deleting an unpersisted session shuts down its runtime and invalidates cac
     let shutdownCalled = false;
     globalThis.__piSessions.set(id, {
       isRunning: () => false,
+      isAwaitingInput: () => false,
       shutdown: async () => {
         shutdownCalled = true;
         if (persistOnShutdown) await writeFile(filePath, JSON.stringify(manager.getHeader()));
@@ -199,6 +200,37 @@ test("deleting an unpersisted session shuts down its runtime and invalidates cac
     assert.ok((await (await getRunningSessions()).json()).sessionListVersion > before);
     await assert.rejects(readFile(filePath), { code: "ENOENT" });
   }
+});
+
+test("the list and running poll both carry the awaiting-input session ids from the live registry", async (t) => {
+  const previousRegistry = globalThis.__piSessions;
+  globalThis.__piSessions = new Map([
+    ["awaiting-live", {
+      isRunning: () => true,
+      isAwaitingInput: () => true,
+      hasSuppressedCompletionNotifications: () => false,
+      sessionId: "awaiting-live",
+      destroy() {},
+    }],
+    ["running-live", {
+      isRunning: () => true,
+      isAwaitingInput: () => false,
+      hasSuppressedCompletionNotifications: () => false,
+      sessionId: "running-live",
+      destroy() {},
+    }],
+  ]);
+  t.after(() => {
+    globalThis.__piSessions = previousRegistry;
+  });
+
+  const poll = await (await getRunningSessions()).json();
+  assert.deepEqual(poll.runningSessionIds, ["awaiting-live", "running-live"]);
+  assert.deepEqual(poll.awaitingSessionIds, ["awaiting-live"], "the 2500 ms poll carries awaiting ids next to running ids");
+
+  const list = await (await getSessionList(new Request("http://localhost/api/sessions"))).json();
+  assert.deepEqual(list.runningSessionIds, ["awaiting-live", "running-live"]);
+  assert.deepEqual(list.awaitingSessionIds, ["awaiting-live"], "the sessions snapshot carries awaiting ids next to running ids");
 });
 
 test("session listing supports cheap summaries and honors force refresh", () => {

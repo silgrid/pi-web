@@ -47,5 +47,7 @@ test("MultiRootFileExplorer forwards the same value into each mounted FileExplor
 
 test("FileExplorer no longer needs a click callback to learn the active file", () => {
   assert.doesNotMatch(explorerSource, /onActivateFile/);
-  assert.match(explorerSource, /activeFilePath\?: string \| null;\n\}/);
+  // Props may gain later additive members (e.g. the showIgnoredFiles opt-in,
+  // wi pi#101); activeFilePath just has to be a declared prop.
+  assert.match(explorerSource, /activeFilePath\?: string \| null;/);
 });
