@@ -27,6 +27,9 @@ interface FileEntry {
   isDir: boolean;
   size: number;
   modified: string;
+  /** Surfaces only under the listing's `showIgnored` opt-in: git ignores
+   *  this entry, so the row renders dimmed with the reason in its tooltip. */
+  ignored?: boolean;
   /** Where a directory link leads when that is outside the browsable roots. */
   outsideLinkTarget?: string;
   /** That target contains the project or the home folder. */
@@ -40,6 +43,7 @@ interface FileNode {
   size: number;
   children?: FileNode[];
   loaded?: boolean;
+  ignored?: boolean;
   outsideLinkTarget?: string;
   outsideLinkEncloses?: boolean;
 }
@@ -61,6 +65,11 @@ interface Props {
    *  of its own nodes matches; a path belonging to another root highlights
    *  nothing here. */
   activeFilePath?: string | null;
+  /** The explorer-level "show git-ignored files" opt-in (wi pi#101): driven
+   *  by the single toolbar toggle in MultiRootFileExplorer. Component state
+   *  only — never persisted; each root's listing runs git against its own
+   *  cwd, which is the multi-root semantics. */
+  showIgnoredFiles?: boolean;
 }
 
 export interface FileExplorerHandle {
@@ -94,13 +103,17 @@ async function responseError(res: Response, fallback: string): Promise<Error> {
 
 async function fetchEntries(
   dirPath: string,
-  opts?: { showBuildOutputs?: boolean },
+  opts?: { showBuildOutputs?: boolean; showIgnored?: boolean },
 ): Promise<FileNode[]> {
   const encoded = encodeFilePathForApi(dirPath);
   // showBuildOutputs is the per-workspace opt-in that surfaces build/dist
   // directories in the tree listing (see lib/build-outputs-preference.ts).
-  const query = opts?.showBuildOutputs ? "?type=list&showBuildOutputs=1" : "?type=list";
-  const res = await fetch(`/api/files/${encoded}${query}`);
+  // showIgnored is the explorer's opt-in that surfaces git-ignored entries,
+  // each marked `ignored` by the server so the row can render dimmed.
+  const query = new URLSearchParams({ type: "list" });
+  if (opts?.showBuildOutputs) query.set("showBuildOutputs", "1");
+  if (opts?.showIgnored) query.set("showIgnored", "1");
+  const res = await fetch(`/api/files/${encoded}?${query.toString()}`);
   if (!res.ok) throw await responseError(res, "Failed to load files");
   const data = await res.json() as { entries?: FileEntry[] };
   return (data.entries ?? []).map((e) => ({
@@ -112,6 +125,7 @@ async function fetchEntries(
     loaded: !e.isDir,
     outsideLinkTarget: e.outsideLinkTarget,
     outsideLinkEncloses: e.outsideLinkEncloses,
+    ignored: e.ignored,
   }));
 }
 
@@ -242,6 +256,7 @@ export function TreeNode({
   gitStatusByPath,
   changedDirectoryPaths,
   activeFilePath,
+  showIgnoredFiles,
   t,
 }: {
   node: FileNode;
@@ -261,6 +276,11 @@ export function TreeNode({
    *  normalizeFilePathSlashes, same as the git-status lookup below, since
    *  git emits POSIX separators even on Windows. */
   activeFilePath?: string | null;
+  /** The explorer's "show git-ignored files" opt-in, threaded down so every
+   *  lazily-loaded child listing asks for ignored entries the same way the
+   *  root listing did. Ignored rows are marked by the server (`node.ignored`)
+   *  and render dimmed with the reason in their tooltip. */
+  showIgnoredFiles?: boolean;
   t: Translate;
 }) {
   const open = expandedPaths.has(node.fullPath);
@@ -303,6 +323,7 @@ export function TreeNode({
       // without threading a prop through every TreeNode.
       const entries = await fetchEntries(node.fullPath, {
         showBuildOutputs: getShowBuildOutputs(),
+        showIgnored: showIgnoredFiles,
       });
       setChildren(entries);
       setLoaded(true);
@@ -311,7 +332,7 @@ export function TreeNode({
     } finally {
       setLoading(false);
     }
-  }, [loaded, node.fullPath]);
+  }, [loaded, node.fullPath, showIgnoredFiles]);
 
   // Re-fetch children when the tree refreshes and the directory is open.
   useEffect(() => {
@@ -383,6 +404,10 @@ export function TreeNode({
           boxShadow: active ? "inset 2px 0 0 var(--accent)" : "none",
           borderRadius: 4,
           userSelect: "none",
+          // A git-ignored entry (surfaced only under the showIgnored opt-in)
+          // renders dimmed — fork's visual language for surfaced-but-muted
+          // rows, same opacity the build-output precedent uses elsewhere.
+          opacity: node.ignored ? 0.55 : 1,
         }}
       >
         <IndentGuides depth={depth} />
@@ -408,7 +433,7 @@ export function TreeNode({
             whiteSpace: "nowrap",
             flex: 1,
           }}
-          title={node.fullPath}
+          title={node.ignored ? `${node.fullPath} (${t("files.ignoredByGit")})` : node.fullPath}
         >
           {node.name}
         </span>
@@ -584,6 +609,7 @@ export function TreeNode({
               gitStatusByPath={gitStatusByPath}
               changedDirectoryPaths={changedDirectoryPaths}
               activeFilePath={activeFilePath}
+              showIgnoredFiles={showIgnoredFiles}
               t={t}
             />
           ))}
@@ -740,6 +766,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
   fileSearchOpen = false,
   onFileSearchOpenChange,
   activeFilePath = null,
+  showIgnoredFiles = false,
 }, ref) {
   const { t } = useI18n();
   const [roots, setRoots] = useState<FileNode[]>([]);
@@ -998,12 +1025,22 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
     setLoading(cwdChanged);
     setError(null);
     let cancelled = false;
-    fetchEntries(cwd, { showBuildOutputs })
+    fetchEntries(cwd, { showBuildOutputs, showIgnored: showIgnoredFiles })
       .then((entries) => { if (!cancelled) setRoots(entries); })
       .catch((e) => { if (!cancelled) setError(e instanceof Error ? e.message : String(e)); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [cwd, refreshKey, treeRefreshKey, showBuildOutputs]);
+  }, [cwd, refreshKey, treeRefreshKey, showBuildOutputs, showIgnoredFiles]);
+
+  // The parent's toggle re-fetches expanded nodes in place (same pattern the
+  // build-outputs broadcast uses): the root effect re-runs via the dependency
+  // above, every expanded TreeNode re-fetches via the shared refresh token.
+  const prevShowIgnoredFilesRef = useRef(showIgnoredFiles);
+  useEffect(() => {
+    if (prevShowIgnoredFilesRef.current === showIgnoredFiles) return;
+    prevShowIgnoredFilesRef.current = showIgnoredFiles;
+    setTreeRefreshKey((key) => key + 1);
+  }, [showIgnoredFiles]);
 
   // Files changed outside pi-web (an editor, a terminal) show up once the
   // window is back in front (#1144).
@@ -1288,6 +1325,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
                 gitStatusByPath={gitStatusByPath}
                 changedDirectoryPaths={changedDirectoryPaths}
                 activeFilePath={activeFilePath}
+                showIgnoredFiles={showIgnoredFiles}
                 t={t}
               />
             ))

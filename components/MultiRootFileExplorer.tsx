@@ -114,6 +114,16 @@ export const MultiRootFileExplorer = forwardRef<MultiRootFileExplorerHandle, Pro
       // what the explorers actually got (review B1, pi#50).
       setShowBuildOutputsState(getShowBuildOutputs());
     }, [showBuildOutputs]);
+    // Single global "show git-ignored files" toggle, same bottom-toolbar slot
+    // as build outputs (wi pi#101). Component state only — deliberately NOT
+    // persisted: the ignored set is computed per listing, and each mounted
+    // section's fetch runs git against its own root, which is the multi-root
+    // semantics. Every FileExplorer re-fetches in place when this flips
+    // (each one bumps its treeRefreshKey when the prop changes).
+    const [showIgnoredFiles, setShowIgnoredFiles] = useState(false);
+    const handleToggleShowIgnoredFiles = useCallback(() => {
+      setShowIgnoredFiles((prev) => !prev);
+    }, []);
     // Sections default to COLLAPSED. The persisted expansion state restores
     // after mount so the server prerender and the first client render agree
     // (same hydration pattern as the pinned-group expansion state).
@@ -343,6 +353,7 @@ export const MultiRootFileExplorer = forwardRef<MultiRootFileExplorerHandle, Pro
                   onChangesCountChange={handleSectionChanges(root.key)}
                   fileSearchOpen={fileSearchOpen && targetRoot?.key === root.key}
                   onFileSearchOpenChange={onFileSearchOpenChange}
+                  showIgnoredFiles={showIgnoredFiles}
                 />
               )}
             </div>
@@ -373,6 +384,31 @@ export const MultiRootFileExplorer = forwardRef<MultiRootFileExplorerHandle, Pro
             style={{ margin: 0 }}
           />
           {t("files.showBuildOutputs")}
+        </label>
+        {/* The ignored toggle sits beside the build-outputs toggle in the same
+            bottom toolbar slot: one global switch for every mounted root. */}
+        <label
+          title={t("sidebar.showIgnoredFilesHint")}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 5,
+            width: "100%",
+            padding: "4px 10px",
+            fontSize: 10,
+            color: "var(--text-dim)",
+            cursor: "pointer",
+            userSelect: "none",
+          }}
+        >
+          <input
+            type="checkbox"
+            checked={showIgnoredFiles}
+            onChange={handleToggleShowIgnoredFiles}
+            aria-label={t("sidebar.showIgnoredFiles")}
+            style={{ margin: 0 }}
+          />
+          {t("sidebar.showIgnoredFiles")}
         </label>
       </div>
     );

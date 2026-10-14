@@ -20,7 +20,7 @@ import {
   getVideoMime,
 } from "@/lib/file-types";
 import { resolveDirentIsDirectory } from "@/lib/file-dirent";
-import { getFileTreeVisibility } from "@/lib/file-tree-visibility";
+import { getFileTreeVisibility, readIgnoredNames } from "@/lib/file-tree-visibility";
 import { isFilePathReferencedBySession } from "@/lib/session-file-references";
 import { hasJsonContentType, isApiRequestAllowed } from "@/lib/request-security";
 import {
@@ -856,18 +856,36 @@ export async function GET(
     // Read only here: the parameter never affects any other request type.
     const rawShowBuildOutputs = request.nextUrl.searchParams.get("showBuildOutputs");
     const showBuildOutputs = rawShowBuildOutputs === "1" || rawShowBuildOutputs === "true";
+    // Opt-in surfacing of git-ignored entries (same read-only contract): the
+    // ignored entries are included and marked additively (`ignored: true`) so
+    // the client can dim them. Nothing about the default listing changes.
+    const rawShowIgnored = request.nextUrl.searchParams.get("showIgnored");
+    const showIgnored = rawShowIgnored === "1" || rawShowIgnored === "true";
 
     // Avoid per-entry stat calls for normal files and directories. Symlinks and
     // filesystems without directory type information use the stat fallback.
     const dirents = fs.readdirSync(filePath, { withFileTypes: true });
     const isVisible = await getFileTreeVisibility(filePath, dirents.map((d) => d.name));
+    // Computed only under the opt-in: the extra git call is never paid by a
+    // default listing. An empty set wherever git has no view (outside a work
+    // tree, git failure) — nothing extra surfaces there.
+    const ignoredNames = showIgnored
+      ? await readIgnoredNames(filePath, dirents.map((d) => d.name))
+      : new Set<string>();
     const entries = dirents
-      .filter((d) => isVisible(d.name) || (BUILD_OUTPUT_NAMES.has(d.name) && showBuildOutputs))
+      .filter((d) =>
+        isVisible(d.name)
+        || (BUILD_OUTPUT_NAMES.has(d.name) && showBuildOutputs)
+        || (showIgnored && ignoredNames.has(d.name)),
+      )
       .flatMap((d) => {
         const isDir = resolveDirentIsDirectory(d, path.join(filePath, d.name));
-        return isDir === null
-          ? []
-          : [{ name: d.name, isDir, size: 0, modified: "" }];
+        if (isDir === null) return [];
+        const entry = { name: d.name, isDir, size: 0, modified: "" };
+        // Additive marker, present only on ignored entries under the opt-in,
+        // so the default entry shape is byte-identical to before.
+        if (showIgnored && ignoredNames.has(d.name)) return [{ ...entry, ignored: true }];
+        return [entry];
       })
       .sort((a, b) => {
         // Dirs first, then files, both alphabetically

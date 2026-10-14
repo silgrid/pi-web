@@ -32,18 +32,19 @@ function memoryStorage() {
 test("fetchEntries appends showBuildOutputs only when the preference is on", () => {
   assert.match(
     source,
-    /async function fetchEntries\(\s*dirPath: string,\s*opts\?: \{ showBuildOutputs\?: boolean \},\s*\): Promise<FileNode\[\]> \{/,
+    /async function fetchEntries\(\s*dirPath: string,\s*opts\?: \{ showBuildOutputs\?: boolean; showIgnored\?: boolean \},\s*\): Promise<FileNode\[\]> \{/,
   );
   // On: the opt-in query parameter rides along; off: the URL is unchanged.
-  assert.match(source, /opts\?\.showBuildOutputs \? "\?type=list&showBuildOutputs=1" : "\?type=list"/);
+  assert.match(source, /if \(opts\?\.showBuildOutputs\) query\.set\("showBuildOutputs", "1"\);/);
+  assert.doesNotMatch(source, /query\.set\("showBuildOutputs", "0"\)/);
   // Both type=list call sites thread the global preference through:
   // the root-load effect...
-  assert.match(source, /fetchEntries\(cwd, \{ showBuildOutputs \}\)/);
+  assert.match(source, /fetchEntries\(cwd, \{ showBuildOutputs, showIgnored: showIgnoredFiles \}\)/);
   // ...and lazy child expansion (TreeNode reads the live global preference
   // at fetch time).
   assert.match(
     source,
-    /fetchEntries\(node\.fullPath, \{\s*showBuildOutputs: getShowBuildOutputs\(\),\s*\}\)/,
+    /fetchEntries\(node\.fullPath, \{\s*showBuildOutputs: getShowBuildOutputs\(\),\s*showIgnored: showIgnoredFiles,\s*\}\)/,
   );
 });
 
@@ -66,8 +67,8 @@ test("FileExplorer hydrates the global preference and refreshes on every broadca
   // The root-load effect depends on the toggle state and the refresh token.
   const rootEffectBlock = sliceBetween(
     source,
-    "fetchEntries(cwd, { showBuildOutputs })",
-    "[cwd, refreshKey, treeRefreshKey, showBuildOutputs]);",
+    "fetchEntries(cwd, { showBuildOutputs, showIgnored: showIgnoredFiles })",
+    "[cwd, refreshKey, treeRefreshKey, showBuildOutputs, showIgnoredFiles]);",
   );
   assert.match(rootEffectBlock, /\.then\(\(entries\) => \{ if \(!cancelled\) setRoots\(entries\); \}\)/);
 });

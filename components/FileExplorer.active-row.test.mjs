@@ -134,8 +134,10 @@ test("normalizeFilePathSlashes makes the comparison separator-agnostic (real beh
 // ---------------------------------------------------------------------------
 
 test("FileExplorer takes activeFilePath as a prop; no local echo state remains", () => {
-  assert.match(source, /activeFilePath\?: string \| null;\n\}/, "Props must declare activeFilePath");
-  assert.match(source, /activeFilePath = null,\n\}, ref\) \{/, "component must destructure it as a prop with a null default");
+  // Props must declare activeFilePath (followed by later additive props such
+  // as the showIgnoredFiles opt-in, wi pi#101).
+  assert.match(source, /activeFilePath\?: string \| null;/, "Props must declare activeFilePath");
+  assert.match(source, /activeFilePath = null,\n\s*showIgnoredFiles = false,\n\}, ref\) \{/, "component must destructure it as a prop with a null default");
   assert.doesNotMatch(source, /const \[activeFilePath, setActiveFilePath\] = useState/, "no local echo state may remain");
   assert.doesNotMatch(source, /onActivateFile/, "the click-to-echo callback must be fully removed");
   assert.doesNotMatch(source, /setActiveFilePath/, "no setter for a local echo may remain");

@@ -145,6 +145,24 @@ export async function readGitIgnoredNames(
   return new Set(matched.filter((name) => !tracked.has(name)));
 }
 
+/** Which of `names` Git ignores in `directory`, for opt-in surfacing.
+ *
+ *  Unlike getFileTreeVisibility this never decides visibility — it reports
+ *  the ignored names so a listing can include them behind an explicit
+ *  opt-in and mark them. Degrades to an empty set wherever Git has no view
+ *  of the directory (outside a work tree, git missing/failed/timed out, or
+ *  the directory itself ignored): nothing is surfaced, nothing is marked,
+ *  and the default hide-by-default contract above stays untouched.
+ */
+export async function readIgnoredNames(
+  directory: string,
+  names: readonly string[],
+): Promise<Set<string>> {
+  const candidates = names.filter((name) => !ALWAYS_HIDDEN_NAMES.has(name));
+  if (candidates.length === 0) return new Set();
+  return (await readGitIgnoredNames(directory, candidates)) ?? new Set();
+}
+
 /** Build the visibility test for one listing of `directory`. */
 export async function getFileTreeVisibility(
   directory: string,

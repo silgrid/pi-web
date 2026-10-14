@@ -109,6 +109,68 @@ test("a Git-tracked build/ stays visible with the flag off; a Git-ignored dist/ 
   assert.equal((await readIgnored.json()).content, "bundle");
 });
 
+test("showIgnored=1 surfaces and marks git-ignored entries; the default listing is unchanged", async () => {
+  const repo = path.join(root, "repo-show-ignored");
+  write(path.join(repo, ".gitignore"), "secrets/\n*.log\nnode_modules/\n");
+  write(path.join(repo, "secrets/token.txt"), "token");
+  write(path.join(repo, "debug.log"), "log");
+  write(path.join(repo, "node_modules/pkg/index.js"));
+  write(path.join(repo, "src/main.ts"));
+  git(repo, "init", "-q");
+  git(repo, "add", ".gitignore", "src");
+
+  // Default: git-ignored entries stay hidden, no `ignored` marker is emitted.
+  const defaultListing = await list(repo);
+  assert.deepEqual(defaultListing.entries.map((entry) => entry.name), ["src", ".gitignore"]);
+  for (const entry of defaultListing.entries) {
+    assert.equal(entry.ignored, undefined, "default listing never marks entries ignored");
+  }
+
+  // Opt-in: the ignored entries appear, each marked additively; visible
+  // entries carry no marker. .git is never surfacable.
+  const optedIn = await list(repo, "&showIgnored=1");
+  assert.deepEqual(optedIn.entries.map((entry) => entry.name), [
+    "node_modules", "secrets", "src", ".gitignore", "debug.log",
+  ]);
+  const ignoredByName = new Map(optedIn.entries.map((entry) => [entry.name, entry.ignored]));
+  assert.equal(ignoredByName.get("secrets"), true);
+  assert.equal(ignoredByName.get("debug.log"), true);
+  assert.equal(ignoredByName.get("node_modules"), true);
+  assert.equal(ignoredByName.get("src"), undefined);
+  assert.equal(ignoredByName.get(".gitignore"), undefined);
+
+  // The "true" spelling works like showBuildOutputs's; a 0 keeps the default.
+  assert.deepEqual(await listNames(repo, "&showIgnored=true"), [
+    "node_modules", "secrets", "src", ".gitignore", "debug.log",
+  ]);
+  assert.deepEqual(await listNames(repo, "&showIgnored=0"), ["src", ".gitignore"]);
+
+  // Outside a work tree git has no view: the opt-in changes nothing (a
+  // name the convention list hides stays hidden, nothing is marked). The
+  // fixture uses a conventionally-hidden name that IS ignored inside the
+  // repo fixture above, proving the two hiding systems stay separate.
+  const plain = path.join(root, "plain-show-ignored");
+  write(path.join(plain, "node_modules/pkg/index.js"));
+  write(path.join(plain, "src/main.ts"));
+  assert.deepEqual(await listNames(plain), ["src"]);
+  assert.deepEqual(await listNames(plain, "&showIgnored=1"), ["src"]);
+});
+
+test("showIgnored is read exactly once, only inside the type=list branch", () => {
+  const listStart = source.indexOf('// type === "list"');
+  assert.notEqual(listStart, -1);
+  const beforeList = source.slice(0, listStart);
+  assert.ok(
+    !beforeList.includes('searchParams.get("showIgnored")'),
+    "showIgnored must only be read in the type=list branch",
+  );
+  assert.equal(
+    (source.match(/searchParams\.get\("showIgnored"\)/g) ?? []).length,
+    1,
+    "the query parameter is read exactly once",
+  );
+});
+
 test("showBuildOutputs is read exactly once, only inside the type=list branch", () => {
   const listStart = source.indexOf('// type === "list"');
   assert.notEqual(listStart, -1);
