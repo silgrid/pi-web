@@ -5,6 +5,7 @@ import type { SessionInfo } from "@/lib/types";
 import { listSessionFamilies, getSessionFamily, type SessionFamily } from "@/lib/session-family";
 import { loadExplorerOpen, saveExplorerOpen } from "@/lib/file-explorer-state";
 import { dispatchSessionRowContextMenu } from "@/lib/session-row-context-menu";
+import { isPlainActivation, sessionDeepLink } from "@/lib/session-links";
 import { skillExpansionToCommand } from "@/lib/slash-display";
 import { getRecentProjects, isPathInsideDirectory, sessionsForDirectory, sessionsForProject } from "@/lib/project-groups";
 import { prefetchSessionView } from "@/lib/session-prefetch";
@@ -2745,9 +2746,30 @@ function SessionItem({
               }}
               title={title}
             >
-              <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>
-                {title}
-              </span>
+              {session.transient ? (
+                // No file yet: a link would open a session no other tab can load.
+                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>
+                  {title}
+                </span>
+              ) : (
+                // A real link, so middle-click, Ctrl/Cmd-click and the browser's
+                // own gestures open the session in another tab. A plain click (or
+                // Enter) stays here and selects it as before — never `target`,
+                // which would send plain clicks away too.
+                <a
+                  href={sessionDeepLink(session.id)}
+                  style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0, color: "inherit", textDecoration: "none", cursor: "inherit" }}
+                  onClick={(event) => {
+                    // The row's handler must not select it again, nor on a modified click.
+                    event.stopPropagation();
+                    if (!isPlainActivation(event)) return;
+                    event.preventDefault();
+                    onClick();
+                  }}
+                >
+                  {title}
+                </a>
+              )}
               {isFiltered && (
                 <span
                   title={t("sidebar.filteredMarker")}
@@ -2843,6 +2865,47 @@ function SessionItem({
               >
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z" />
+                </svg>
+              </button>
+              {/* Open in new tab: the row's session in a browser tab of its own,
+                  by the same link its title carries. This tab's selection, cwd
+                  and file tabs stay as they are, and nothing is asked of the
+                  server here: the new tab loads the session as a reload would.
+                  Synchronous inside the click, so the browser counts it as the
+                  user's and does not block it as a popup. Its return value says
+                  nothing: with noopener the browser returns null whether the tab
+                  opened or not. */}
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  window.open(sessionDeepLink(session.id), "_blank", "noopener,noreferrer");
+                }}
+                title={t("sidebar.openInNewTab")}
+                style={{
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  width: 32, height: 32, padding: 0,
+                  background: "var(--bg-hover)", border: "1px solid var(--border)",
+                  borderRadius: 7, color: "var(--text-muted)",
+                  cursor: "pointer", flexShrink: 0,
+                  transition: "background 0.12s, color 0.12s, border-color 0.12s",
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.background = "var(--bg-selected)";
+                  e.currentTarget.style.color = "var(--accent)";
+                  e.currentTarget.style.borderColor = "rgba(37,99,235,0.35)";
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.background = "var(--bg-hover)";
+                  e.currentTarget.style.color = "var(--text-muted)";
+                  e.currentTarget.style.borderColor = "var(--border)";
+                }}
+              >
+                {/* An arrow leaving a box: a session row's "Open in new tab"
+                    (a browser tab, not a copy). */}
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M14 4h6v6" />
+                  <path d="M20 4 11 13" />
+                  <path d="M18 14v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4" />
                 </svg>
               </button>
               <button

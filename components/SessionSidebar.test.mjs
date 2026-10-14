@@ -441,3 +441,37 @@ test("the follow effect expands the owning pinned group accordion-style and scro
     /if \(!sidebarRows\.some\(\(row\) => row\.kind === "session" && row\.family\.root\.id === pendingId\)\) \{[\s\S]*?return;/,
   );
 });
+
+// --- Open in new tab (upstream d9adb38, hand-ported without SessionTree) ---
+
+test("a saved session's title is a real link to its session, a transient row's is not", () => {
+  // The link: the encoded id in ?session=, never a URL of its own.
+  assert.match(sessionItemSource, /href=\{sessionDeepLink\(session\.id\)\}/);
+  // A plain click (or Enter) stays in the page and selects as before; a
+  // modified click (middle, Ctrl/Cmd) is the browser's, for a new tab.
+  assert.match(
+    sessionItemSource,
+    /event\.stopPropagation\(\);\s*if \(!isPlainActivation\(event\)\) return;\s*event\.preventDefault\(\);\s*onClick\(\);/,
+  );
+  // A transient session has no file yet: no link, so no other tab can try to
+  // load a session that was never saved.
+  assert.match(
+    sessionItemSource,
+    /\{session\.transient \? \(\s*\/\/ No file yet: a link would open a session no other tab can load\./,
+  );
+});
+
+test("Open in new tab opens the row's session link and leaves this tab alone", () => {
+  // The row the button sits on (not the selected session); the same link as
+  // its title. Synchronous inside the click, so the browser takes it as the
+  // user's and does not block it as a popup, and no selection, cwd move or
+  // request of its own happens here.
+  assert.match(sessionItemSource, /title=\{t\("sidebar\.openInNewTab"\)\}/);
+  assert.match(
+    sessionItemSource,
+    /window\.open\(sessionDeepLink\(session\.id\), "_blank", "noopener,noreferrer"\)/,
+  );
+  // Never for a transient session: the hover actions' existing guard covers
+  // the open-new-tab button too.
+  assert.match(sessionItemSource, /\{hovered && !session\.transient && \(/);
+});

@@ -20,6 +20,7 @@ import { AgentSessionPanel } from "./AgentSessionPanel";
 import { TerminalPanel } from "./TerminalPanel";
 import { newTerminalTab, restoreTerminalTabs, TERMINAL_TABS_KEY, type TerminalTab } from "./terminal-tab-state";
 import { useTheme } from "@/hooks/useTheme";
+import { useFontPreferences } from "@/hooks/useFontPreferences";
 import { useI18n } from "@/hooks/useI18n";
 import { useIsMobile, useIsNarrowMobile } from "@/hooks/useIsMobile";
 import { useViewportHeight } from "@/hooks/useViewportHeight";
@@ -130,6 +131,8 @@ export function AppShell() {
   const [initialNavigation, setInitialNavigation] = useState(() => getInitialNavigation(searchParams));
   // Keep the system-theme subscription mounted for the lifetime of the app.
   useTheme();
+  // Restore fonts even when Settings and the chat composer have not been opened.
+  useFontPreferences();
   const { locale, t: translate } = useI18n();
   const isMobile = useIsMobile();
   const isNarrowMobile = useIsNarrowMobile();
@@ -1652,6 +1655,8 @@ export function AppShell() {
     if (!projectTrustCwd) return;
 
     const controller = new AbortController();
+    // The answer also lists the project's MCP servers (`mcpFile`, `mcpServers`), unused here: the
+    // trust dialog fetches the listing again when it opens, since the file can change in between.
     fetch(`/api/project-trust?cwd=${encodeURIComponent(projectTrustCwd)}`, {
       signal: controller.signal,
     })
@@ -3063,6 +3068,7 @@ export function AppShell() {
               onContextUsageChange={handleContextUsageChange}
               externalSessionChange={externalSessionChange}
               onOpenFile={handleOpenLinkedFile}
+              onFilesUploaded={handleExplorerRefresh}
               onOpenSession={handleOpenSession}
               onAskInNewChat={handleAskInNewChat}
               quoteSelectionEnabled={quoteSelectionEnabled}

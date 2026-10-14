@@ -69,6 +69,12 @@ try {
     });
     const ready = () => page.locator(".terminal-panel:visible .is-ready").waitFor();
     const text = () => page.locator(".terminal-panel:visible .xterm-rows").innerText();
+    // xterm replaces its character spans asynchronously after a font change/refit.
+    const expectFontWeight = (weight, bold = false) => page.waitForFunction(({ weight, bold }) => {
+      const panel = [...document.querySelectorAll(".terminal-panel")].find((element) => element.getBoundingClientRect().width > 0);
+      const character = panel?.querySelector(`.xterm-rows span${bold ? ".xterm-bold" : ":not(.xterm-bold)"}`);
+      return character && getComputedStyle(character).fontWeight === String(weight);
+    }, { weight, bold });
     const run = async (command) => {
       await page.locator(".terminal-panel:visible .xterm-helper-textarea").focus();
       await page.keyboard.type(command);
@@ -99,6 +105,32 @@ try {
       const [id] = created;
       assert.equal(created.size, 1);
 
+      // A font change refits an existing xterm without restarting its shell or SSE.
+      const fontConnections = [];
+      const trackFontConnections = (request) => {
+        if (/\/api\/terminal(?:$|\/[^/]+\/events)/.test(new URL(request.url()).pathname)) fontConnections.push(request.url());
+      };
+      page.on("request", trackFontConnections);
+      await hidePanel();
+      await showSidebar();
+      await page.getByRole("button", { name: "Settings", exact: true }).click();
+      await page.getByRole("textbox", { name: "Monospace font", exact: true }).fill("monospace");
+      await page.getByRole("slider", { name: "Monospace font weight", exact: true }).fill("600");
+      await page.keyboard.press("Escape");
+      if (viewport.width <= 640) {
+        await page.locator(".sidebar-overlay-backdrop").click({ position: { x: viewport.width - 5, y: 100 } });
+      }
+      await showPanel();
+      await ready();
+      assert.match(await page.locator(".terminal-panel:visible .xterm-rows").evaluate((el) => getComputedStyle(el).fontFamily), /^monospace,/);
+      await expectFontWeight(600);
+      await run("printf '\\nFONT:%s:%s\\n' \"$PR695_TOKEN\" \"$$\"");
+      await waitOutput(`FONT:alive:${pid}`);
+      await run("printf '\\033[1mBOLD_FONT\\033[0m\\n'");
+      await expectFontWeight(700, true);
+      page.off("request", trackFontConnections);
+      assert.deepEqual(fontConnections, [], "Font changes must not recreate terminals or reconnect streams");
+
       await hidePanel();
       await showSidebar();
       await page.getByText("note.txt", { exact: true }).click();
@@ -116,6 +148,7 @@ try {
 
       await page.reload();
       await ready();
+      await expectFontWeight(600);
       await run("printf '\\nREFRESH:%s:%s\\n' \"$PR695_TOKEN\" \"$$\"");
       await waitOutput(`REFRESH:alive:${pid}`);
       assert.equal(created.size, 1, "refresh must reconnect, not create");

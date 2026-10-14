@@ -1,5 +1,5 @@
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, type LoadExtensionsResult } from "@earendil-works/pi-coding-agent";
 import { dump as stringifyYaml } from "js-yaml";
 import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync } from "fs";
 import { basename, dirname, join, resolve } from "path";
@@ -32,6 +32,10 @@ export interface SubagentProfile {
   extensionTools?: string[];
   /** Raw `ext:` deny selectors, resolved against the loaded extensions at spawn time. */
   disallowedExtensionTools?: string[];
+  /** Omitted = SDK on-demand discovery; [] = explicitly no selected skills. */
+  skills?: string[];
+  /** Omitted = every enabled extension; [] = none. Names only, resolved like `ext:` selectors. */
+  extensions?: string[];
   loadSkills: boolean;
   loadExtensions: boolean;
   /** Whether this profile enables Pi Web's codemode tool. Omitted profiles are disabled. */
@@ -69,6 +73,8 @@ export interface SubagentMetadata {
 
 export interface SubagentResourceSnapshot {
   version: 1;
+  skills?: string[];
+  extensions?: string[];
   appendSystemPrompt: string[];
   tools: string[];
   loadSkills: boolean;
@@ -81,6 +87,8 @@ export interface SubagentResourceSnapshot {
 }
 
 export interface SubagentSessionResources {
+  skills?: string[];
+  extensions?: string[];
   appendSystemPrompt: string[];
   tools: string[];
   loadSkills: boolean;
@@ -252,6 +260,43 @@ function resourceBoolean(value: unknown, fallback: boolean): boolean {
   return Array.isArray(value) || typeof value === "string" ? true : fallback;
 }
 
+/**
+ * Skill or extension names from a list or a comma-separated string, trimmed and
+ * deduplicated. Empty and non-string items are dropped, as pi-subagents does: a stray
+ * comma must not make the whole profile unreadable.
+ */
+export function subagentNameList(value: unknown): string[] {
+  const items: unknown[] = Array.isArray(value) ? value : typeof value === "string" ? value.split(",") : [];
+  return [...new Set(items
+    .filter((item): item is string => typeof item === "string")
+    .map((item) => item.trim())
+    .filter(Boolean))];
+}
+
+/**
+ * The names a profile lists in `skills:` or `extensions:`. `undefined` means no list: the
+ * key is absent or empty, or holds a switch spelling (`true`, `all`, `none`, ...) that
+ * `load_skills` / `load_extensions` fall back to and a save keeps in step with them.
+ */
+function profileNameList(value: unknown): string[] | undefined {
+  if (Array.isArray(value)) return subagentNameList(value);
+  if (typeof value !== "string" || OWNED_ALIAS_VALUES.has(value.trim().toLowerCase())) return undefined;
+  const names = subagentNameList(value);
+  return names.length > 0 ? names : undefined;
+}
+
+/** An `extensions:` list; `*` in it loads every extension, as in pi-subagents. */
+function profileExtensions(value: unknown): string[] | undefined {
+  const names = profileNameList(value);
+  return names?.includes("*") ? undefined : names;
+}
+
+/** `load_skills` / `load_extensions`, else the alias, where `none` and `false` switch it off. */
+function profileResourceSwitch(value: unknown, fallback: boolean): boolean {
+  if (typeof value === "string" && ["none", "false"].includes(value.trim().toLowerCase())) return false;
+  return resourceBoolean(value, fallback);
+}
+
 function stringList(value: unknown): string[] {
   const values = Array.isArray(value)
     ? value
@@ -334,6 +379,8 @@ function parseProfileFile(filePath: string, scope: SubagentScope): SubagentProfi
     const maxTurnsValue = typeof data?.max_turns === "number" ? Math.floor(data.max_turns) : undefined;
     const tools = parseTools(data?.tools, DEFAULT_TOOLS);
     const codemode = parseCodemode(data?.codemode);
+    const skills = profileNameList(data?.skills);
+    const extensions = profileExtensions(data?.extensions);
     const disallowedTools = new Set(parseTools(data?.disallowed_tools, []));
     // The deny list is also handed to the runtime, which resolves both sides against the
     // loaded extensions. This parse-time filter is only the cheap literal fast path: it
@@ -364,8 +411,10 @@ function parseProfileFile(filePath: string, scope: SubagentScope): SubagentProfi
       tools: tools.filter((tool) => !disallowedTools.has(tool)),
       ...(hadExtensionSelectors || extensionTools.length > 0 ? { extensionTools } : {}),
       ...(disallowedExtensionTools.length > 0 ? { disallowedExtensionTools } : {}),
-      loadSkills: resourceBoolean(data?.load_skills ?? data?.skills, false),
-      loadExtensions: resourceBoolean(data?.load_extensions ?? data?.extensions, extensionTools.length > 0),
+      ...(skills !== undefined ? { skills } : {}),
+      ...(extensions !== undefined ? { extensions } : {}),
+      loadSkills: profileResourceSwitch(data?.load_skills ?? data?.skills, false),
+      loadExtensions: profileResourceSwitch(data?.load_extensions ?? data?.extensions, extensionTools.length > 0),
       codemode,
       mcp: parseMcp(data?.mcp),
       ...(stringValue(data?.model) ? { model: stringValue(data?.model) } : {}),
@@ -522,8 +571,18 @@ export function saveSubagentProfile(
     run_in_background: profile.runInBackground,
     prompt_mode: promptMode,
   };
-  syncFlagAlias(managed, "skills", stored.skills, loadSkills);
+  const skills = profile.skills === undefined ? profileNameList(stored.skills) : subagentNameList(profile.skills);
+  if (skills !== undefined) {
+    const storedSkills = profileNameList(stored.skills);
+    managed.skills = storedSkills !== undefined && JSON.stringify(storedSkills) === JSON.stringify(skills)
+      ? stored.skills
+      : skills;
+  } else {
+    syncFlagAlias(managed, "skills", stored.skills, loadSkills);
+  }
+  // The panel has no editor for an `extensions:` list, so the file's own list always stays.
   syncFlagAlias(managed, "extensions", stored.extensions, loadExtensions);
+  const extensions = profileExtensions(stored.extensions);
   if (model) managed.model = model;
   if (profile.thinking) managed.thinking = profile.thinking;
   if (maxTurns) managed.max_turns = maxTurns;
@@ -544,6 +603,8 @@ export function saveSubagentProfile(
     description,
     systemPrompt,
     tools,
+    ...(skills !== undefined ? { skills } : {}),
+    extensions,
     ...(extensionTools.length > 0 ? { extensionTools } : {}),
     loadSkills,
     loadExtensions,
@@ -604,6 +665,9 @@ export function readSubagentSessionResources(
   const data = subagentMetadataData(entries);
   if (!data) return null;
   const snapshot = data.resourceSnapshot;
+  // A malformed list narrows to what it names, never back to the whole catalog.
+  const skills = isRecord(snapshot) && "skills" in snapshot ? subagentNameList(snapshot.skills) : undefined;
+  const extensions = isRecord(snapshot) && "extensions" in snapshot ? subagentNameList(snapshot.extensions) : undefined;
   const loadSkills = isRecord(snapshot) && snapshot.loadSkills === true;
   const loadExtensions = isRecord(snapshot) && snapshot.loadExtensions === true;
   const codemode = isRecord(snapshot) && snapshot.codemode === true;
@@ -624,6 +688,8 @@ export function readSubagentSessionResources(
     )
   ) {
     return {
+      ...(skills !== undefined ? { skills } : {}),
+      ...(extensions !== undefined ? { extensions } : {}),
       appendSystemPrompt: [...snapshot.appendSystemPrompt],
       tools: [...new Set(snapshot.tools)],
       loadSkills,
@@ -850,13 +916,38 @@ export function selectSubagentExtensionTools(
 export const SUBAGENT_MCP_EXTENSION_PATHS: readonly string[] = ["builtin:tool-search", "builtin:mcp"];
 
 /**
- * The extension half of a child's resource loader options, shared by spawn and reopen.
- * Fork note: the `extensions:` list scoping (`scopeSubagentExtensions`) is an upstream feature
- * this batch does not carry, so the override branch is omitted.
+ * Keep only the extensions an `extensions:` list names, after the SDK has loaded them, as
+ * pi-subagents does. A dropped extension binds no handlers, tools, commands or providers,
+ * but its factory has already run once: this scopes the child, it is not a sandbox. Names
+ * resolve like `ext:` selectors (directory, file or package name, case-insensitive), so a
+ * name two sources claim keeps neither. pi-web's own inline extensions always stay. The SDK
+ * calls the override on every reload, so the scope holds without further wiring.
  */
-export function subagentExtensionLoaderOptions(resources: { loadExtensions: boolean; mcp?: boolean }) {
+export function scopeSubagentExtensions(names: readonly string[]) {
+  const wanted = new Set(names.map((name) => name.toLowerCase()));
+  return (base: LoadExtensionsResult): LoadExtensionsResult => {
+    const owners = extensionNameOwners(base.extensions);
+    const extensions = base.extensions.filter((extension) => (
+      extension.path.startsWith("<inline:")
+      || extensionCandidateNames(extension).some((name) => wanted.has(name) && owners.get(name)?.size === 1)
+    ));
+    const kept = new Set(extensions.map((extension) => extension.path));
+    const { runtime } = base;
+    // Registrations queued by a dropped extension's factory would still reach the model runtime.
+    runtime.pendingProviderRegistrations = runtime.pendingProviderRegistrations.filter((item) => kept.has(item.extensionPath));
+    runtime.pendingNativeProviderRegistrations = runtime.pendingNativeProviderRegistrations.filter((item) => kept.has(item.extensionPath));
+    runtime.pendingVirtualModelRegistrations = runtime.pendingVirtualModelRegistrations.filter((item) => kept.has(item.extensionPath));
+    return { ...base, extensions };
+  };
+}
+
+/** The extension half of a child's resource loader options, shared by spawn and reopen. */
+export function subagentExtensionLoaderOptions(resources: { loadExtensions: boolean; extensions?: readonly string[]; mcp?: boolean }) {
   return {
     noExtensions: !resources.loadExtensions,
+    ...(resources.loadExtensions && resources.extensions !== undefined
+      ? { extensionsOverride: scopeSubagentExtensions(resources.extensions) }
+      : {}),
     ...(resources.mcp ? { additionalExtensionPaths: [...SUBAGENT_MCP_EXTENSION_PATHS] } : {}),
   };
 }

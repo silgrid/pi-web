@@ -84,6 +84,7 @@ export async function PATCH(req: Request) {
       ...(source.extensionTools !== undefined ? { extensionTools: [...source.extensionTools] } : {}),
       ...(source.disallowedExtensionTools !== undefined ? { disallowedExtensionTools: [...source.disallowedExtensionTools] } : {}),
       loadSkills: source.loadSkills,
+      ...(source.skills !== undefined ? { skills: [...source.skills] } : {}),
       loadExtensions: source.loadExtensions,
       codemode: source.codemode,
       mcp: source.mcp,

@@ -30,6 +30,7 @@ import { useIsMobile, useIsNarrowMobile } from "@/hooks/useIsMobile";
 import { useEnterSendMode } from "@/hooks/useEnterSendMode";
 import { useI18n } from "@/hooks/useI18n";
 import { useChatAppearance } from "@/hooks/useChatAppearance";
+import { useFontPreferences } from "@/hooks/useFontPreferences";
 import type { ToolPreset } from "@/lib/tool-presets";
 import { SelectorRow } from "./SelectorRow";
 import { ModelSelector, type ModelSelectorOption } from "./ModelSelector";
@@ -96,6 +97,8 @@ interface Props {
   draftKey?: string;
   /** Session working directory — enables the @ file autocomplete menu */
   cwd?: string | null;
+  /** Files picked with the attach button, handled like files dropped onto the chat. Without it the button takes images only. */
+  onAttachFiles?: (files: File[]) => void;
 }
 
 export interface ChatInputHandle {
@@ -653,10 +656,12 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   onPromptWithStreamingBehavior,
   draftKey,
   cwd,
+  onAttachFiles,
   compact = false,
 }: Props, ref) {
   const { t } = useI18n();
   const { fontSize } = useChatAppearance();
+  const { ui: uiFontFamily, uiWeight } = useFontPreferences();
   const isMobile = useIsMobile();
   const isNarrowMobile = useIsNarrowMobile();
   const enterSendMode = useEnterSendMode();
@@ -996,6 +1001,14 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     return () => window.clearTimeout(timer);
   }, [draftKeptNoticeVisible]);
 
+  const handleFilePick = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files ?? []);
+    // Clearing the value lets the same file be picked again.
+    e.target.value = "";
+    if (onAttachFiles) onAttachFiles(files);
+    else processImageFiles(files);
+  }, [onAttachFiles, processImageFiles]);
+
   const removeImage = useCallback((index: number) => {
     setAttachedImages((prev) => {
       const next = [...prev];
@@ -1068,7 +1081,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     if (ta.value) ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
   }, []);
 
-  useLayoutEffect(resizeTextarea, [value, fontSize, resizeTextarea]);
+  useLayoutEffect(resizeTextarea, [value, fontSize, uiFontFamily, uiWeight, resizeTextarea]);
 
   useEffect(() => {
     const ta = textareaRef.current;
@@ -1898,13 +1911,16 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     >
       {/* Visually-hidden file input: kept in the layout (never display:none —
           some WebView shells refuse to open a chooser for a display:none input).
-          accept is dropped in likely embedded-WebView shells because old
-          Android WebViews can silently fail the whole chooser on filtered
-          picks; processImageFiles re-filters non-images regardless. */}
+          accept is dropped when any file may be attached (the handler routes
+          non-images through the working-directory upload), and in likely
+          embedded-WebView shells because old Android WebViews can silently
+          fail the whole chooser on filtered picks; processImageFiles
+          re-filters images regardless. No `capture`: phones still offer the
+          photo library and camera. */}
       {!compact && <input
         ref={fileInputRef}
         type="file"
-        accept={LIKELY_EMBEDDED_WEBVIEW ? undefined : "image/*"}
+        accept={onAttachFiles || LIKELY_EMBEDDED_WEBVIEW ? undefined : "image/*"}
         multiple
         aria-hidden="true"
         tabIndex={-1}
@@ -1922,11 +1938,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
           clipPath: "inset(50%)",
           pointerEvents: "none",
         }}
-        onChange={(e) => {
-          const files = Array.from(e.target.files ?? []);
-          processImageFiles(files);
-          e.target.value = "";
-        }}
+        onChange={handleFilePick}
       />}
       <div style={{ maxWidth: "var(--chat-content-max-width, 820px)", margin: "0 auto" }}>
         <ModelErrorBanner error={modelError} />
@@ -2553,7 +2565,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
           <div style={{ flex: isMobile ? "1 1 auto" : "0 0 auto", minWidth: 0, display: "flex", alignItems: "center", gap: 2 }}>
             <button
               onClick={openImagePicker}
-              title={t("chat.attachImage")}
+              title={t("chat.attachFiles")}
               style={{
                 flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center",
                 width: 32, height: 32, padding: 0,

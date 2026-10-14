@@ -101,6 +101,35 @@ test("profile PUT defaults an omitted codemode to off", async (t) => {
   }
 });
 
+test("profile PUT and PATCH retain authored named/empty skills, activation and foreign fields", async (t) => {
+  const cwd = await mkdtemp(join(tmpdir(), "skill-route-"));
+  allowFileRoot(cwd);
+  t.after(() => rm(cwd, { recursive: true, force: true }));
+  await mkdir(join(cwd, ".pi", "agents"), { recursive: true });
+  const file = join(cwd, ".pi", "agents", "api-test-agent.md");
+  for (const authored of ['"review, audit"', '[review, audit]', '[]', 'none']) {
+    await writeFile(file, `---\nskills: ${authored}\nload_skills: false\nextensions: custom-extension\nforeign: retain-me\n---\nPrompt`);
+    for (const enabled of [false, true]) {
+      const response = await PATCH(jsonRequest("PATCH", { cwd, scope: "project", name: "api-test-agent", enabled }));
+      assert.equal(response.status, 200);
+      const saved = (await response.json()).profile;
+      // `none` is a switch spelling, kept in step with load_skills like main does, not a list.
+      assert.deepEqual(saved.skills, authored === '[]' ? [] : authored === 'none' ? undefined : ["review", "audit"]);
+      assert.equal(saved.loadSkills, false);
+      const put = await PUT(jsonRequest("PUT", { cwd, scope: "project", profile: { ...saved, description: "Unrelated edit" } }));
+      assert.equal(put.status, 200);
+      const text = await readFile(file, "utf8");
+      assert.match(text, /foreign: retain-me/);
+      assert.match(text, /extensions: custom-extension/);
+      const stored = parseFrontmatter(text).data.skills;
+      if (authored === '"review, audit"') assert.equal(stored, "review, audit");
+      if (authored === '[review, audit]') assert.deepEqual(stored, ["review", "audit"]);
+      if (authored === 'none') assert.equal(stored, false);
+      if (authored === '[]') assert.deepEqual(stored, []);
+    }
+  }
+});
+
 test("profile PATCH retains codemode when toggling global and project profiles", async (t) => {
   const cwd = await mkdtemp(join(tmpdir(), "codemode-route-toggle-"));
   allowFileRoot(cwd);
@@ -169,6 +198,17 @@ test("profile PUT rejects invalid codemode without creating or overwriting files
         else assert.equal(existsSync(file), false);
       }
     }
+  }
+});
+
+test("profile PUT narrows malformed skill lists instead of enabling all skills", async (t) => {
+  const cwd = await mkdtemp(join(tmpdir(), "skill-route-invalid-"));
+  allowFileRoot(cwd);
+  t.after(() => rm(cwd, { recursive: true, force: true }));
+  for (const [skills, want] of [["review", ["review"]], [[42], []], [[""], []], [["review", "", " audit "], ["review", "audit"]]]) {
+    const response = await PUT(jsonRequest("PUT", { cwd, scope: "project", profile: profile({ skills }) }));
+    assert.equal(response.status, 200);
+    assert.deepEqual((await response.json()).profile.skills, want);
   }
 });
 
