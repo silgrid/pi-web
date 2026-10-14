@@ -6,11 +6,15 @@ import { formatRelativeTime } from "@/lib/i18n/format";
 import type { SessionInfo } from "@/lib/types";
 import type { SessionSearchResponse } from "@/lib/session-search";
 
-export function SessionSearch({ open, query, children, selectedSessionId, onSelectSession }: {
+export function SessionSearch({ open, query, children, selectedSessionId, archivedSessionIds, onSelectSession }: {
   open: boolean;
   query: string;
   children: ReactNode;
   selectedSessionId: string | null;
+  /** Archived ids (wi pi#103): result rows whose session is archived render a
+   *  localized badge chip. Read-only here — the search path NEVER mutates the
+   *  archive set; clicking a result keeps the ordinary view-only open. */
+  archivedSessionIds?: ReadonlySet<string>;
   onSelectSession: (session: SessionInfo, entryId?: string, blockIndex?: number) => void;
 }) {
   const { t, locale } = useI18n();
@@ -63,6 +67,25 @@ export function SessionSearch({ open, query, children, selectedSessionId, onSele
         >
           <span className="block truncate text-xs font-medium text-text">{session.name || session.firstMessage}</span>
           <span className="mt-1 flex min-w-0 gap-2 text-[10px] text-text-dim">
+            {/* Archived badge (wi pi#103): the search reaches archived sessions
+                (server-side search is untouched — a spec non-goal area); the
+                badge marks them in the row's metadata line. Text is an e2e
+                locator contract: 已归档 / 已封存 / Archived, exactly. */}
+            {archivedSessionIds?.has(session.id) && (
+              <span
+                title={t("sidebar.archivedBadge")}
+                style={{
+                  flexShrink: 0,
+                  padding: "0 5px",
+                  color: "var(--text-dim)",
+                  background: "var(--bg-hover)",
+                  border: "1px solid var(--border)",
+                  borderRadius: 4,
+                }}
+              >
+                {t("sidebar.archivedBadge")}
+              </span>
+            )}
             <span className="min-w-0 flex-1 truncate" title={session.cwd}>{session.cwd}</span>
             <span className="shrink-0">{formatRelativeTime(session.modified, locale)}</span>
           </span>

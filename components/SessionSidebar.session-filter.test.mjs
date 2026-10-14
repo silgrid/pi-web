@@ -66,13 +66,21 @@ test("the sidebar reads the filter through the shared lib and derives visibleSes
   assert.match(source, /useSyncExternalStore\(subscribeSessionFilter, getSessionFilterState, getServerSessionFilterState\)/);
   assert.doesNotMatch(source, /loadSessionFilterPatterns\(sessionFilterStorage\(\)\)/);
   assert.doesNotMatch(source, /loadShowFilteredSessions\(sessionFilterStorage\(\)\)/);
-  // visibleSessions is derived ONCE from allSessions, before grouping. Local
-  // matching covers names and the first-message preview; the server-side
-  // full-text match (review r1) adds ids whose only match sits beyond the
-  // preview cut, without restoring the oversized list payload.
+  // visibleSessions is derived ONCE, before grouping. Local matching covers
+  // names and the first-message preview; the server-side full-text match
+  // (review r1) adds ids whose only match sits beyond the preview cut,
+  // without restoring the oversized list payload. pi#103: the archived-
+  // exclusion composes FIRST — visibleSessions reads unarchivedSessions
+  // (allSessions minus the archive set), so an archived id never renders
+  // regardless of the reveal toggle or the age window.
   assert.match(
     source,
-    /const visibleSessions = useMemo\(\s*\(\) => filterSessionsByAge\(\s*showFilteredSessions \|\| sessionFilterPatterns\.length === 0\s*\? allSessions\s*: allSessions\.filter\(\(session\) => \(\s*!isSessionFiltered\(session, sessionFilterPatterns\)\s*&& !serverFilterMatchedIds\.has\(session\.id\)\s*\)\),\s*sessionAgeFilterDays,\s*\)/,
+    /const visibleSessions = useMemo\(\s*\(\) => filterSessionsByAge\(\s*showFilteredSessions \|\| sessionFilterPatterns\.length === 0\s*\? unarchivedSessions\s*: unarchivedSessions\.filter\(\(session\) => \(\s*!isSessionFiltered\(session, sessionFilterPatterns\)\s*&& !serverFilterMatchedIds\.has\(session\.id\)\s*\)\),\s*sessionAgeFilterDays,\s*\)/,
+  );
+  // ...and the exclusion itself sits directly over allSessions.
+  assert.match(
+    source,
+    /const unarchivedSessions = useMemo\(\s*\(\) => archivedSessionIds\.size === 0\s*\?\s*allSessions\s*:\s*allSessions\.filter\(\(session\) => !archivedSessionIds\.has\(session\.id\)\)/,
   );
   // pi#82: the age window composes after the worker filter inside the
   // same memo, so one derivation stays the single source of visible rows.
@@ -120,11 +128,13 @@ test("an empty stored pattern array disables hiding; the toggle re-reveals with 
   const worker = session({ firstMessage: "Execute the pinned skill entry" });
   assert.equal(isSessionFiltered(worker, empty), false, "an empty list hides nothing");
   // The component-level contract: showFilteredSessions OR an empty pattern
-  // list short-circuits to the unfiltered allSessions — the re-revealed rows
-  // are byte-identical to the pre-feature rendering.
+  // list short-circuits to the unfiltered set — the re-revealed rows are
+  // byte-identical to the pre-feature rendering. (pi#103: that set is now
+  // unarchivedSessions, so an ARCHIVED session still never re-renders via
+  // the toggle — the exclusion composes ahead of it.)
   assert.match(
     source,
-    /showFilteredSessions \|\| sessionFilterPatterns\.length === 0\s*\n\s*\? allSessions/,
+    /showFilteredSessions \|\| sessionFilterPatterns\.length === 0\s*\n\s*\? unarchivedSessions/,
   );
 });
 

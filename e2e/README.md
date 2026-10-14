@@ -37,6 +37,18 @@ Coverage:
 - Unknown sessions and paths outside the fixture project are rejected.
 - A local extension checks dialog keyboard navigation, Esc cancellation,
   collapse/expand draft preservation, countdown display, and server-side expiry.
+- The sidebar archive pass (wi_tN1cVXKf1VIr / wi_uyIF45t806CP) drives the
+  client-side archive contract through the real UI: row-menu archive from
+  a pre-selected project (grill Batch 1 Q2 ruling b — the two-project
+  alpha/beta fixture is kept, one project is pre-selected at test start via
+  the global session search, and each main-list disappearance assertion
+  targets only the selected project's session; the other project's
+  archived session is asserted via search and the archive view),
+  localStorage persistence across reload, `已归档 N` entry visibility,
+  count, and stability across project switches, replacement-mode archive
+  view with back button and project grouping, view-only open, unarchive,
+  search badge, external-delete pruning, and zero server mutations.
+  Desktop viewport only.
 
 Model prompts, live model streaming, and agent execution are outside this suite.
 Failures save a screenshot, Playwright trace, and server log under

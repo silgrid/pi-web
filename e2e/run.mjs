@@ -15,6 +15,7 @@ import { checkChatAppearance } from "./chat-appearance.mjs";
 import { checkCodeBackground } from "./code-background.mjs";
 import { checkSplitPane } from "./split-pane-pass.mjs";
 import { checkModelDiscovery } from "./model-discovery.mjs";
+import { checkArchive } from "./archive.mjs";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const mode = process.env.E2E_SERVER_MODE || "dev";
@@ -36,6 +37,12 @@ const RICH = "e2e-rich-session";
 const COMPACTED = "e2e-compacted-session";
 const APPEND = "e2e-external-append-session";
 const CODE_BACKGROUND = "e2e-code-background";
+// wi_tN1cVXKf1VIr (sidebar A1: Archive) e2e fixtures: two non-running
+// sessions in two distinct projects so the archive pass can verify
+// project grouping and external-delete pruning. Authored pre-code against
+// artifacts/spec.md; see e2e/archive.mjs.
+const ARCHIVE_ALPHA = "e2e-archive-alpha";
+const ARCHIVE_BETA = "e2e-archive-beta";
 const text = (i) => `E2E message ${String(i).padStart(4, "0")}`;
 const ids = (start, end) => Array.from({ length: end - start }, (_, i) => `e${start + i}`);
 
@@ -43,8 +50,8 @@ function message(id, parentId, role, content) {
   return { type: "message", id, parentId, timestamp, message: { role, content } };
 }
 
-function writeSession(id, entries) {
-  const header = { type: "session", version: 3, id, timestamp, cwd: project };
+function writeSession(id, entries, cwd = project) {
+  const header = { type: "session", version: 3, id, timestamp, cwd };
   writeFileSync(join(sessionDir, `2026-08-23T00-00-00-000Z_${id}.jsonl`),
     [header, ...entries].map((entry) => JSON.stringify(entry)).join("\n") + "\n");
 }
@@ -143,6 +150,18 @@ try {
     message("root", null, "user", "E2E wrapper root"),
     message("reply", "root", "assistant", "E2E wrapper reply"),
   ]);
+  const archiveProjectA = join(agentDir, "alpha-project");
+  const archiveProjectB = join(agentDir, "beta-project");
+  mkdirSync(archiveProjectA);
+  mkdirSync(archiveProjectB);
+  writeSession(ARCHIVE_ALPHA, [
+    message("root", null, "user", "E2E archive alpha"),
+    message("reply", "root", "assistant", "E2E archive alpha reply"),
+  ], archiveProjectA);
+  writeSession(ARCHIVE_BETA, [
+    message("root", null, "user", "E2E archive beta"),
+    message("reply", "root", "assistant", "E2E archive beta reply"),
+  ], archiveProjectB);
 
   const probe = createServer();
   probe.listen(0, "127.0.0.1");
@@ -194,7 +213,7 @@ try {
     const response = await fetch(`${base}/api/sessions`, { signal: AbortSignal.timeout(5000) }).catch(() => null);
     if (response?.ok) {
       const { sessions } = await response.json();
-      assert.deepEqual(sessions.map((session) => session.id).sort(), [LONG, BRANCH, RICH, COMPACTED, APPEND, CODE_BACKGROUND].sort());
+      assert.deepEqual(sessions.map((session) => session.id).sort(), [LONG, BRANCH, RICH, COMPACTED, APPEND, CODE_BACKGROUND, ARCHIVE_ALPHA, ARCHIVE_BETA].sort());
       break;
     }
     assert.ok(Date.now() < deadline, "Server readiness timed out; see server.log");
@@ -248,7 +267,11 @@ try {
 
   browser = await chromium.launch();
   for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 }]) {
-    context = await browser.newContext({ viewport, locale: "en-US" });
+    // pi#102 blocked-round correction (layered by e2e-author after the
+    // recovery script): the archive pass drives the UI through a relative
+    // page.goto("/"), so the context needs a baseURL — a relative goto
+    // without one throws "invalid URL".
+    context = await browser.newContext({ viewport, locale: "en-US", baseURL: base });
     // pi#82: the sidebar's age filter defaults to 7 days, and every fixture
     // session carries its real (weeks-old) last-activity timestamp — the
     // filter would legitimately hide them. The age semantics are unit-tested
@@ -570,6 +593,27 @@ try {
     await page.goto(`${base}/?session=${CODE_BACKGROUND}`, { waitUntil: "domcontentloaded" });
     await page.locator(".markdown-code-block pre").waitFor();
     await checkCodeBackground(page);
+    // wi_tN1cVXKf1VIr: the archive acceptance pass (authored pre-code; see
+    // e2e/archive.mjs). Desktop-only, and self-guarding — a failing archive
+    // scenario logs FAIL and sets the exit code without aborting the rest
+    // of the suite, so the classic passes above still run to completion.
+    if (viewport.width > 600) {
+      await checkArchive(page, {
+        alphaId: ARCHIVE_ALPHA,
+        betaId: ARCHIVE_BETA,
+        alphaTitle: "E2E archive alpha",
+        betaTitle: "E2E archive beta",
+        betaFile: join(sessionDir, `2026-08-23T00-00-00-000Z_${ARCHIVE_BETA}.jsonl`),
+        alphaProject: "alpha-project",
+        betaProject: "beta-project",
+        // Fixture-premise correction (grill Batch 1 Q2, ruling b): one
+        // project is pre-selected at test start, and every project switch
+        // rides the global session search — so the non-archived main-list
+        // probe must be a session the search can reach by a unique query:
+        // the rich-markdown session in the main e2e project.
+        probeTitle: "Render **E2E markdown**",
+      });
+    }
     assert.deepEqual(errors, [], `Browser errors at width ${viewport.width}`);
     console.log(`PASS: ${viewport.width}px browser pagination, branch, markdown, code, tool call, and compaction navigation`);
     await context.tracing.stop();

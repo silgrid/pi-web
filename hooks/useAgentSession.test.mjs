@@ -150,7 +150,19 @@ test("fresh sessions use the preference while persisted and live sessions restor
     preferenceSource,
     /const existingSessionId = session\?\.id;[\s\S]*?useLayoutEffect\(\(\) => \{\s*if \(!existingSessionId && \(!isNew \|\| sessionIdRef\.current\)\) return;\s*setToolPresetState\(getPreferredToolPreset\(\)\)/,
   );
-  assert.match(source, /if \(agentState\?\.running\) \{\s*loadTools\(session\.id\)/);
+  // Tool reload rides actual resumable activity only (wi pi#103): an
+  // alive-but-idle wrapper must not issue a get_tools POST on every reopen —
+  // the preset already comes from the detail payload's toolNames. Streaming/
+  // prompting and bash-running resumes still reload.
+  assert.match(source, /if \(agentState\.state\?\.isStreaming \|\| agentState\.state\?\.isPromptRunning\) \{\s*loadTools\(session\.id\)/);
+  assert.match(source, /if \(agentState\.state\?\.isBashRunning\) \{\s*loadTools\(session\.id\)/);
+  // The idle-wrapper path never reloads tools: loadTools appears in the boot
+  // only inside the two activity gates.
+  assert.equal(
+    (source.match(/loadTools\(session\.id\)/g) ?? []).length,
+    2,
+    "the boot must call loadTools only from the resumable-activity gates",
+  );
   assert.match(source, /d\.toolNames !== undefined \? getPresetFromToolNames\(d\.toolNames\) : CONFIGURED_TOOL_PRESET/);
   assert.match(changeSource, /setPreferredToolPreset\(preset\)/);
   assert.match(changeSource, /type: "set_tools",\s*\.\.\.\(toolNames !== undefined \? \{ toolNames \} : \{\}\),/);
