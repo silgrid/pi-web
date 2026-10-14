@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useLayoutEffect, useState, useCallback, useMemo, useRef, useSyncExternalStore, type CSSProperties, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useState, useCallback, useMemo, useRef, useSyncExternalStore, type CSSProperties, type DragEvent, type ReactNode } from "react";
 import type { SessionInfo } from "@/lib/types";
 import { listSessionFamilies, getSessionFamily, type SessionFamily } from "@/lib/session-family";
 import { loadExplorerOpen, saveExplorerOpen } from "@/lib/file-explorer-state";
@@ -23,6 +23,11 @@ import {
   readExpandedGroupKeys,
   writeExpandedGroupKeys,
 } from "@/lib/pinned-expansion";
+import {
+  applyGroupOrder,
+  listGroupOrder,
+  setGroupOrder,
+} from "@/lib/pinned-group-order";
 import {
   createRowDeleteHandler,
   createRowPathRenameHandler,
@@ -54,6 +59,8 @@ import {
 import { workspaceKeyOf } from "@/lib/workspace-memory";
 import { formatRelativeTime } from "@/lib/i18n/format";
 import { useI18n } from "@/hooks/useI18n";
+import { useIsMobile } from "@/hooks/useIsMobile";
+import { useFilesPlacement } from "@/lib/files-placement";
 import { RunningSessionIndicator } from "@/components/RunningSessionIndicator";
 import { useResizablePanel } from "@/hooks/useResizablePanel";
 import { useScrollbarVisibility } from "@/hooks/useScrollbarVisibility";
@@ -348,6 +355,29 @@ function pinnedGroupContentId(key: string): string {
  * renders the whole header greyed with the missing-directory hint and
  * disables [+].
  */
+/**
+ * Drag-to-reorder wiring handed to a pinned group header (wi B2).
+ * Only non-running groups are draggable (the guard is the running count
+ * from the groupActivity map); the drop TARGET may be any group, running
+ * included — only the dragged item must be idle. Reordering is an
+ * adjacent-swap move modeled on upstream adjacentProjectMove: the dragged
+ * group is removed and reinserted at the drop target's index, and the FULL
+ * key sequence is persisted through lib/pinned-group-order. Keyboard
+ * (menu / hotkey) reordering is deliberately deferred to the backlog per
+ * the work item.
+ */
+interface PinnedGroupReorderProps {
+  /** False for groups with running sessions: not draggable. */
+  draggable: boolean;
+  /** True while this header is the active drop target (highlight). */
+  isDropTarget: boolean;
+  onDragStart: (event: DragEvent<HTMLDivElement>) => void;
+  onDragOver: (event: DragEvent<HTMLDivElement>) => void;
+  onDragLeave: (event: DragEvent<HTMLDivElement>) => void;
+  onDrop: (event: DragEvent<HTMLDivElement>) => void;
+  onDragEnd: () => void;
+}
+
 function PinnedGroupHeader({
   project,
   label,
@@ -356,6 +386,7 @@ function PinnedGroupHeader({
   activity,
   homeDir,
   t,
+  reorder,
   onToggle,
   onUnpin,
   onRename,
@@ -370,6 +401,8 @@ function PinnedGroupHeader({
   activity?: { running: number; unread: number };
   homeDir: string;
   t: (key: string, params?: Record<string, string | number>) => string;
+  /** Drag-to-reorder wiring; absent disables the interaction. */
+  reorder?: PinnedGroupReorderProps;
   onToggle: () => void;
   onUnpin: () => void;
   /** Commits a rename; an empty value clears the display name. */
@@ -394,13 +427,27 @@ function PinnedGroupHeader({
 
   return (
     <div
+      // Drag-to-reorder (wi B2): the whole header row is the drag source
+      // and the drop target. Draggable only for idle groups; a running
+      // group can still be dropped ONTO (target ordering allowed). Dragging
+      // is suspended while renaming so the input keeps normal focus /
+      // selection behavior inside a draggable container.
+      draggable={reorder != null && reorder.draggable && !renaming}
+      onDragStart={reorder?.onDragStart}
+      onDragOver={reorder?.onDragOver}
+      onDragLeave={reorder?.onDragLeave}
+      onDrop={reorder?.onDrop}
+      onDragEnd={reorder?.onDragEnd}
       style={{
         display: "flex",
         alignItems: "center",
         height: "100%",
         paddingRight: 6,
         borderBottom: "1px solid var(--border)",
-        background: "var(--bg)",
+        background: reorder?.isDropTarget ? "var(--bg-selected)" : "var(--bg)",
+        ...(reorder?.isDropTarget
+          ? { outline: "2px dashed var(--accent)", outlineOffset: -2 }
+          : null),
       }}
     >
       {renaming ? (
@@ -808,6 +855,11 @@ export function SessionSidebar({ selectedSessionId, highlightSessionId, followHi
   // expansion state already persist (lib/pinned-expansion.ts), and this
   // transient view state deliberately does not. An absent key = the limit.
   const [pinnedShownExtra, setPinnedShownExtra] = useState<Record<string, number>>({});
+  // Drag-to-reorder (wi B2): the dragged group's key and the header currently
+  // under it. Component state only — the ORDER itself persists through
+  // lib/pinned-group-order; these two just drive the live drag affordance.
+  const [dragGroupKey, setDragGroupKey] = useState<string | null>(null);
+  const [dropTargetGroupKey, setDropTargetGroupKey] = useState<string | null>(null);
   // "Show more" for a group: reveal SHOW_MORE_STEP more rows (uncapped —
   // the row model slices to what exists; overshoot is what flips the footer
   // to "show less").
@@ -857,7 +909,12 @@ export function SessionSidebar({ selectedSessionId, highlightSessionId, followHi
     [pinnedRevision, sidebarHydrated],
   );
   const pinnedProjects = useMemo(
-    () => pinnedEntries.map((entry) => ({ key: customDirectoryIdentity(entry.path), root: entry.path, displayName: entry.displayName })),
+    () => applyGroupOrder(
+      pinnedEntries.map((entry) => ({ key: customDirectoryIdentity(entry.path), root: entry.path, displayName: entry.displayName })),
+      listGroupOrder(),
+    ),
+    // Re-computed whenever the entries refresh (pin/unpin/rename bumps
+    // pinnedRevision); listGroupOrder re-reads the persisted overlay then.
     [pinnedEntries],
   );
   // Optional per-entry display names, keyed by the same normalized identity.
@@ -865,6 +922,23 @@ export function SessionSidebar({ selectedSessionId, highlightSessionId, followHi
     () => new Map(pinnedEntries.map((entry) => [customDirectoryIdentity(entry.path), entry.displayName])),
     [pinnedEntries],
   );
+  // Drag-to-reorder (wi B2): adjacent-swap move modeled on upstream
+  // adjacentProjectMove — the dragged group is removed and reinserted at
+  // the drop target's index (for neighbors that is a plain swap), and the
+  // full key sequence is persisted so a reload restores the order exactly.
+  // The pinnedRevision bump re-runs the entries memo, which re-applies the
+  // stored overlay, so the rows move immediately.
+  const movePinnedGroup = useCallback((draggedKey: string, targetKey: string) => {
+    if (draggedKey === targetKey) return;
+    const keys = pinnedProjects.map((project) => project.key);
+    const draggedIndex = keys.indexOf(draggedKey);
+    const targetIndex = keys.indexOf(targetKey);
+    if (draggedIndex < 0 || targetIndex < 0) return;
+    keys.splice(draggedIndex, 1);
+    keys.splice(targetIndex, 0, draggedKey);
+    setGroupOrder(keys);
+    setPinnedRevision((revision) => revision + 1);
+  }, [pinnedProjects]);
   // A unpinned group leaves no stale pagination entry behind (same cleanup
   // discipline as the expansion keys).
   const pinnedGroupKeysSignature = pinnedProjects.map((project) => project.key).join("\n");
@@ -886,6 +960,36 @@ export function SessionSidebar({ selectedSessionId, highlightSessionId, followHi
   // entries and create folders from the dialog.
   const [addDirectoryOpen, setAddDirectoryOpen] = useState(false);
   const [explorerOpen, setExplorerOpen] = useState(true);
+  // Sessions | Files layout (wi B3): "stacked" is the classic split (the
+  // default and today's behavior — sessions pane, drag handle, explorer
+  // section); "tabs" replaces it with a two-tab switcher. Mobile viewports
+  // ALWAYS use tabs (upstream's rule: stacked = desktop + stacked
+  // preference). The active tab is component state, deliberately not
+  // persisted (a reload returns to the sessions tab).
+  //
+  // State preservation: both layouts render the SAME element sequence from
+  // the same JSX slots — the tab bar is one conditional slot, the sessions
+  // pane and the explorer section ALWAYS render and only toggle
+  // display:none, and the resize handle keeps its slot gated on stacked.
+  // Nothing remounts on a layout switch (or a tab switch), so the
+  // MultiRootFileExplorer instance — expanded roots, selected file, scroll
+  // position — survives both. Do not wrap either pane in differently-keyed
+  // or differently-positioned subtrees.
+  const filesPlacement = useFilesPlacement();
+  const isMobile = useIsMobile();
+  const stackedSidebarLayout = !isMobile && filesPlacement === "stacked";
+  // Verification rewind (mobile e2e regression, plan step-4): the repo's
+  // mobile contract keeps the multi-root explorer reachable without a tab
+  // click — the mobile e2e loop resolves [data-explorer-section] right after
+  // opening the sidebar. So when the viewport forces tabs, the default tab
+  // is "files" (Sessions stays one tap away); desktop tabs mode (the user's
+  // placement choice) defaults to "sessions". An explicit tab click always
+  // wins over the default, and the choice survives layout switches like any
+  // other sidebar state (no remount).
+  const [sidebarTabChoice, setSidebarTab] = useState<"sessions" | "files" | null>(null);
+  const sidebarTab = sidebarTabChoice ?? (isMobile ? "files" : "sessions");
+  const sessionsPaneHidden = !stackedSidebarLayout && sidebarTab !== "sessions";
+  const filesPaneHidden = !stackedSidebarLayout && sidebarTab !== "files";
   const [explorerKey, setExplorerKey] = useState(0);
   const [explorerUploadBusy, setExplorerUploadBusy] = useState(false);
   const [fileSearchOpen, setFileSearchOpen] = useState(false);
@@ -1879,6 +1983,49 @@ export function SessionSidebar({ selectedSessionId, highlightSessionId, followHi
     }
     groupActivity.set(project.key, { running, unread });
   }
+  // Drag-to-reorder wiring for one pinned group header (wi B2): only idle
+  // groups drag (running guard from groupActivity); any group — running
+  // included — may be the drop target. One dragged group at a time; the
+  // drop applies the adjacent-swap move and persists the full order.
+  // Keyboard reorder is deferred to the backlog per the work item.
+  const pinnedGroupDragProps = (project: SidebarProject): PinnedGroupReorderProps => {
+    const running = (groupActivity.get(project.key)?.running ?? 0) > 0;
+    const isDropTarget = dragGroupKey != null && dropTargetGroupKey === project.key && dragGroupKey !== project.key;
+    return {
+      draggable: !running,
+      isDropTarget,
+      onDragStart: (event) => {
+        if (running) {
+          event.preventDefault();
+          return;
+        }
+        event.dataTransfer.setData("text/plain", project.key);
+        event.dataTransfer.effectAllowed = "move";
+        setDragGroupKey(project.key);
+      },
+      onDragOver: (event) => {
+        if (dragGroupKey == null || dragGroupKey === project.key) return;
+        event.preventDefault();
+        event.dataTransfer.dropEffect = "move";
+        if (dropTargetGroupKey !== project.key) setDropTargetGroupKey(project.key);
+      },
+      onDragLeave: () => {
+        if (dropTargetGroupKey === project.key) setDropTargetGroupKey(null);
+      },
+      onDrop: (event) => {
+        if (dragGroupKey == null || dragGroupKey === project.key) return;
+        event.preventDefault();
+        const draggedKey = dragGroupKey;
+        setDragGroupKey(null);
+        setDropTargetGroupKey(null);
+        movePinnedGroup(draggedKey, project.key);
+      },
+      onDragEnd: () => {
+        setDragGroupKey(null);
+        setDropTargetGroupKey(null);
+      },
+    };
+  };
   // One flat row array with cumulative offsets for the whole scroll area.
   // Pinned-group pagination (wi pi#101): groups with more families than the
   // limit get their shown count (limit + revealed extra); smaller groups and
@@ -2204,16 +2351,104 @@ export function SessionSidebar({ selectedSessionId, highlightSessionId, followHi
 
       </div>
 
+      {/* Sessions | Files tabs (wi B3): render ONLY in tabs mode (stacked
+          keeps the classic header + split). One conditional JSX slot between
+          the header and the sessions pane — the panes below keep their
+          positions, so the explorer never remounts when the mode flips. */}
+      {!stackedSidebarLayout && (
+        <div
+          role="tablist"
+          aria-label={t("sidebar.tabsLabel")}
+          style={{
+            display: "flex",
+            alignItems: "stretch",
+            flexShrink: 0,
+            borderBottom: "1px solid var(--border)",
+          }}
+        >
+          <button
+            type="button"
+            role="tab"
+            id="session-sidebar-tab-sessions"
+            aria-selected={sidebarTab === "sessions"}
+            aria-controls="session-sidebar-panel-sessions"
+            tabIndex={sidebarTab === "sessions" ? 0 : -1}
+            onClick={() => setSidebarTab("sessions")}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: 6,
+              flex: 1,
+              height: 30,
+              background: "none",
+              border: "none",
+              borderBottom: sidebarTab === "sessions" ? "2px solid var(--accent)" : "2px solid transparent",
+              color: sidebarTab === "sessions" ? "var(--text)" : "var(--text-muted)",
+              fontSize: 11,
+              fontWeight: 600,
+              letterSpacing: "0.05em",
+              textTransform: "uppercase",
+              cursor: "pointer",
+            }}
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }} aria-hidden="true">
+              <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+            </svg>
+            {t("sidebar.tabSessions")}
+          </button>
+          <button
+            type="button"
+            role="tab"
+            id="session-sidebar-tab-files"
+            aria-selected={sidebarTab === "files"}
+            aria-controls="session-sidebar-panel-files"
+            tabIndex={sidebarTab === "files" ? 0 : -1}
+            onClick={() => setSidebarTab("files")}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: 6,
+              flex: 1,
+              height: 30,
+              background: "none",
+              border: "none",
+              borderBottom: sidebarTab === "files" ? "2px solid var(--accent)" : "2px solid transparent",
+              color: sidebarTab === "files" ? "var(--text)" : "var(--text-muted)",
+              fontSize: 11,
+              fontWeight: 600,
+              letterSpacing: "0.05em",
+              textTransform: "uppercase",
+              cursor: "pointer",
+            }}
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }} aria-hidden="true">
+              <path d="M3 8a2 2 0 0 1 2-2h3.4l1.9 1.9H19a2 2 0 0 1 2 2V17a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+            </svg>
+            {t("sidebar.tabFiles")}
+          </button>
+        </div>
+      )}
+
       {/* Session list — upstream #825 resizable panes: the list pane adopts the
           computed height whenever the explorer pane is open; pi#14 keeps the
           explorer mounted with or without a selected cwd, so no cwd condition. */}
       <div
         ref={sessionPaneRef}
+        id="session-sidebar-panel-sessions"
+        role={stackedSidebarLayout ? undefined : "tabpanel"}
+        aria-labelledby={stackedSidebarLayout ? undefined : "session-sidebar-tab-sessions"}
         style={{
-          display: "flex",
+          // Tabs mode: the pane is either the visible tab (fills the column)
+          // or display:none — NEVER unmounted, so its state survives tab and
+          // layout switches. Stacked mode: today's flex behavior unchanged.
+          display: sessionsPaneHidden ? "none" : "flex",
           flexDirection: "column",
-          flex: explorerOpen
-            ? "0 1 var(--sidebar-session-pane-height, 320px)"
+          flex: stackedSidebarLayout
+            ? explorerOpen
+              ? "0 1 var(--sidebar-session-pane-height, 320px)"
+              : "1 1 auto"
             : "1 1 auto",
           minHeight: SESSION_PANE_MIN_HEIGHT,
           overflow: "hidden",
@@ -2445,6 +2680,7 @@ export function SessionSidebar({ selectedSessionId, highlightSessionId, followHi
                       activity={groupActivity.get(row.project.key)}
                       homeDir={homeDir}
                       t={t}
+                      reorder={pinnedGroupDragProps(row.project)}
                       onToggle={() => handleToggleGroup(row.project.key)}
                       onUnpin={() => togglePin(row.project.root)}
                       onRename={(name) => {
@@ -2549,7 +2785,10 @@ export function SessionSidebar({ selectedSessionId, highlightSessionId, followHi
         )}
       </div>
 
-      {explorerOpen && (
+      {/* Section resize handle (stacked only, wi B3): tabs mode has nothing
+          to resize — the handle keeps its JSX slot but does not render, and
+          the panes' positions are unaffected. */}
+      {stackedSidebarLayout && explorerOpen && (
         <div
           className={`sidebar-section-resize-handle${sessionPaneResizer.isResizing ? " is-resizing" : ""}`}
           data-resize-handle="sidebar-sections"
@@ -2573,9 +2812,16 @@ export function SessionSidebar({ selectedSessionId, highlightSessionId, followHi
           too). The section ref feeds the #825 pane-height computation. */}
       <div
         ref={explorerSectionRef}
+        id="session-sidebar-panel-files"
+        role={stackedSidebarLayout ? undefined : "tabpanel"}
+        aria-labelledby={stackedSidebarLayout ? undefined : "session-sidebar-tab-files"}
           style={{
+            // Tabs mode: the pane is the visible tab or display:none — NEVER
+            // unmounted, so the explorer's expansion/selection/scroll state
+            // survives every tab and layout switch. Stacked mode: today's
+            // flex behavior unchanged.
+            display: filesPaneHidden ? "none" : "flex",
             borderTop: "1px solid var(--border)",
-            display: "flex",
             flexDirection: "column",
             flex: explorerOpen ? "1 1 0" : "0 0 auto",
             minHeight: explorerOpen ? EXPLORER_PANE_MIN_HEIGHT : 0,
