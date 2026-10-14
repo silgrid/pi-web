@@ -67,7 +67,8 @@
     "semver": "7.8.5",
     "undici": "8.11.0",
     "web-push": "^3.6.7",
-    "zod": "^4.3.6"
+    "zod": "^4.3.6",
+    "patch-package": "^8.0.1"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4.2.2",
@@ -87,7 +88,6 @@
     "katex": "^0.16.47",
     "mammoth": "^1.12.0",
     "mermaid": "^11.16.1",
-    "patch-package": "^8.0.1",
     "playwright": "^1.62.1",
     "postcss": "^8.5.26",
     "react-markdown": "^10.1.0",
