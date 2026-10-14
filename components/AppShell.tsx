@@ -10,7 +10,7 @@ import type { ChatScrollPosition } from "@/lib/chat-scroll-position";
 import { FileViewer } from "./FileViewer";
 import { BackgroundTasksPanel } from "./BackgroundTasksPanel";
 import { TabBar, type Tab } from "./TabBar";
-import { openFileTab, saveFileViewerState } from "./file-tab-state";
+import { openFileTab, saveFileViewerState, saveParkedFileViewerState, switchFileWorkspace, type ParkedFileWorkspace } from "./file-tab-state";
 import { SettingsPanel, SettingsSectionIcon } from "./SettingsPanel";
 import { ProjectTrustDialog } from "./ProjectTrustDialog";
 import { BranchNavigator, hasSessionBranches } from "./BranchNavigator";
@@ -81,7 +81,7 @@ import type { ProjectTrustStatus } from "@/lib/api-types";
 import type { ChatInputHandle } from "./ChatInput";
 import type { SessionStatsInfo } from "@/lib/pi-types";
 import type { FileViewerState } from "@/lib/file-viewer-state";
-import type { ToolEntry } from "@/lib/tool-presets";
+import { PRESET_READ_ONLY, type ToolEntry } from "@/lib/tool-presets";
 import { getSessionFamily } from "@/lib/session-family";
 import { getLastSettingsSection, type SettingsSection } from "@/lib/settings-navigation";
 
@@ -94,6 +94,9 @@ type AutoNameStatus =
 
 const TOP_BAR_ICON_BUTTON_SIZE = 36;
 const AGENT_PANEL_WIDTH = 420;
+// pi's built-in tools that never change a file; any other tool may (#1144).
+const READ_ONLY_TOOL_NAMES = new Set(PRESET_READ_ONLY);
+const TOOL_END_REFRESH_MS = 1000;
 
 // Split-view preference (pi#27): tab mode is the DEFAULT; the stored value
 // only exists to honor an explicit opt-out. Absent/corrupt → default ON.
@@ -700,6 +703,12 @@ export function AppShell() {
       if (activeFileTabId !== null) setHistoryExportSessionId(null);
     }
   }, [activeFileTabId]);
+  const fileWorkspaceStatesRef = useRef(new Map<string, ParkedFileWorkspace>());
+  // Bumped on every workspace switch. The active viewer reports its state as
+  // it unmounts, tagged with the generation it rendered in, so the report of a
+  // tab just parked goes to its workspace, not to a same-path tab restored.
+  const [fileWorkspaceGeneration, setFileWorkspaceGeneration] = useState(0);
+  const fileWorkspaceGenerationRef = useRef(0);
   const [terminalTabs, setTerminalTabs] = useState<TerminalTab[]>([]);
   const [terminalsRestored, setTerminalsRestored] = useState(false);
   const rawPanelTabs: Tab[] = [...fileTabs, ...terminalTabs.map((tab) => ({
@@ -748,12 +757,35 @@ export function AppShell() {
   }, [terminalTabs, activeFileTabId, rightPanelOpen, terminalsRestored]);
 
   const handleFileViewerStateChange = useCallback((
+    generation: number,
     tabId: string,
     viewerRevision: number,
     viewerState: FileViewerState,
   ) => {
+    if (generation !== fileWorkspaceGenerationRef.current) {
+      saveParkedFileViewerState(fileWorkspaceStatesRef.current, generation, tabId, viewerRevision, viewerState);
+      return;
+    }
     setFileTabs((prev) => saveFileViewerState(prev, tabId, viewerRevision, viewerState));
   }, []);
+
+  const changeFileWorkspace = useCallback((currentKey: string | null, nextKey: string) => {
+    if (currentKey === nextKey) return;
+    const activeFileId = activeFileTabId?.startsWith("file:") ? activeFileTabId : null;
+    const next = switchFileWorkspace(fileWorkspaceStatesRef.current, currentKey, nextKey, {
+      tabs: fileTabs,
+      activeTabId: activeFileId,
+      open: rightPanelOpen && Boolean(activeFileId),
+    }, fileWorkspaceGenerationRef.current);
+    fileWorkspaceGenerationRef.current += 1;
+    setFileWorkspaceGeneration(fileWorkspaceGenerationRef.current);
+    setFileTabs(next.tabs);
+    // Terminal tabs span workspaces and keep control of the panel while active.
+    if (!activeFileTabId || activeFileId) {
+      setActiveFileTabId(next.activeTabId);
+      setRightPanelOpen(next.open);
+    }
+  }, [activeFileTabId, fileTabs, rightPanelOpen]);
 
   // Same @mention format as the chat input's @ autocomplete, so the agent's
   // read tool resolves it the same way (it strips the @ prefix).
@@ -977,19 +1009,15 @@ export function AppShell() {
     setSystemInfoLoading(false);
     setActiveTopPanel(null);
     if (currentProject !== newProject) {
-      // File tabs are keyed by absolute path, so tabs opened in the previous
-      // project must not linger. Same-project worktree switches keep them.
-      setFileTabs([]);
-      if (!activeFileTabId || activeFileTabId.startsWith("file:")) {
-        setActiveFileTabId(null);
-        setRightPanelOpen(false);
-      }
+      // Keep #281's project isolation, but park each workspace's file tabs
+      // instead of discarding them so they return when the user switches back.
+      changeFileWorkspace(currentProject, newProject);
       // Restore the workspace we switched to: its last open session, or keep
       // the default welcome page when none is remembered.
       if (!skipWorkspaceRestore) restoreWorkspaceContext(newProject, cwd);
     }
     router.replace(typeof window !== "undefined" ? window.location.pathname : "/", { scroll: false });
-  }, [activeCwd, activeFileTabId, invalidateWorkspaceRestore, newSessionCwd, router, selectedSession, restoreWorkspaceContext]);
+  }, [activeCwd, changeFileWorkspace, invalidateWorkspaceRestore, newSessionCwd, router, selectedSession, restoreWorkspaceContext]);
 
   const handleSelectSession = useCallback((session: SessionInfo, isRestore = false, entryId?: string, blockIndex?: number) => {
     setSearchTarget(entryId ? { sessionId: session.id, entryId, blockIndex } : null);
@@ -1003,11 +1031,7 @@ export function AppShell() {
     // Adopt an explicitly selected session before the sidebar reports its cwd.
     const projectKey = workspaceKeyOf(session);
     if (activeProjectKeyRef.current !== projectKey) {
-      setFileTabs([]);
-      if (!activeFileTabId || activeFileTabId.startsWith("file:")) {
-        setActiveFileTabId(null);
-        setRightPanelOpen(false);
-      }
+      changeFileWorkspace(activeProjectKeyRef.current, projectKey);
       setActiveTopPanel(null);
     }
     activeProjectKeyRef.current = projectKey;
@@ -1069,7 +1093,7 @@ export function AppShell() {
     if (!isRestore || new URLSearchParams(window.location.search).get("session") !== session.id) {
       router.replace(`?session=${encodeURIComponent(session.id)}`, { scroll: false });
     }
-  }, [activeCwd, activeFileTabId, invalidateWorkspaceRestore, router, isMobile, newSessionCwd, selectedSession, splitPaneEnabled, focusedPaneId]);
+  }, [activeCwd, changeFileWorkspace, invalidateWorkspaceRestore, router, isMobile, newSessionCwd, selectedSession, splitPaneEnabled, focusedPaneId]);
 
   const handleNewSession = useCallback((sessionId: string, cwd: string) => {
     invalidateWorkspaceRestore();
@@ -1085,6 +1109,14 @@ export function AppShell() {
     }
     const draftKey = `new:${sessionId}:${cwd}`;
     rekeyDraft(parkedNewSessionDraftKey(cwd), draftKey);
+    // Adopt the target project before the sidebar reports its cwd, as an
+    // explicit session pick does. Without a key (Ctrl+Alt+N) the current cwd
+    // keeps its project.
+    const targetProject = (cwd === activeCwd ? activeProjectKeyRef.current : null) ?? cwd;
+    if (activeProjectKeyRef.current !== targetProject) {
+      changeFileWorkspace(activeProjectKeyRef.current, targetProject);
+    }
+    activeProjectKeyRef.current = targetProject;
     activeNewSessionDraftKeyRef.current = draftKey;
     setNewSessionDraftId(sessionId);
     setSelectedSession(null);
@@ -1109,7 +1141,7 @@ export function AppShell() {
       setFocusedPaneId(NEW_SESSION_TAB_ID);
     }
     router.replace(typeof window !== "undefined" ? window.location.pathname : "/", { scroll: false });
-  }, [invalidateWorkspaceRestore, router, isMobile, splitPaneEnabled, paneTabs, translate]);
+  }, [activeCwd, changeFileWorkspace, invalidateWorkspaceRestore, router, isMobile, splitPaneEnabled, paneTabs, translate]);
 
   // The new-session tab's default cwd (pi#21, user-confirmed): the FIRST
   // pinned project, else the default directory, and only then the current
@@ -1333,6 +1365,20 @@ export function AppShell() {
 
   const handleExplorerRefresh = useCallback(() => {
     setExplorerRefreshKey((k) => k + 1);
+  }, []);
+
+  // A run's writes show in the file tree as they happen, not only when it ends
+  // (#1144): at most one refresh a second, after any tool but the read-only ones.
+  const toolEndRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const handleToolEnd = useCallback((toolName: string) => {
+    if (READ_ONLY_TOOL_NAMES.has(toolName) || toolEndRefreshTimerRef.current) return;
+    toolEndRefreshTimerRef.current = setTimeout(() => {
+      toolEndRefreshTimerRef.current = null;
+      setExplorerRefreshKey((k) => k + 1);
+    }, TOOL_END_REFRESH_MS);
+  }, []);
+  useEffect(() => () => {
+    if (toolEndRefreshTimerRef.current) clearTimeout(toolEndRefreshTimerRef.current);
   }, []);
 
   const handleSessionForked = useCallback((newSessionId: string) => {
@@ -3001,6 +3047,7 @@ export function AppShell() {
               newSessionCwd={effectiveNewSessionCwd}
               newSessionDraftKey={newSessionDraftKey}
               onAgentEnd={handleAgentEnd}
+              onToolEnd={handleToolEnd}
               onAttentionNeeded={handleAttentionNeeded}
               onBackgroundTasksEvent={selectedSession ? (event) => handleBackgroundTasksEvent(selectedSession.id, event) : undefined}
               onSessionCreated={handleSessionCreated}
@@ -3239,7 +3286,7 @@ export function AppShell() {
             </>
           ) : activeFileTab?.filePath ? (
             <FileViewer
-              key={`${activeFileTab.id}:${activeFileTab.viewerRevision ?? 0}`}
+              key={`${fileWorkspaceGeneration}:${activeFileTab.id}:${activeFileTab.viewerRevision ?? 0}`}
               filePath={activeFileTab.filePath}
               cwd={activeCwd ?? undefined}
               sourceSessionId={activeFileTab.sourceSessionId}
@@ -3249,6 +3296,7 @@ export function AppShell() {
               initialState={activeFileTab.viewerState}
               watchEnabled={rightPanelOpen}
               onStateChange={(viewerState) => handleFileViewerStateChange(
+                fileWorkspaceGeneration,
                 activeFileTab.id,
                 activeFileTab.viewerRevision ?? 0,
                 viewerState,

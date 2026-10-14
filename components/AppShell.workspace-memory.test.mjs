@@ -52,6 +52,10 @@ test("workspace restoration remains inside the cross-project branch", () => {
     callbackBody("handleCwdChange", "handleSelectSession"),
     /if \(currentProject !== newProject\) \{[\s\S]*?restoreWorkspaceContext\(newProject, cwd\);[\s\S]*?\}/,
   );
+  assert.match(
+    callbackBody("handleNewSession", "hydrateSelectedSession"),
+    /if \(activeProjectKeyRef\.current !== targetProject\) \{\s*changeFileWorkspace\(activeProjectKeyRef\.current, targetProject\);/,
+  );
 });
 
 test("New restores the draft after session navigation and workspace auto-restore", async (t) => {
@@ -94,6 +98,7 @@ test("New restores the draft after session navigation and workspace auto-restore
         bashRecoveryIdRef: { current: 0 },
         cancelEventStreamGrace() {},
         closeEvents() {},
+        changeFileWorkspace() {},
         isMobile: false,
         activeCwd: cwd,
         activeFileTabId: null,

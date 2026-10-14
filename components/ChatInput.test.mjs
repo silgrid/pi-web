@@ -11,7 +11,7 @@ const jiti = createJiti(import.meta.url, {
 });
 const React = await jiti.import("react");
 const { renderToStaticMarkup } = await jiti.import("react-dom/server");
-const { ChatInput, ModelErrorBanner, ModelScopeWarningBanner, canClearBuiltinCommandInput, canRestoreUserMessage, canRunBuiltinSlashCommandWhileStreaming, compressImageFile, cycleListIndex, filterModelOptions, getUpwardMenuMaxHeight, getUserMessageText, getUserMessageDraftImages, isExactSlashCommand, modelSupportsImageInput, replaceLinksWithMarkdown, shouldCompressImageFile } = await jiti.import("./ChatInput.tsx");
+const { ChatInput, ModelErrorBanner, ModelScopeWarningBanner, RUN_END_CLICK_GUARD_MS, canClearBuiltinCommandInput, canRestoreUserMessage, canRunBuiltinSlashCommandWhileStreaming, compressImageFile, cycleListIndex, filterModelOptions, getUpwardMenuMaxHeight, getUserMessageText, getUserMessageDraftImages, isExactSlashCommand, isRunEndStrayClick, modelSupportsImageInput, replaceLinksWithMarkdown, replaceTextareaRange, shouldCompressImageFile } = await jiti.import("./ChatInput.tsx");
 const { ModelSelector } = await jiti.import("./ModelSelector.tsx");
 const { clearDraft, getDraft, mergeRestoredSubmissionDraft, mergeRestoredSubmissionText, rekeyDraft, setDraft } = await jiti.import("@/lib/draft-store.ts");
 const { I18nProvider } = await jiti.import("@/hooks/useI18n");
@@ -108,6 +108,102 @@ test("follow-up shortcuts preserve newline, IME, mobile and completion behavior"
   }
 });
 
+test("file mention insertion uses one native undoable edit", () => {
+  const originalDocument = globalThis.document;
+  const calls = [];
+  const textarea = {
+    value: '@"my/"',
+    selectionStart: 5,
+    selectionEnd: 5,
+    focus() { calls.push(["focus"]); },
+    setSelectionRange(start, end) {
+      this.selectionStart = start;
+      this.selectionEnd = end;
+      calls.push(["selection", start, end]);
+    },
+  };
+  globalThis.document = {
+    execCommand(command, _showUi, text = "") {
+      calls.push(["command", command, text]);
+      if (command === "delete") {
+        textarea.value = textarea.value.slice(0, --textarea.selectionStart) + textarea.value.slice(textarea.selectionEnd);
+        textarea.selectionEnd = textarea.selectionStart;
+      } else if (command === "insertText") {
+        textarea.value = textarea.value.slice(0, textarea.selectionStart) + text + textarea.value.slice(textarea.selectionEnd);
+        textarea.selectionStart += text.length;
+        textarea.selectionEnd = textarea.selectionStart;
+      } else if (command === "forwardDelete") {
+        textarea.value = textarea.value.slice(0, textarea.selectionStart) + textarea.value.slice(textarea.selectionStart + 1);
+      }
+      return true;
+    },
+  };
+
+  try {
+    replaceTextareaRange(textarea, 0, 6, '@"my dir/"', 9);
+    assert.equal(textarea.value, '@"my dir/"');
+    assert.deepEqual(calls, [
+      ["focus"],
+      ...Array.from({ length: 5 }, () => ["command", "delete", ""]),
+      ["command", "insertText", '@"my dir/"'],
+      ["command", "forwardDelete", ""],
+      ["selection", 9, 9],
+    ]);
+
+    calls.length = 0;
+    Object.assign(textarea, { value: "hello selected", selectionStart: 6, selectionEnd: 14 });
+    replaceTextareaRange(textarea, 6, 14, "@file ");
+    assert.equal(textarea.value, "hello @file ");
+    assert.deepEqual(calls, [
+      ["focus"],
+      ["selection", 6, 14],
+      ["command", "insertText", "@file "],
+    ]);
+
+    const source = readFileSync(new URL("./ChatInput.tsx", import.meta.url), "utf8");
+    assert.match(source, /insertText\(text: string\)[\s\S]*?replaceTextareaRange\(ta, start, end, sep \+ text\)/);
+    assert.match(source, /const applyAtCompletion[\s\S]*?replaceTextareaRange\(ta, atQuery\.start, replaceEnd, insert\.text, insert\.cursorOffset\)/);
+  } finally {
+    globalThis.document = originalDocument;
+  }
+});
+
+test("file mention insertion falls back to a plain edit when execCommand refuses", () => {
+  const originalDocument = globalThis.document;
+  const events = [];
+  const textarea = {
+    value: "AAA @re BBB",
+    selectionStart: 7,
+    selectionEnd: 7,
+    focus() {},
+    setSelectionRange(start, end) {
+      this.selectionStart = start;
+      this.selectionEnd = end;
+    },
+    setRangeText(text, start, end, mode) {
+      this.value = this.value.slice(0, start) + text + this.value.slice(end);
+      if (mode === "end") this.selectionStart = this.selectionEnd = start + text.length;
+    },
+    dispatchEvent(event) { events.push([event.type, event.bubbles]); return true; },
+  };
+  globalThis.document = { execCommand: () => false };
+
+  try {
+    replaceTextareaRange(textarea, 4, 7, "@readme.md ");
+    assert.equal(textarea.value, "AAA @readme.md  BBB");
+    assert.equal(textarea.selectionStart, 15);
+    assert.deepEqual(events, [["input", true]]);
+
+    events.length = 0;
+    Object.assign(textarea, { value: "hello selected", selectionStart: 6, selectionEnd: 14 });
+    replaceTextareaRange(textarea, 6, 14, "@file ");
+    assert.equal(textarea.value, "hello @file ");
+    assert.deepEqual(events, [["input", true]]);
+  } finally {
+    globalThis.document = originalDocument;
+  }
+});
+
 test("file mention arrows wrap around the match list", () => {
   const source = ts.createSourceFile("ChatInput.tsx", readFileSync(new URL("./ChatInput.tsx", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
   function findHandler(node) {
@@ -177,6 +273,23 @@ test("shows the follow-up shortcut in the button tooltip", () => {
 
   assert.match(html, /title="Queue this message after the agent finishes \(Alt\/Option\+Enter\)"/);
   assert.match(html, /aria-keyshortcuts="Alt\+Enter"/);
+});
+
+test("ignores a pointer click that reaches Stop's slot just as the run ends", () => {
+  assert.equal(isRunEndStrayClick(1, 0), true);
+  assert.equal(isRunEndStrayClick(2, RUN_END_CLICK_GUARD_MS - 1), true);
+  assert.equal(isRunEndStrayClick(1, RUN_END_CLICK_GUARD_MS), false);
+  assert.equal(isRunEndStrayClick(1, Number.POSITIVE_INFINITY), false, "no run has ended yet");
+  assert.equal(isRunEndStrayClick(0, 0), false, "Enter/Space on a focused button is never a stray click");
+  assert.ok(RUN_END_CLICK_GUARD_MS <= 700, "a deliberate click after a run must not wait noticeably");
+
+  // Stop and Compact share the spot left of the sound toggle, so a double click on Stop
+  // put its second click on Compact once the run ended (#1131).
+  const source = readFileSync(new URL("./ChatInput.tsx", import.meta.url), "utf8");
+  assert.match(source, /useLayoutEffect\(\(\) => \{\s*if \(!isStreaming\) return;\s*return \(\) => \{ runEndedAtRef\.current = performance\.now\(\); \};\s*\}, \[isStreaming\]\);/);
+  assert.match(source, /onClick=\{isCompacting \? onAbortCompaction : \(e\) => \{ if \(!isStrayClick\(e\)\) onCompact\(\); \}\}/);
+  assert.match(source, /onClick=\{\(e\) => \{ if \(!isStreaming && !isStrayClick\(e\)\) setToolDropdownOpen\(\(v\) => !v\); \}\}/);
+  assert.match(source, /onClick=\{onAbort\}/, "Stop itself is never delayed");
 });
 
 test("renders the upstream model error", () => {
@@ -649,6 +762,26 @@ test("renders compact errors above the input as a wrapping alert", () => {
   assert.match(html, /&lt;html&gt;request forbidden&lt;\/html&gt;/);
   assert.match(html, /white-space:pre-wrap/);
   assert.ok(html.indexOf('role="alert"') < html.indexOf("<textarea"));
+});
+
+test("a compact error can be dismissed when the composer is given a handler", () => {
+  const render = (props) => renderToStaticMarkup(
+    React.createElement(
+      I18nProvider,
+      null,
+      React.createElement(ChatInput, {
+        onSend() {},
+        onAbort() {},
+        onCompact() {},
+        isStreaming: false,
+        compactError: "Nothing to compact (session too small)",
+        ...props,
+      }),
+    ),
+  );
+
+  assert.match(render({ onDismissCompactError() {} }), /aria-label="Dismiss compaction error"/);
+  assert.doesNotMatch(render({}), /Dismiss compaction error/);
 });
 
 test("modelSupportsImageInput warns only when modality info is known and lacks image", () => {

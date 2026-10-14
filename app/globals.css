@@ -763,6 +763,8 @@ pre, code {
   margin: 5px 0 8px;
   list-style-position: outside;
 }
+/* Room for the widest bold "N. " marker; MarkdownBody sets the digit count. */
+.markdown-body ol { padding-left: calc(0.8em + var(--ol-marker-digits, 2) * 0.62em); }
 .markdown-body li { margin: 3px 0; padding-left: 2px; }
 .markdown-body ul > li { list-style-type: disc; }
 .markdown-body ol > li { list-style-type: decimal; }
@@ -863,6 +865,7 @@ pre, code {
 }
 .markdown-table-wrap > table { width: max-content; }
 .markdown-body th, .markdown-body td {
+  max-width: 240px;
   border: 0;
   border-bottom: 1px solid var(--border);
   padding: 6px 10px;

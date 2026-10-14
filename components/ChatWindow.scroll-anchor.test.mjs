@@ -19,21 +19,22 @@ test("scroll anchor restore runs on a prepend even when visibleCount already exc
 
 test("sentinel observer is created once per sentinel lifecycle and reads cursor state from the history ref", async () => {
   const source = await readFile(new URL("./ChatWindow.tsx", import.meta.url), "utf8");
-  const effect = source.match(/useEffect\(\(\) => \{\n    const sentinel = sentinelRef\.current;[\s\S]*?\n  \}, \[[^\]]*\]\);/);
+  const effect = source.match(/useEffect\(\(\) => \{\n    const container = scrollContainerRef\.current;[\s\S]*?\n  \}, \[[^\]]*\]\);/);
   assert.ok(effect, "sentinel observer effect must exist");
   assert.match(effect[0], /const history = searchHistoryRef\.current;/,
     "the observer callback must read the history cursor via searchHistoryRef");
-  assert.match(effect[0], /if \(!history\.hasEarlierMessages\) return;/);
   assert.match(effect[0], /const oldestId = history\.historyCursor;/);
   assert.doesNotMatch(effect[0], /historyCursor,/, "the effect deps must not include the history cursor");
-  assert.match(effect[0], /\}, \[hasEarlierMessages, session, activeLeafId, loadContext, sessionIdRef, scrollContainerRef, markPrepended\]\);/,
-    "hasEarlierMessages gates the sentinel's existence, so the observer is created when it flips; the cursor must stay out of the deps so pages do not re-arm the observer (markPrepended, pi#83, is a stable useCallback)");
+  assert.match(effect[0], /if \(!history\.hasEarlierMessages\) \{[\s\S]*?setVisibleCount\(\(current\) => getNextVisibleCount\(current\)\);\s*return;\s*\}/,
+    "nothing older on the server: reaching the sentinel widens the window over rows still hidden (#896)");
+  assert.match(effect[0], /\}, \[sentinel, visibleCount, hasEarlierMessages, session, activeLeafId, loadOlderPage, sessionIdRef, scrollContainerRef, markPrepended\]\);/,
+    "the sentinel is state so a newly mounted one is observed at once, and visibleCount renews the observer when the window grows (#896); the cursor stays out of the deps — cursor state is read from searchHistoryRef, and #1149's requestedCursorRef dedupe keeps a re-created observer from re-fetching the landed page (pi#16); loads go through loadOlderPage (#1149)");
 });
 
 test("pagination captures a full scroll anchor snapshot, not a bare distance", async () => {
   const source = await readFile(new URL("./ChatWindow.tsx", import.meta.url), "utf8");
-  assert.equal((source.match(/captureScrollAnchor\(/g) ?? []).length, 2,
-    "both upward-load capture sites (sentinel and search-locate) must capture the DOM fingerprint");
+  assert.equal((source.match(/captureScrollAnchor\(/g) ?? []).length, 3,
+    "all upward-load capture sites (sentinel fetch, sentinel widen #896, search-locate) must capture the DOM fingerprint");
   assert.doesNotMatch(source, /captureScrollDistance\(/);
   assert.match(source, /const prevScrollAnchorRef = useRef<ScrollAnchorSnapshot \| null>\(null\);/);
 });
