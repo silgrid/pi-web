@@ -2497,7 +2497,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       loadSession(session.id, !cached, true, { force: true }).then((loadedAgentState) => {
         const agentState = loadedAgentState as { running: boolean; state?: AgentStateResponse } | null;
         if (agentState?.running) {
-          loadTools(session.id);
+          // Tool reload rides actual resumable activity only: an alive-but-idle
+          // wrapper (any previously opened session reports running:true from
+          // its live wrapper) must not issue a get_tools POST on every reopen —
+          // the preset already came from the detail payload's toolNames above,
+          // and the stray POST lands inside the archive pass's no-mutation
+          // windows (wi pi#103 e2e: opening a session from the archive view
+          // must not change anything but the view).
+          if (agentState.state?.isStreaming || agentState.state?.isPromptRunning) {
+            loadTools(session.id);
+          }
           if (agentState.state?.isStreaming || agentState.state?.isPromptRunning) {
             sdkAgentActiveRef.current = Boolean(agentState.state.isStreaming);
             rpcPromptPendingRef.current = Boolean(agentState.state.isPromptRunning);
@@ -2510,6 +2519,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             }
           }
           if (agentState.state?.isBashRunning) {
+            loadTools(session.id);
             bashRunningRef.current = true;
             setBashRunning(true);
             void waitForBashSettlement(session.id);
