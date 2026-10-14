@@ -46,6 +46,7 @@ import {
   sidebarRowsHeight,
   SESSION_LIST_ITEM_HEIGHT,
   type GroupEmptyRow,
+  type GroupMoreRow,
   type SessionRow,
   type SidebarRow,
   type SidebarProject,
@@ -219,6 +220,11 @@ const SESSION_PANE_DEFAULT_HEIGHT = 320;
 const SESSION_PANE_MIN_HEIGHT = 80;
 const EXPLORER_PANE_MIN_HEIGHT = 120;
 const SESSION_PANE_MAX_HEIGHT = 1600;
+/** Pinned-group pagination (wi pi#101): rows a group shows before its
+ *  "show more" footer (upstream v0.12.0 value). */
+const PINNED_VISIBLE_LIMIT = 8;
+/** How many more rows each pinned-group "show more" click reveals. */
+const SHOW_MORE_STEP = 20;
 /** Stable empty set for the server-filter match fallback (a mismatched key
  *  must read as "no server matches", never as a new Set per render). */
 const EMPTY_SERVER_FILTER_MATCH: ReadonlySet<string> = new Set<string>();
@@ -786,6 +792,26 @@ export function SessionSidebar({ selectedSessionId, highlightSessionId, followHi
   // and the first client render agree (hydration), then restores the persisted
   // state after mount — the same pattern as the explorerOpen preference.
   const [expandedGroupKeys, setExpandedGroupKeys] = useState<ReadonlySet<string>>(() => new Set());
+  // Pinned-group pagination (wi pi#101): per-group rows shown past
+  // PINNED_VISIBLE_LIMIT. Component state only — the pin order and the
+  // expansion state already persist (lib/pinned-expansion.ts), and this
+  // transient view state deliberately does not. An absent key = the limit.
+  const [pinnedShownExtra, setPinnedShownExtra] = useState<Record<string, number>>({});
+  // "Show more" for a group: reveal SHOW_MORE_STEP more rows (uncapped —
+  // the row model slices to what exists; overshoot is what flips the footer
+  // to "show less").
+  const handlePinnedGroupShowMore = useCallback((groupKey: string, current: number) => {
+    setPinnedShownExtra((prev) => ({ ...prev, [groupKey]: current + SHOW_MORE_STEP }));
+  }, []);
+  // "Show less": back to the base limit (delete the entry).
+  const handlePinnedGroupShowLess = useCallback((groupKey: string) => {
+    setPinnedShownExtra((prev) => {
+      if (!Object.hasOwn(prev, groupKey)) return prev;
+      const next = { ...prev };
+      delete next[groupKey];
+      return next;
+    });
+  }, []);
   // Pinned groups (and their expansion state) come from localStorage, which is
   // unavailable during server rendering: the sidebar starts in its pre-feature
   // layout and hydrates the groups after mount so users with pins do not hit a
@@ -828,6 +854,17 @@ export function SessionSidebar({ selectedSessionId, highlightSessionId, followHi
     () => new Map(pinnedEntries.map((entry) => [customDirectoryIdentity(entry.path), entry.displayName])),
     [pinnedEntries],
   );
+  // A unpinned group leaves no stale pagination entry behind (same cleanup
+  // discipline as the expansion keys).
+  const pinnedGroupKeysSignature = pinnedProjects.map((project) => project.key).join("\n");
+  useEffect(() => {
+    setPinnedShownExtra((prev) => {
+      const keys = new Set(pinnedProjects.map((project) => project.key));
+      const kept = Object.entries(prev).filter(([key]) => keys.has(key));
+      return kept.length === Object.keys(prev).length ? prev : Object.fromEntries(kept);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pinnedGroupKeysSignature]);
   const [customPathOpen, setCustomPathOpen] = useState(false);
   const [customPathValue, setCustomPathValue] = useState(loadLastCustomCwd);
   const [customPathError, setCustomPathError] = useState<string | null>(null);
@@ -1719,17 +1756,30 @@ export function SessionSidebar({ selectedSessionId, highlightSessionId, followHi
     groupActivity.set(project.key, { running, unread });
   }
   // One flat row array with cumulative offsets for the whole scroll area.
+  // Pinned-group pagination (wi pi#101): groups with more families than the
+  // limit get their shown count (limit + revealed extra); smaller groups and
+  // absent entries render every row, so the default layout is unchanged.
+  const groupVisibleCounts = new Map<string, number>();
+  for (const project of pinnedProjects) {
+    if ((familiesByProject.get(project.key) ?? []).length <= PINNED_VISIBLE_LIMIT) continue;
+    const extra = pinnedShownExtra[project.key];
+    groupVisibleCounts.set(
+      project.key,
+      PINNED_VISIBLE_LIMIT + (typeof extra === "number" && extra > 0 ? Math.floor(extra) : 0),
+    );
+  }
   const sidebarRows = buildSidebarRows({
     pinnedProjects,
     familiesByProject,
     expandedKeys: expandedGroupKeys,
     mainFamilies,
+    groupVisibleCounts,
   });
   // Group rows by owning project, for the per-group content containers.
   // Headers never enter (their groupKey slot is null), so the value type
   // excludes GroupHeaderRow and the container render can narrow to
-  // session vs empty hint alone.
-  const groupRowsByKey = new Map<string, (SessionRow | GroupEmptyRow)[]>();
+  // session / empty hint / pagination footer alone.
+  const groupRowsByKey = new Map<string, (SessionRow | GroupEmptyRow | GroupMoreRow)[]>();
   for (const row of sidebarRows) {
     if (row.kind === "groupHeader") continue;
     const groupKey = row.groupKey;
@@ -2131,6 +2181,48 @@ export function SessionSidebar({ selectedSessionId, highlightSessionId, followHi
                         >
                           {t("sidebar.pinnedGroupNoSessions")}
                         </div>
+                      ) : row.kind === "groupMore" ? (
+                        <button
+                          key={row.key}
+                          // Rows remain hidden ("show more · N", revealing
+                          // SHOW_MORE_STEP more) or the click already revealed
+                          // everything ("show less", back to the limit).
+                          onClick={() => row.hiddenCount > 0
+                            ? handlePinnedGroupShowMore(
+                                row.groupKey,
+                                typeof pinnedShownExtra[row.groupKey] === "number" && pinnedShownExtra[row.groupKey] > 0
+                                  ? Math.floor(pinnedShownExtra[row.groupKey])
+                                  : 0,
+                              )
+                            : handlePinnedGroupShowLess(row.groupKey)}
+                          title={row.hiddenCount > 0
+                            ? t("sidebar.showMore", { count: row.hiddenCount })
+                            : t("sidebar.showLess")}
+                          aria-label={row.hiddenCount > 0
+                            ? t("sidebar.showMore", { count: row.hiddenCount })
+                            : t("sidebar.showLess")}
+                          style={{
+                            position: "absolute",
+                            top: row.offset - contentTop,
+                            left: 0,
+                            right: 0,
+                            height: row.height,
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "flex-start",
+                            paddingLeft: 28,
+                            fontSize: 11,
+                            color: "var(--accent)",
+                            background: "none",
+                            border: "none",
+                            cursor: "pointer",
+                            padding: 0,
+                          }}
+                        >
+                          {row.hiddenCount > 0
+                            ? t("sidebar.showMore", { count: row.hiddenCount })
+                            : t("sidebar.showLess")}
+                        </button>
                       ) : (
                         <div
                           key={row.key}

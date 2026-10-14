@@ -436,6 +436,8 @@ export const zhCNLocale: LocalePlugin = {
     "sidebar.noSessions": "未找到会话",
     "sidebar.agentRunning": "Agent 运行中…",
     "sidebar.awaitingInput": "等待输入",
+    "sidebar.showMore": "显示更多 · {count}",
+    "sidebar.showLess": "显示更少",
     "sidebar.newActivity": "有新活动",
     "sidebar.newSessionActivity": "会话有新活动",
     "sidebar.deleteSession": "删除 {title}？",

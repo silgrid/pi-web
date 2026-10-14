@@ -16,6 +16,9 @@ export const SESSION_LIST_ITEM_HEIGHT = 54;
 /** Height of a pinned-group header row and of the empty-group hint row. */
 export const GROUP_HEADER_HEIGHT = 40;
 
+/** Height of a pinned-group's show-more / show-less footer row (wi pi#101). */
+export const GROUP_MORE_HEIGHT = 32;
+
 /** A pinned project as the row model needs it: stable key + display root. */
 export interface SidebarProject {
   key: string;
@@ -50,7 +53,20 @@ export interface GroupEmptyRow {
   height: number;
 }
 
-export type SidebarRow = GroupHeaderRow | SessionRow | GroupEmptyRow;
+/** A pinned group's pagination footer (wi pi#101): rendered when the group's
+ *  session rows are cut at a shown count. Carries how many rows remain
+ *  hidden so the label can say "show more · N", or 0 when everything is
+ *  shown and the footer reads "show less" (reset to the limit). */
+export interface GroupMoreRow {
+  kind: "groupMore";
+  key: string;
+  groupKey: string;
+  hiddenCount: number;
+  offset: number;
+  height: number;
+}
+
+export type SidebarRow = GroupHeaderRow | SessionRow | GroupEmptyRow | GroupMoreRow;
 
 export interface BuildSidebarRowsInput {
   /** Pinned projects, most-recently-pinned first. */
@@ -61,6 +77,12 @@ export interface BuildSidebarRowsInput {
   expandedKeys: ReadonlySet<string>;
   /** Main-list families rendered below the pinned groups. */
   mainFamilies: readonly SessionFamily[];
+  /** Per-pinned-group shown row counts (wi pi#101 pagination). An absent
+   *  key means no limit: every session row renders and no footer row is
+   *  emitted — the default behavior is byte-identical to before. The caller
+   *  only sets entries for groups over their base limit; that rule lives in
+   *  the component, which owns the limit. */
+  groupVisibleCounts?: ReadonlyMap<string, number>;
 }
 
 /**
@@ -75,6 +97,7 @@ export function buildSidebarRows({
   familiesByProject,
   expandedKeys,
   mainFamilies,
+  groupVisibleCounts,
 }: BuildSidebarRowsInput): SidebarRow[] {
   const rows: SidebarRow[] = [];
   let offset = 0;
@@ -83,7 +106,8 @@ export function buildSidebarRows({
   type PushableRow =
     | Omit<GroupHeaderRow, "offset">
     | Omit<SessionRow, "offset">
-    | Omit<GroupEmptyRow, "offset">;
+    | Omit<GroupEmptyRow, "offset">
+    | Omit<GroupMoreRow, "offset">;
   const push = (row: PushableRow): void => {
     const height = row.height;
     rows.push({ ...row, offset } as SidebarRow);
@@ -108,13 +132,23 @@ export function buildSidebarRows({
       });
       continue;
     }
-    for (const family of families) {
+    for (const family of families.slice(0, groupVisibleCounts?.get(project.key) ?? families.length)) {
       push({
         kind: "session",
         key: family.root.id,
         family,
         groupKey: project.key,
         height: SESSION_LIST_ITEM_HEIGHT,
+      });
+    }
+    const shownCount = groupVisibleCounts?.get(project.key);
+    if (shownCount !== undefined && (families.length > shownCount || shownCount > families.length)) {
+      push({
+        kind: "groupMore",
+        key: `group-more:${project.key}`,
+        groupKey: project.key,
+        hiddenCount: Math.max(0, families.length - shownCount),
+        height: GROUP_MORE_HEIGHT,
       });
     }
   }
