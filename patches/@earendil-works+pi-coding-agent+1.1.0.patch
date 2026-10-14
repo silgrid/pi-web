@@ -1,0 +1,12 @@
+diff --git a/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js b/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js
+index c5ad719..7f3d511 100644
+--- a/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js
++++ b/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js
+@@ -3452,6 +3452,7 @@ export class AgentSession {
+             const projectedAssistants = new Set(projection.entries.flatMap((entry) => entry.messages.some((message) => message.role === "assistant" &&
+                 message.stopReason !== "aborted" &&
+                 message.stopReason !== "error" &&
++                message.usage &&
+                 calculateContextTokens(message.usage) > 0)
+                 ? [entry.sourceEntry.id]
+                 : []));
