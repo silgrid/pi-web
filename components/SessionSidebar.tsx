@@ -1710,28 +1710,41 @@ export function SessionSidebar({ selectedSessionId, highlightSessionId, followHi
   // pi#82: the age window composes AFTER the worker filter. day-granularity
   // means a stale `now` inside a cached memo never moves a boundary visibly;
   // the memo recomputes whenever the list or the setting changes.
+  // pi#103: the archived-exclusion composes FIRST — ahead of the worker
+  // filter/reveal toggle and the age window — so an archived id never
+  // renders regardless of the reveal toggle: a re-revealed worker session
+  // renders, an archived one never does. allSessions itself stays the full
+  // universe (the archive view, the search badge, the prune, and
+  // unread/running bookkeeping all need it).
+  const unarchivedSessions = useMemo(
+    () => archivedSessionIds.size === 0
+      ? allSessions
+      : allSessions.filter((session) => !archivedSessionIds.has(session.id)),
+    [allSessions, archivedSessionIds],
+  );
   const visibleSessions = useMemo(
     () => filterSessionsByAge(
       showFilteredSessions || sessionFilterPatterns.length === 0
-        ? allSessions
-        : allSessions.filter((session) => (
+        ? unarchivedSessions
+        : unarchivedSessions.filter((session) => (
           !isSessionFiltered(session, sessionFilterPatterns)
           && !serverFilterMatchedIds.has(session.id)
         )),
       sessionAgeFilterDays,
     ),
-    [allSessions, showFilteredSessions, sessionFilterPatterns, serverFilterMatchedIds, sessionAgeFilterDays],
+    [unarchivedSessions, showFilteredSessions, sessionFilterPatterns, serverFilterMatchedIds, sessionAgeFilterDays],
   );
   // Hidden-count affordance (wi pi#65): the exact number of sessions the
-  // active patterns hide, computed over allSessions — independent of the
-  // reveal toggle so the badge stays live in both states (clicking it
-  // flips the toggle through the shared store, so Settings updates too).
-  // Zero patterns (hiding disabled) reads as 0 and renders no badge.
+  // active patterns hide, computed over allSessions MINUS archived ids
+  // (pi#103) — independent of the reveal toggle so the badge stays live in
+  // both states (clicking it flips the toggle through the shared store, so
+  // Settings updates too). Zero patterns (hiding disabled) reads as 0 and
+  // renders no badge. Archived sessions never count as hidden.
   const hiddenSessionCount = useMemo(
     () => sessionFilterPatterns.length > 0
-      ? countFilteredSessions(allSessions, sessionFilterPatterns)
+      ? countFilteredSessions(unarchivedSessions, sessionFilterPatterns)
       : 0,
-    [allSessions, sessionFilterPatterns],
+    [unarchivedSessions, sessionFilterPatterns],
   );
   // Reveal-mode marking (wi pi#65): ids of exactly the sessions the
   // patterns hide. Computed only when the reveal toggle is ON and patterns
