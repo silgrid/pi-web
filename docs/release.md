@@ -19,6 +19,29 @@ The workflow itself upgrades npm to ≥ 11.5.1 (`npm install -g npm@11`) because
 
 Use this checklist from a clean `main` checkout.
 
+## 0.5 Actions-enabled check (fork gotcha, check EVERY release)
+
+`silgrid/pi-web` is a **fork**, and GitHub disables Actions on forks
+independently of the Settings → Actions toggle (the REST
+`actions/permissions` flag can read `enabled: true` while runs still do
+not trigger — measured 2026-10-13, tag v0.0.24: tag push produced no run,
+dispatch answered HTTP 422 "Actions has been disabled for this
+repository", and the previous 7 PRs' CI had silently not run since Oct 3).
+
+Before cutting a release, verify a run can start:
+
+```bash
+gh workflow run release.yml --ref main   # or dispatch on the release tag
+gh run list --workflow=release.yml --limit 1
+```
+
+If the dispatch answers HTTP 422 "Actions has been disabled", open the
+repo's **Actions tab** in a browser and click the enable button on the
+"Workflows aren't being run on this forked repository" banner, then
+dispatch again. (PR CI silently not running for recent PRs is the same
+symptom — do not trust merged-PR checkmarks as release evidence when this
+state is active.)
+
 ## 1. Preflight
 
 ```bash
