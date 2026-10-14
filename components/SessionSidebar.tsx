@@ -850,6 +850,7 @@ export function SessionSidebar({ selectedSessionId, highlightSessionId, followHi
   const [fileManager, setFileManager] = useState<FileManagerAvailability | null>(null);
   const [fileManagerError, setFileManagerError] = useState<string | null>(null);
   const [runningSessionIds, setRunningSessionIds] = useState<Set<string>>(() => new Set());
+  const [awaitingSessionIds, setAwaitingSessionIds] = useState<Set<string>>(() => new Set());
   const [unreadSessionIds, setUnreadSessionIds] = useState<Set<string>>(() => loadUnreadSessionIds());
   const previousRunningSessionIdsRef = useRef<Set<string>>(new Set());
   const currentSuppressedCompletionSessionIdsRef = useRef<Set<string>>(new Set());
@@ -949,6 +950,7 @@ export function SessionSidebar({ selectedSessionId, highlightSessionId, followHi
         sessions: SessionInfo[];
         sessionListVersion: number;
         runningSessionIds?: string[];
+        awaitingSessionIds?: string[];
         completionNotificationSuppressedSessionIds?: string[];
       };
       if (loadId !== sessionLoadIdRef.current) return;
@@ -961,6 +963,7 @@ export function SessionSidebar({ selectedSessionId, highlightSessionId, followHi
           data.completionNotificationSuppressedSessionIds ?? [],
         );
         setRunningSessionIds(new Set(data.runningSessionIds ?? []));
+        setAwaitingSessionIds(new Set(data.awaitingSessionIds ?? []));
       }
       // Drop markers for deleted sessions and for subagents, whose completion
       // is intentionally silent even if an older client marked them unread.
@@ -1110,6 +1113,7 @@ export function SessionSidebar({ selectedSessionId, highlightSessionId, followHi
         const data = await res.json() as {
           sessionListVersion: number;
           runningSessionIds?: string[];
+          awaitingSessionIds?: string[];
           completionNotificationSuppressedSessionIds?: string[];
           recentSessionWrites?: { sessionId?: string; path: string; generation: number }[];
         };
@@ -1119,6 +1123,7 @@ export function SessionSidebar({ selectedSessionId, highlightSessionId, followHi
           data.completionNotificationSuppressedSessionIds ?? [],
         );
         setRunningSessionIds(new Set(data.runningSessionIds ?? []));
+        setAwaitingSessionIds(new Set(data.awaitingSessionIds ?? []));
         // Detect that the currently selected session was written by another
         // pi process (TUI / another pi-web window). The first observation of a
         // session only baselines its generation; subsequent rises notify the
@@ -1813,6 +1818,7 @@ export function SessionSidebar({ selectedSessionId, highlightSessionId, followHi
         session={displaySession}
         isSelected={familySessions.some((session) => session.id === effectiveHighlightSessionId)}
         isRunning={familySessions.some((session) => runningSessionIds.has(session.id))}
+        isAwaiting={familySessions.some((session) => awaitingSessionIds.has(session.id))}
         isUnread={familySessions.some((session) => unreadSessionIds.has(session.id))}
         isFiltered={familyIsFiltered}
         onClick={() => handleSelectSessionFromList(family.root)}
@@ -2420,6 +2426,38 @@ export function SessionSidebar({ selectedSessionId, highlightSessionId, followHi
 }
 
 
+/**
+ * The inline "awaiting input" marker (wi pi#101): a running session parked
+ * on an extension dialog or human question. Static by contrast with the
+ * running spinner — the run is not moving — and amber by contrast with the
+ * accent-blue spinner and cyan unread dot, so all three row states stay
+ * distinguishable at a glance.
+ */
+function AwaitingInputIndicator() {
+  const { t } = useI18n();
+  return (
+    <span
+      title={t("sidebar.awaitingInput")}
+      aria-label={t("sidebar.awaitingInput")}
+      style={{
+        width: 14,
+        height: 14,
+        display: "inline-flex",
+        alignItems: "center",
+        justifyContent: "center",
+        flexShrink: 0,
+        color: "#d97706",
+      }}
+    >
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true" style={{ display: "block" }}>
+        <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="2" />
+        <path d="M9.4 9.1a2.6 2.6 0 1 1 3.7 2.4c-.7.3-1.1.8-1.1 1.5v.2" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+        <circle cx="12" cy="16.6" r="1.1" fill="currentColor" />
+      </svg>
+    </span>
+  );
+}
+
 function UnreadSessionIndicator() {
   const { t } = useI18n();
   return (
@@ -2493,6 +2531,7 @@ function SessionItem({
   session,
   isSelected,
   isRunning,
+  isAwaiting,
   isUnread,
   isFiltered = false,
   onClick,
@@ -2508,6 +2547,11 @@ function SessionItem({
   session: SessionInfo;
   isSelected: boolean;
   isRunning?: boolean;
+  /** Awaiting input (wi pi#101): the run is parked on an extension dialog
+   *  or a human question. Takes the row's inline indicator slot over the
+   *  running spinner — the session is not making progress, it waits on a
+   *  person. */
+  isAwaiting?: boolean;
   isUnread?: boolean;
   /** Reveal-mode marking (wi pi#65): the row matches the active session
    *  filter and is visible only because the reveal toggle is ON — rendered
@@ -2791,7 +2835,9 @@ function SessionItem({
               )}
             </div>
             <div style={{ marginTop: 2, display: "flex", alignItems: "center", gap: 8, color: "var(--text-dim)", fontSize: 11, minWidth: 0 }}>
-              {isRunning ? (
+              {isAwaiting ? (
+                <AwaitingInputIndicator />
+              ) : isRunning ? (
                 <RunningSessionIndicator />
               ) : isUnread ? (
                 <UnreadSessionIndicator />

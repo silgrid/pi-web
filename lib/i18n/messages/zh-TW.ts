@@ -433,6 +433,7 @@ export const zhTWLocale: LocalePlugin = {
     "sidebar.loading": "載入中...",
     "sidebar.noSessions": "找不到工作階段",
     "sidebar.agentRunning": "Agent 執行中…",
+    "sidebar.awaitingInput": "等待輸入",
     "sidebar.newActivity": "有新活動",
     "sidebar.newSessionActivity": "工作階段有新活動",
     "sidebar.deleteSession": "刪除 {title}？",
