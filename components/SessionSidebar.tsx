@@ -61,6 +61,13 @@ import { createDirectoryPinFlow } from "@/lib/custom-directory-pin";
 import { MultiRootFileExplorer, type MultiRootFileExplorerHandle } from "./MultiRootFileExplorer";
 import { DismissButton } from "./DismissButton";
 import { SessionSearch } from "./SessionSearch";
+import {
+  ARCHIVED_SESSIONS_STORAGE_KEY,
+  loadArchivedSessionIds,
+  pruneArchivedSessionIds,
+  saveArchivedSessionIds,
+  sessionArchiveStorage,
+} from "@/lib/session-archive";
 
 /** Client-side temporary session id — pi spawns lazily on first message. */
 function newTempSessionId(): string {
@@ -851,6 +858,14 @@ export function SessionSidebar({ selectedSessionId, highlightSessionId, followHi
   const [fileManagerError, setFileManagerError] = useState<string | null>(null);
   const [runningSessionIds, setRunningSessionIds] = useState<Set<string>>(() => new Set());
   const [unreadSessionIds, setUnreadSessionIds] = useState<Set<string>>(() => loadUnreadSessionIds());
+  // Archived sessions (wi pi#103, sidebar A1): pure client-side state. The
+  // set persists in localStorage (the unread-ids precedent) and is never
+  // sent to the server — archiving/unarchiving mutates this set only, so
+  // no chat tab, selection, or delete path is involved. Lazily initialized
+  // SSR-safely like unread: null storage on the server reads as empty.
+  const [archivedSessionIds, setArchivedSessionIds] = useState<ReadonlySet<string>>(
+    () => new Set(loadArchivedSessionIds(sessionArchiveStorage())),
+  );
   const previousRunningSessionIdsRef = useRef<Set<string>>(new Set());
   const currentSuppressedCompletionSessionIdsRef = useRef<Set<string>>(new Set());
   const previousSuppressedCompletionSessionIdsRef = useRef<Set<string>>(new Set());
@@ -974,6 +989,16 @@ export function SessionSidebar({ selectedSessionId, highlightSessionId, followHi
         const next = new Set([...prev].filter((id) => unreadEligibleIds.has(id)));
         return next.size === prev.size ? prev : next;
       });
+      // Prune the archive set against the loaded sessions (spec: deleting an
+      // archived session — from the CLI, another tab, or anywhere outside
+      // this sidebar — removes it from the archive set so N sheds ghosts).
+      // Same shape as the unread prune above: a no-op keeps the reference.
+      const loadedSessionIds = new Set(data.sessions.map((session) => session.id));
+      setArchivedSessionIds((prev) =>
+        pruneArchivedSessionIds(
+          prev,
+          [...prev].filter((id) => !loadedSessionIds.has(id)),
+        ));
       setError(null);
     } catch (e) {
       if (loadId === sessionLoadIdRef.current) setError(String(e));
@@ -1079,6 +1104,57 @@ export function SessionSidebar({ selectedSessionId, highlightSessionId, followHi
   useEffect(() => {
     saveUnreadSessionIds(unreadSessionIds);
   }, [unreadSessionIds]);
+
+  // ── Archived sessions (wi pi#103, sidebar A1) ──
+  // Archiving/unarchiving are local set mutations ONLY: no fetch, no tab or
+  // selection change, no delete path. Every rendered-list exclusion and the
+  // archive view are pure functions of this set, so unarchiving restores the
+  // prior behavior exactly (the row re-enters every list it left).
+  const archiveSession = useCallback((id: string) => {
+    setArchivedSessionIds((prev) => {
+      if (prev.has(id)) return prev;
+      const next = new Set(prev);
+      next.add(id);
+      return next;
+    });
+  }, []);
+  const unarchiveSession = useCallback((id: string) => {
+    setArchivedSessionIds((prev) => pruneArchivedSessionIds(prev, [id]));
+  }, []);
+
+  // Persist the archive set so it survives a browser refresh (same shape and
+  // empty-key-removal rule as the unread markers above).
+  useEffect(() => {
+    saveArchivedSessionIds(archivedSessionIds, sessionArchiveStorage());
+  }, [archivedSessionIds]);
+
+  // Running activity forces an unarchive (spec: a session that starts
+  // running again must leave the archive — capsule sync, a new prompt).
+  // Keyed on the running set so it covers both newly-running sessions and
+  // ones already running at snapshot time. Passive unread never triggers
+  // this: only running ids are removed here.
+  useEffect(() => {
+    if (runningSessionIds.size === 0) return;
+    setArchivedSessionIds((prev) => pruneArchivedSessionIds(prev, runningSessionIds));
+  }, [runningSessionIds]);
+
+  // Cross-tab sync (the useFontPreferences storage-event precedent): a
+  // foreign tab's write reloads the set into this tab's state. The reload is
+  // diff-guarded so identical values never bounce a write back (the persist
+  // effect above would otherwise re-emit the same value in a loop).
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const onArchiveStorage = (event: StorageEvent) => {
+      if (event.key !== ARCHIVED_SESSIONS_STORAGE_KEY) return;
+      setArchivedSessionIds((prev) => {
+        const next = new Set(loadArchivedSessionIds(sessionArchiveStorage()));
+        if (next.size === prev.size && [...next].every((id) => prev.has(id))) return prev;
+        return next;
+      });
+    };
+    window.addEventListener("storage", onArchiveStorage);
+    return () => window.removeEventListener("storage", onArchiveStorage);
+  }, []);
 
   useEffect(() => {
     let stopped = false;
