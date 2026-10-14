@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getSessionListVersion, resolveSessionIdByPath } from "@/lib/session-reader";
 import { getRecentSessionWrites, type SessionWriteEvent } from "@/lib/session-watcher";
 import {
+  getAwaitingRpcSessionIds,
   getCompletionNotificationSuppressedRpcSessionIds,
   getRunningRpcSessionIds,
 } from "@/lib/rpc-manager";
@@ -30,6 +31,7 @@ export async function GET() {
     {
       sessionListVersion: getSessionListVersion(),
       runningSessionIds: getRunningRpcSessionIds(),
+      awaitingSessionIds: getAwaitingRpcSessionIds(),
       completionNotificationSuppressedSessionIds: getCompletionNotificationSuppressedRpcSessionIds(),
       recentSessionWrites: await getRecentSessionWritePayload(),
     },

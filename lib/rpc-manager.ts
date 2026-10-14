@@ -134,6 +134,26 @@ type ActiveCustomUi = {
   settled: boolean;
 };
 
+/**
+ * A request whose answer gates the run: pi's select / confirm / input / editor
+ * dialogs, or a custom overlay that has not been closed. Everything else
+ * (notify, setStatus, setWidget, …) only tells the UI something, so only these
+ * park a running session on a person.
+ */
+function isBlockingExtensionUiRequest(request: ExtensionUiRequest): boolean {
+  switch (request.method) {
+    case "select":
+    case "confirm":
+    case "input":
+    case "editor":
+      return true;
+    case "custom":
+      return request.closed !== true;
+    default:
+      return false;
+  }
+}
+
 type ExtensionUiRequestBody = Record<string, unknown> & {
   method: ExtensionUiRequest["method"];
   timeout?: number;
@@ -422,6 +442,21 @@ export class AgentSessionWrapper {
 
   isRunning(): boolean {
     return this._alive && (this.pendingPromptCount > 0 || this.inner.isStreaming || this.inner.isCompacting || this.inner.isBashRunning);
+  }
+
+  /**
+   * True while an extension's blocking dialog is unanswered: select, confirm,
+   * input, editor, or a custom overlay still open. The run is parked on a promise
+   * only the user can settle, so the sidebar shows awaiting input rather than the
+   * running spinner. Never true for an idle session: a custom overlay that
+   * outlives its turn is not a parked run.
+   */
+  isAwaitingInput(): boolean {
+    if (!this.isRunning()) return false;
+    for (const request of this.pendingUiRequests.values()) {
+      if (isBlockingExtensionUiRequest(request as unknown as ExtensionUiRequest)) return true;
+    }
+    return false;
   }
 
   /**
@@ -2404,6 +2439,19 @@ export function getRunningRpcSessionIds(): string[] {
   const ids = new Set<string>();
   for (const [sessionId, session] of getRegistry()) {
     if (session.isRunning()) ids.add(session.sessionId || sessionId);
+  }
+  return [...ids];
+}
+
+/**
+ * The running sessions parked on an extension's dialog, a subset of
+ * getRunningRpcSessionIds(): same poll, so the sidebar can tell a run that needs
+ * a person from one that is still working.
+ */
+export function getAwaitingRpcSessionIds(): string[] {
+  const ids = new Set<string>();
+  for (const [sessionId, session] of getRegistry()) {
+    if (session.isAwaitingInput()) ids.add(session.sessionId || sessionId);
   }
   return [...ids];
 }
