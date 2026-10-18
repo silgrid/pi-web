@@ -55,11 +55,15 @@ order: started steps by `started_at` ascending, unstarted last, ties by name.
   daemon is down). With a selection while open: watch polls every 3 s; a null
   status keeps the previous snapshot, so the selection survives the job
   leaving the job list until the user deselects. Stale responses are dropped
-  by sequence counters.
+  by sequence counters (effect cleanups advance them, never reset to an
+  observation + 1).
 - `components/PolyforgePanel.tsx`: all jobs on the machine (no owner filter);
   the candidate is shortened client-side to 24 chars + `…`; unknown status
   values pass through raw (known ones use `polyforge.*` keys present in en,
-  zh-CN and zh-TW). A blocked WI shows its status only — no question text
+  zh-CN and zh-TW). The selected detail's header hoists over the watchStatus
+  split and carries a back button (`polyforge.deselect`) calling
+  `onSelect(null)` — the deselect gesture survives the job leaving the list
+  and the snapshot still loading. A blocked WI shows its status only — no question text
   exists in the client by construction.
 - `components/AppShell.tsx`: the button renders iff pf is present,
   independent of chat visibility; opening the Polyforge panel closes bg-tasks
