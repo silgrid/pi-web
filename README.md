@@ -171,7 +171,7 @@ Zero extra tooling: pi-web stays reachable at `http://<host-LAN-IP>:<port>` on t
 
 Installs Tailscale when absent (macOS via Homebrew, Linux via the upstream install script), runs `tailscale up` (SSO login), and mounts pi-web at `https://<machine>.<tailnet>.ts.net` through `tailscale serve` with an auto-provisioned Let's Encrypt cert — no domain, no ports, no Caddy.
 
-The ts.net HTTPS origin satisfies **both** mobile clients on one origin: the Chrome PWA install criteria and the TWA `assetlinks.json` verification. `tailscale serve` runs as a tmux window of the deploy session, so killing the session stops it; redeploys keep a serve mapping that already forwards to the current port (re-asserting it otherwise), so a healthy serve survives a redeploy.
+The ts.net HTTPS origin satisfies **both** mobile clients on one origin: the Chrome PWA install criteria and the TWA `assetlinks.json` verification. `tailscale serve` runs as a tmux window of the deploy session, so killing the session stops it; redeploys keep a serve mapping that already forwards to the current port, and replace the serve holder window otherwise (a healthy serve survives a redeploy).
 
 Node sharing (share this machine with family/colleagues' tailnet accounts) covers the "people I trust" case; public sharing needs Cloudflare mode or Tailscale Funnel (not automated by this script).
 
@@ -189,7 +189,7 @@ The cloudflared process runs as a tmux window of the deploy session; a redeploy 
 ### Common behavior in exposed modes
 
 - In `tailscale`/`cloudflare` modes the served/tunnel hostname is appended to `PI_WEB_ALLOWED_HOSTS` before pi-web starts (operator entries are preserved and come first) — otherwise request-security rejects the unknown `Host` header. `lan` mode and the unset path append nothing.
-- Serve/tunnel lifecycle is tied to the `${PIWEB_TMUX_SESSION:-piweb}` tmux session: killing it stops the tunnel. Re-running the script is tunnel-idempotent — only the pi-web window is recycled; a serve/tunnel window that is alive and forwarding to the current port survives with its process (and the quick URL, recovered from `~/.piweb/<session>-quick-tunnel.log`).
+- Serve/tunnel lifecycle is tied to the `${PIWEB_TMUX_SESSION:-piweb}` tmux session: killing it stops the tunnel. Re-running the script is tunnel-idempotent — only the pi-web loop window(s) are recycled (unnamed loop windows left by older deploys or the autostart recipe included); a serve/tunnel window that is alive and forwarding to the current port survives with its process (and the quick URL, recovered from `~/.piweb/<session>-quick-tunnel.log`), and a stale or dead one is replaced, window included.
 - Phone client: install the PWA over the HTTPS origin (Chrome → Install app) or point the TWA shell APK from [`mobile-twa/`](./mobile-twa/) at the same origin.
 
 ### China notes
