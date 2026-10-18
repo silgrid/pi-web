@@ -75,10 +75,17 @@ export function usePolyforge(panelOpen: boolean) {
   }, []);
 
   // One fetch at mount: presence, and nothing more when pf is absent.
+  // Effect cleanups ADVANCE the guard counters: resetting to an observed
+  // value + 1 rewinds them (interval polls have long moved past it), so a
+  // late response from the previous selection could be accepted under the
+  // current one for up to one poll.
   useEffect(() => {
-    const seqAtMount = statusSeq.current;
     refreshStatus();
-    return () => { statusSeq.current = seqAtMount + 1; };
+    // This ref is a fetch-generation counter, not a React-rendered node, and
+    // copying it into the effect would rewind past interval-poll increments
+    // (the exact stale-response defect NB-1 names).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    return () => { ++statusSeq.current; };
   }, [refreshStatus]);
 
   // Cadence: 3s open, 30s closed — only while pf is present.
@@ -91,10 +98,10 @@ export function usePolyforge(panelOpen: boolean) {
   // Watch the selection while the panel is open: immediately and every 3s.
   useEffect(() => {
     if (!panelOpen || !selectedWi) return;
-    const seqAtOpen = watchSeq.current;
     refreshWatch(selectedWi);
     const interval = setInterval(() => refreshWatch(selectedWi), OPEN_WATCH_POLL_MS);
-    return () => { watchSeq.current = seqAtOpen + 1; clearInterval(interval); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- same counter rationale as above
+    return () => { ++watchSeq.current; clearInterval(interval); };
   }, [panelOpen, selectedWi, refreshWatch]);
 
   const select = useCallback((wi: string | null) => {

@@ -29,8 +29,14 @@ test("a degraded watch response keeps the previous snapshot (selection persisten
 });
 
 test("one fetch at mount decides presence; a pf-less install never polls again", () => {
-  assert.match(source, /useEffect\(\(\) => \{\s*const seqAtMount = statusSeq\.current;\s*refreshStatus\(\);/);
+  assert.match(source, /useEffect\(\(\) => \{\s*refreshStatus\(\);/);
+  assert.match(source, /return \(\) => \{\s*\+\+statusSeq\.current;/);
   assert.match(source, /if \(!probed \|\| !pfPresent\) return;/, "the cadence effect gates on presence");
+});
+
+test("effect cleanups advance the guard counters; they never rewind to an observation + 1", () => {
+  assert.match(source, /return \(\) => \{\s*\+\+watchSeq\.current;\s*clearInterval\(interval\);/);
+  assert.doesNotMatch(source, /seqAt\w+ \+ 1/, "a counter reset to seqAtX + 1 rewinds after interval polls");
 });
 
 test("cadence: 3s while the panel is open, 30s while closed", () => {
