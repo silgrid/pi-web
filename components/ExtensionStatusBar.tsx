@@ -23,6 +23,17 @@ export function formatExtensionStatusLine(statuses: ExtensionStatusItem[]): stri
     .join(" ");
 }
 
+/**
+ * pf-chat (the polyforge skill) refreshes a `polyforge` statusline widget on
+ * every poll, but the Polyforge dock panel and topbar badge (pi#108) already
+ * carry that progress, so that line would only repeat itself in every chat
+ * pane. The exact key is dropped here, at the shelf's render boundary: no
+ * trigger chip, no expanded panel, no update pulse — and the shelf is not
+ * rendered when this widget was its only content. Every other key and all
+ * statuses render unchanged (pi#111; no setting, exact match only).
+ */
+const POLYFORGE_WIDGET_KEY = "polyforge";
+
 export function ExtensionStatusBar({
   statuses,
   widgets = [],
@@ -32,10 +43,14 @@ export function ExtensionStatusBar({
 }) {
   // Phones render the shelf as a compact 28px ellipsized line; tapping (or
   // Enter/Space) expands it in place. The full text stays available through
-  // title/aria-label either way, and the shelf is never hidden because MCP
+  // title/aria-label either way, and the shelf is never hidden while it
+  // carries anything but a filtered `polyforge` widget, because MCP
   // disconnect diagnostics live here (pi#1).
+  const visibleWidgets = widgets.filter(
+    (widget) => widget.key !== POLYFORGE_WIDGET_KEY,
+  );
   const [expanded, setExpanded] = useState(false);
-  if (statuses.length === 0 && widgets.length === 0) return null;
+  if (statuses.length === 0 && visibleWidgets.length === 0) return null;
 
   const statusLine = formatExtensionStatusLine(statuses);
   const plainStatusLine = stripAnsi(statusLine);
@@ -49,9 +64,9 @@ export function ExtensionStatusBar({
 
   return (
     <div
-      className={`extension-status-shelf${widgets.length > 0 ? " has-widgets" : ""}${statuses.length > 0 ? " has-status" : ""}`}
+      className={`extension-status-shelf${visibleWidgets.length > 0 ? " has-widgets" : ""}${statuses.length > 0 ? " has-status" : ""}`}
     >
-      {widgets.length > 0 && <ExtensionWidgets widgets={widgets} />}
+      {visibleWidgets.length > 0 && <ExtensionWidgets widgets={visibleWidgets} />}
       {statuses.length > 0 && (
         <div
           role="status"
