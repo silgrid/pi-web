@@ -280,6 +280,8 @@ node_modules/.bin/tsc --noEmit
 npm run lint
 ```
 
+`npm test` runs the tests with a private temp dir and fails if anything is left in it afterwards (`scripts/tmp-guard.mjs`): a test removes what it creates, in `t.after()`.
+
 Do not run `next build` or `npm run build` during normal development. It writes to `.next/` and can interfere with the development server; leave builds for release work.
 
 Contributor guides: [Internationalization](./docs/i18n.md) and [Release process](./docs/release.md).
@@ -293,6 +295,7 @@ hooks/           Client state and interaction hooks
 lib/             Session, agent, model, file, Git, and security logic
 public/          Static assets and PWA files
 bin/             npm CLI entrypoint and launch option parsing
+scripts/         Development scripts (the npm test temp guard); not published
 docs/            Focused user and contributor guides
 ```
 
