@@ -298,9 +298,14 @@ npm install -g "${PKG}@latest"
 build_loop_cmd() {
   # shellcheck disable=SC2016  # the single quotes are deliberate: the tmux
   # command string must expand the variables inside the loop's shell, not here
+  # Unset provider env credentials that leak from the container shell
+  # (pi#109): OPENAI_API_KEY would activate pi's builtin `openai` provider
+  # and dump its full 44-model backlog (gpt-4/gpt-4o/o1/o3/...) into the
+  # model selector, even though this deployment only uses the models.json
+  # sub2api providers.
   LOOP_CMD="
   while true; do
-    PI_WEB_IDLE_TIMEOUT_MS=0 ${PI_WEB_PASSWORD:+PI_WEB_PASSWORD='${PI_WEB_PASSWORD}'} ${EFFECTIVE_ALLOWED_HOSTS:+PI_WEB_ALLOWED_HOSTS='${EFFECTIVE_ALLOWED_HOSTS}'} pi-web -H ${HOST} ${PORT_ARGS}
+    PI_WEB_IDLE_TIMEOUT_MS=0 ${PI_WEB_PASSWORD:+PI_WEB_PASSWORD='${PI_WEB_PASSWORD}'} ${EFFECTIVE_ALLOWED_HOSTS:+PI_WEB_ALLOWED_HOSTS='${EFFECTIVE_ALLOWED_HOSTS}'} env -u OPENAI_API_KEY -u OPENAI_BASE_URL pi-web -H ${HOST} ${PORT_ARGS}
     echo '[piweb] pi-web exited; restarting in 5s' >&2
     sleep 5
   done
@@ -340,7 +345,10 @@ ${wins}
 EOF
   fi
   if session_exists; then
-    tmux new-window -t "${SESSION}" -n piweb "${LOOP_CMD}"
+    # Target "${SESSION}:" (trailing colon): a bare session name makes tmux
+    # 3.4 create the window at the session's CURRENT window index and fail
+    # with 'index 1 in use' (pi#109, hit live on 2026-10-18).
+    tmux new-window -t "${SESSION}:" -n piweb "${LOOP_CMD}"
   else
     echo "==> Creating tmux session '${SESSION}' (window 'piweb')"
     tmux new-session -d -s "${SESSION}" -n piweb "${LOOP_CMD}"
@@ -356,7 +364,8 @@ replace_window() {
     tmux kill-window -t "${SESSION}:${name}" 2>/dev/null || true
   fi
   if session_exists; then
-    tmux new-window -t "${SESSION}" -n "${name}" "${cmd}"
+    # Same "${SESSION}:" target discipline as recycle_piweb_window (pi#109).
+    tmux new-window -t "${SESSION}:" -n "${name}" "${cmd}"
   else
     tmux new-session -d -s "${SESSION}" -n "${name}" "${cmd}"
   fi
