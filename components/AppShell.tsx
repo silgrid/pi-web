@@ -4,11 +4,13 @@ import { useState, useCallback, useRef, useEffect, useLayoutEffect, useMemo, typ
 import { useRouter, useSearchParams } from "next/navigation";
 import { useGlobalKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
 import { useBackgroundTasks, markTerminalNotified } from "@/hooks/useBackgroundTasks";
+import { usePolyforge } from "@/hooks/usePolyforge";
 import { SessionSidebar } from "./SessionSidebar";
 import { ChatWindow } from "./ChatWindow";
 import type { ChatScrollPosition } from "@/lib/chat-scroll-position";
 import { FileViewer } from "./FileViewer";
 import { BackgroundTasksPanel } from "./BackgroundTasksPanel";
+import { PolyforgePanel } from "./PolyforgePanel";
 import { TabBar, type Tab } from "./TabBar";
 import { openFileTab, saveFileViewerState, saveParkedFileViewerState, switchFileWorkspace, type ParkedFileWorkspace } from "./file-tab-state";
 import { SettingsPanel, SettingsSectionIcon } from "./SettingsPanel";
@@ -216,6 +218,9 @@ export function AppShell() {
   selectedSessionRef.current = selectedSession;
   const [bgPanelOpen, setBgPanelOpen] = useState(false);
   const [bgSelectedTaskId, setBgSelectedTaskId] = useState<string | null>(null);
+  // pi#108: the Polyforge dock panel shares the bg-tasks slot; the two are
+  // mutually exclusive (each open handler closes the other).
+  const [pfPanelOpen, setPfPanelOpen] = useState(false);
   // pi#28: the background-tasks panel follows the FOCUSED pane's session. In
   // split view pane focus only updates focusedPaneId (never selectedSession),
   // so the old selectedSession?.id read left the panel permanently
@@ -266,6 +271,16 @@ export function AppShell() {
     fetchLogs: fetchBgTaskLogs,
     killTask: killBgTask,
   } = useBackgroundTasks(activeBgSessionId, bgPanelOpen);
+  const {
+    pfPresent,
+    opsStatus: pfOpsStatus,
+    opsError: pfOpsError,
+    runningCount: pfRunningCount,
+    selectedWi: pfSelectedWi,
+    watchStatus: pfWatchStatus,
+    select: selectPolyforgeJob,
+    refreshStatus: refreshPolyforgeStatus,
+  } = usePolyforge(pfPanelOpen);
 
   // Live background-task events arrive per session pane (split view feeds every
   // pane's stream; the classic single chat feeds its own). Panel state only
@@ -1842,13 +1857,83 @@ export function AppShell() {
   };
 
   const renderChatToolbarActions = (mobile: boolean) => {
-    if (!mobile && !showChat) return null;
+    // The Polyforge button is gated by pf presence alone (independent of
+    // chat visibility); the chat actions keep their own gate.
+    const showChatActions = mobile || showChat;
+    if (!showChatActions && !pfPresent) return null;
     return (
       <div style={{ display: "flex", alignItems: "stretch", height: "100%" }}>
+        {pfPresent && (
+          <button
+            type="button"
+            onClick={() => {
+              setPfPanelOpen((open) => {
+                const next = !open;
+                if (next) setBgPanelOpen(false);
+                return next;
+              });
+            }}
+            title={translate("polyforge.open")}
+            aria-label={translate("polyforge.open")}
+            aria-pressed={pfPanelOpen}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              position: "relative",
+              width: mobile ? TOP_BAR_ICON_BUTTON_SIZE : undefined,
+              minWidth: mobile ? undefined : 34,
+              height: "100%",
+              padding: mobile ? 0 : "0 10px",
+              background: pfPanelOpen ? "var(--bg-selected)" : "none",
+              border: "none",
+              borderRight: "1px solid var(--border)",
+              color: pfRunningCount ? "var(--text)" : "var(--text-muted)",
+              cursor: "pointer",
+              fontSize: 11,
+              flexShrink: 0,
+              whiteSpace: "nowrap",
+              transition: "color 0.1s, background 0.1s",
+            }}
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M4 21V9l8-5 8 5v12" /><path d="M4 21h16" /><path d="M12 4v5" /><path d="M9 21v-6h6v6" />
+            </svg>
+            {pfRunningCount !== null && pfRunningCount > 0 && (
+              <span
+                aria-label={String(pfRunningCount)}
+                style={{
+                  position: "absolute",
+                  top: 6,
+                  right: mobile ? 6 : 10,
+                  minWidth: 14,
+                  height: 14,
+                  padding: "0 3px",
+                  borderRadius: 7,
+                  background: "var(--accent)",
+                  color: "var(--bg-panel)",
+                  fontSize: 9,
+                  fontWeight: 700,
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  lineHeight: 1,
+                }}
+              >
+                {pfRunningCount > 9 ? "9+" : pfRunningCount}
+              </span>
+            )}
+          </button>
+        )}
+        {showChatActions && (<>
         <button
           type="button"
           onClick={() => {
-            setBgPanelOpen((open) => !open);
+            setBgPanelOpen((open) => {
+              const next = !open;
+              if (next) setPfPanelOpen(false);
+              return next;
+            });
           }}
           title={translate("bgTasks.open")}
           aria-label={translate("bgTasks.open")}
@@ -2190,6 +2275,7 @@ export function AppShell() {
           </svg>
           {!mobile && <span>{translate("tools.label")}</span>}
         </button>
+        </>)}
       </div>
     );
   };
@@ -3171,6 +3257,56 @@ export function AppShell() {
                   onClose={() => setBgPanelOpen(false)}
                   selectedTaskId={bgSelectedTaskId}
                   onSelectTask={setBgSelectedTaskId}
+                />
+              </div>
+            )
+          )}
+          {pfPanelOpen && (
+            isMobile ? (
+              <>
+                <div
+                  onClick={() => setPfPanelOpen(false)}
+                  style={{ position: "absolute", inset: 0, zIndex: 39, background: "rgba(0,0,0,0.35)" }}
+                />
+                <div
+                  role="dialog"
+                  aria-label={translate("polyforge.title")}
+                  style={{
+                    position: "absolute", left: 0, right: 0, bottom: 0, height: "62%",
+                    zIndex: 40, background: "var(--bg-panel)", borderTop: "1px solid var(--border)",
+                    boxShadow: "0 -12px 40px rgba(0,0,0,0.22)",
+                    paddingBottom: "var(--safe-area-bottom, 0px)",
+                  }}
+                >
+                  <PolyforgePanel
+                    opsStatus={pfOpsStatus}
+                    opsError={pfOpsError}
+                    watchStatus={pfWatchStatus}
+                    selectedWi={pfSelectedWi}
+                    onSelect={selectPolyforgeJob}
+                    onClose={() => setPfPanelOpen(false)}
+                    onRefresh={refreshPolyforgeStatus}
+                  />
+                </div>
+              </>
+            ) : (
+              <div
+                role="complementary"
+                aria-label={translate("polyforge.title")}
+                style={{
+                  position: "absolute", top: 0, right: 0, bottom: 0, width: 340,
+                  zIndex: 25, background: "var(--bg-panel)", borderLeft: "1px solid var(--border)",
+                  boxShadow: "-8px 0 24px rgba(0,0,0,0.10)",
+                }}
+              >
+                <PolyforgePanel
+                  opsStatus={pfOpsStatus}
+                  opsError={pfOpsError}
+                  watchStatus={pfWatchStatus}
+                  selectedWi={pfSelectedWi}
+                  onSelect={selectPolyforgeJob}
+                  onClose={() => setPfPanelOpen(false)}
+                  onRefresh={refreshPolyforgeStatus}
                 />
               </div>
             )
