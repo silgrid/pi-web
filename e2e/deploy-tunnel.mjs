@@ -72,7 +72,10 @@ const cloudflaredStub = [
   'echo $$ >>"$dir/cloudflared.pid"',
   'echo "INF stub connector: your quick tunnel is ready!"',
   'echo "INF stub connector: https://stub-$$-repro.trycloudflare.com"',
-  "exec sleep 600",
+  "# Loop instead of exec-ing sleep so the process keeps its original argv",
+  "# (cloudflared tunnel --url ...) like the real binary — the deploy",
+  "# script's pgrep -f identity must be able to see it.",
+  "while :; do sleep 1; done",
   "",
 ].join("\n");
 
@@ -127,6 +130,7 @@ const deploy = () => {
       ...process.env,
       PATH: `${stubbin}:${process.env.PATH}`,
       TMPDIR: scratch,
+      HOME: scratch, // keep the stable ~/.piweb quick-tunnel log out of the real home
       PIWEB_EXPOSE: "cloudflare",
       PIWEB_TUNNEL: "quick",
       PIWEB_TMUX_SESSION: session,
