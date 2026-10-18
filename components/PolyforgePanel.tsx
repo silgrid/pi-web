@@ -167,47 +167,65 @@ export function PolyforgePanel({
             {/* Detail for the selected work item */}
             <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
               {selectedWi ? (
-                watchStatus ? (
                   <>
-                    <div style={{ padding: "4px 12px", fontSize: 11, color: "var(--text-dim)", borderBottom: "1px solid var(--border)", flexShrink: 0, display: "flex", justifyContent: "space-between", gap: 8 }}>
-                      <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontWeight: 600 }}>
-                        {watchStatus.slug} · {workflowStatusLabel(watchStatus.workflowStatus)}
+                    {/* Detail header with an explicit deselect control: the only
+                        reliable gesture once the selected job has left the list
+                        (the row that could toggle it off is gone) or while its
+                        watch snapshot is still loading. */}
+                    <div style={{ padding: "4px 12px", fontSize: 11, color: "var(--text-dim)", borderBottom: "1px solid var(--border)", flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+                      <button
+                        type="button"
+                        onClick={() => onSelect(null)}
+                        title={t("polyforge.deselect")}
+                        aria-label={t("polyforge.deselect")}
+                        style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 22, height: 22, padding: 0, background: "none", border: "1px solid var(--border)", borderRadius: 4, color: "var(--text-muted)", cursor: "pointer", flexShrink: 0 }}
+                      >
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                          <path d="M15 18l-6-6 6-6" />
+                        </svg>
+                      </button>
+                      <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontWeight: 600, flex: 1, minWidth: 0 }}>
+                        {watchStatus?.slug ?? selectedWi}
+                        {watchStatus && <> · {workflowStatusLabel(watchStatus.workflowStatus)}</>}
                       </span>
-                      {watchStatus.updatedAt && (
+                      {watchStatus?.updatedAt && (
                         <span style={{ flexShrink: 0 }}>{t("polyforge.updatedAt")}: {formatEventTime(watchStatus.updatedAt)}</span>
                       )}
-                      {watchStatus.currentStep && (
+                      {watchStatus?.currentStep && (
                         <span style={{ flexShrink: 0 }}>{t("polyforge.currentStep")}: {watchStatus.currentStep}</span>
                       )}
                     </div>
-                    {/* Steps in execution order */}
-                    <div style={{ padding: "6px 12px", display: "flex", flexWrap: "wrap", gap: 4, borderBottom: "1px solid var(--border)", flexShrink: 0 }}>
-                      {watchStatus.steps.map((step) => (
-                        <span key={step.name} title={stepStatusLabel(step.status)} style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "2px 6px", borderRadius: 6, border: "1px solid var(--border)", fontSize: 11, color: "var(--text)", fontFamily: "var(--font-mono, monospace)" }}>
-                          <span aria-hidden="true" style={{ width: 7, height: 7, borderRadius: 4, flexShrink: 0, background: STEP_STATUS_COLORS[step.status] ?? "var(--text-dim)" }} />
-                          {step.name}
-                          <span style={{ color: "var(--text-dim)", fontSize: 10 }}>{stepStatusLabel(step.status)}</span>
-                        </span>
-                      ))}
-                    </div>
-                    {/* Event tail (newest last) */}
-                    <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "6px 12px", fontSize: 11, lineHeight: 1.45, fontFamily: "var(--font-mono, monospace)" }}>
-                      {watchStatus.events.length === 0 && (
-                        <div style={{ color: "var(--text-dim)", fontFamily: "var(--font-sans, sans-serif)" }}>{t("polyforge.emptyEvents")}</div>
-                      )}
-                      {watchStatus.events.map((event, index) => (
-                        <div key={`${event.at}-${event.kind}-${index}`} style={{ display: "flex", gap: 8, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                          <span style={{ color: "var(--text-dim)", flexShrink: 0 }}>{formatEventTime(event.at)}</span>
-                          <span style={{ color: "var(--text-muted)", flexShrink: 0 }}>{eventKindLabel(event.kind)}</span>
-                          {event.summary && <span style={{ color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis" }}>{event.summary}</span>}
+                    {watchStatus ? (
+                      <>
+                        {/* Steps in execution order */}
+                        <div style={{ padding: "6px 12px", display: "flex", flexWrap: "wrap", gap: 4, borderBottom: "1px solid var(--border)", flexShrink: 0 }}>
+                          {watchStatus.steps.map((step) => (
+                            <span key={step.name} title={stepStatusLabel(step.status)} style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "2px 6px", borderRadius: 6, border: "1px solid var(--border)", fontSize: 11, color: "var(--text)", fontFamily: "var(--font-mono, monospace)" }}>
+                              <span aria-hidden="true" style={{ width: 7, height: 7, borderRadius: 4, flexShrink: 0, background: STEP_STATUS_COLORS[step.status] ?? "var(--text-dim)" }} />
+                              {step.name}
+                              <span style={{ color: "var(--text-dim)", fontSize: 10 }}>{stepStatusLabel(step.status)}</span>
+                            </span>
+                          ))}
                         </div>
-                      ))}
-                    </div>
+                        {/* Event tail (newest last) */}
+                        <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "6px 12px", fontSize: 11, lineHeight: 1.45, fontFamily: "var(--font-mono, monospace)" }}>
+                          {watchStatus.events.length === 0 && (
+                            <div style={{ color: "var(--text-dim)", fontFamily: "var(--font-sans, sans-serif)" }}>{t("polyforge.emptyEvents")}</div>
+                          )}
+                          {watchStatus.events.map((event, index) => (
+                            <div key={`${event.at}-${event.kind}-${index}`} style={{ display: "flex", gap: 8, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                              <span style={{ color: "var(--text-dim)", flexShrink: 0 }}>{formatEventTime(event.at)}</span>
+                              <span style={{ color: "var(--text-muted)", flexShrink: 0 }}>{eventKindLabel(event.kind)}</span>
+                              {event.summary && <span style={{ color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis" }}>{event.summary}</span>}
+                            </div>
+                          ))}
+                        </div>
+                      </>
+                    ) : (
+                      <div style={{ padding: 16, color: "var(--text-dim)", fontSize: 12 }}>{t("polyforge.loading")}</div>
+                    )}
                   </>
                 ) : (
-                  <div style={{ padding: 16, color: "var(--text-dim)", fontSize: 12 }}>{t("polyforge.loading")}</div>
-                )
-              ) : (
                 <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-dim)", fontSize: 12 }}>{t("polyforge.selectJob")}</div>
               )}
             </div>

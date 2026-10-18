@@ -67,6 +67,25 @@ test("empty, loading, and unavailable states are explicit", () => {
   assert.match(source, /\{t\("polyforge\.selectJob"\)\}/);
 });
 
+test("the selected detail carries an explicit deselect control (AC6 once the job leaves the list)", () => {
+  // The detail header's back button calls onSelect(null) — the only gesture
+  // that survives the selected job leaving the list (its row is gone) or the
+  // watch snapshot still loading (header hoisted over the watchStatus split).
+  assert.match(source, /onClick=\{\(\) => onSelect\(null\)\}/, "detail must have a deselect gesture outside the job rows");
+  assert.match(source, /aria-label=\{t\("polyforge\.deselect"\)\}/, "accessible name via polyforge.deselect");
+  // The header shows the selected ref even while the snapshot loads, so the
+  // stale detail is always dismissable without a reload.
+  assert.match(source, /\{watchStatus\?\.slug \?\? selectedWi\}/);
+  // The key is translated in all three locales (fallback would be a raw key).
+  for (const [name, localeSource] of [["en", enSource], ["zh-CN", zhCNSource], ["zh-TW", zhTWSource]]) {
+    assert.match(localeSource, /"polyforge\.deselect": "\S/, `${name} must translate polyforge.deselect`);
+  }
+  // Accessible name must not collide with the topbar button locator, whose
+  // name carries "Polyforge" (see e2e/polyforge.mjs pfButton).
+  const enMatch = enSource.match(/"polyforge\.deselect": "([^"]+)"/);
+  assert.ok(enMatch && !/polyforge/i.test(enMatch[1]), "deselect label must not contain Polyforge");
+});
+
 test("every user-facing string goes through i18n, with raw fallback for unknown values", () => {
   const usedKeys = [...source.matchAll(/t\("([a-zA-Z.]+)"\)/g)].map((m) => m[1]);
   assert.ok(usedKeys.length >= 4, `expected i18n keys, got ${usedKeys.length}`);

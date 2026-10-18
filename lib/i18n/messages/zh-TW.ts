@@ -944,6 +944,7 @@ export const zhTWLocale: LocalePlugin = {
     "polyforge.title": "Polyforge",
     "polyforge.open": "Polyforge",
     "polyforge.close": "關閉 Polyforge",
+    "polyforge.deselect": "返回工作列表",
     "polyforge.refresh": "重新整理",
     "polyforge.loading": "載入中…",
     "polyforge.unavailable": "Polyforge 無法使用（守護行程未執行或無法連線）。",

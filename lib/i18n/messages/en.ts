@@ -944,6 +944,7 @@ export const enLocale: LocalePlugin = {
     "polyforge.title": "Polyforge",
     "polyforge.open": "Polyforge",
     "polyforge.close": "Close Polyforge",
+    "polyforge.deselect": "Back to job list",
     "polyforge.refresh": "Refresh",
     "polyforge.loading": "Loading…",
     "polyforge.unavailable": "Polyforge is unavailable (the daemon is down or unreachable).",
