@@ -303,7 +303,10 @@ export function AppShell() {
         tag: `pi-bg-task:${task.id}`,
         onClick: () => {
           window.focus();
+          // Shared dock slot: the jump must land on a visible bg-tasks panel,
+          // so it closes the Polyforge dock it would otherwise cover (B-2).
           setBgPanelOpen(true);
+          setPfPanelOpen(false);
           setBgSelectedTaskId(task.id);
         },
       });

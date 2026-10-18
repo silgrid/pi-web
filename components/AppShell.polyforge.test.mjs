@@ -30,6 +30,27 @@ test("the dock slot is mutually exclusive in both directions", () => {
   assert.doesNotMatch(source, /setBgPanelOpen\(\(open\) => !open\)/);
 });
 
+test("every path that opens bg-tasks closes the Polyforge panel (notification jump, B-2)", () => {
+  // The bg-task terminal notification's onClick is the only bg-tasks-opening
+  // path besides the toolbar toggle; it must not leave the pf dock covering
+  // the panel the jump was meant to show (AC9 / AC12).
+  const jumps = [];
+  let index = source.indexOf("setBgPanelOpen(true)");
+  while (index !== -1) {
+    jumps.push(index);
+    index = source.indexOf("setBgPanelOpen(true)", index + 1);
+  }
+  assert.ok(jumps.length > 0, "expected at least one direct setBgPanelOpen(true) (the notification jump)");
+  for (const jump of jumps) {
+    const context = source.slice(jump, jump + 90);
+    assert.match(
+      context,
+      /setBgPanelOpen\(true\);\s*setPfPanelOpen\(false\);/,
+      "a setBgPanelOpen(true) path does not close the Polyforge panel",
+    );
+  }
+});
+
 test("the panel mounts in the shared dock slot: 340px desktop right dock, 62% mobile sheet", () => {
   const pfDockStart = source.indexOf("{pfPanelOpen && (");
   const bgDockStart = source.indexOf("{bgPanelOpen && (");

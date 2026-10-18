@@ -68,4 +68,6 @@ order: started steps by `started_at` ascending, unstarted last, ties by name.
 - `components/AppShell.tsx`: the button renders iff pf is present,
   independent of chat visibility; opening the Polyforge panel closes bg-tasks
   and vice versa (mutually exclusive dock slot: 340 px right dock / 62 %
-  mobile sheet).
+  mobile sheet) — enforced on every path that opens either panel, including
+  the bg-task terminal notification's jump: its onClick closes the Polyforge
+  panel before showing bg-tasks, so the jump never lands on a covered dock.
