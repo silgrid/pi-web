@@ -25,8 +25,11 @@
 # PI_WEB_ALLOWED_HOSTS before pi-web starts (request-security rejects unknown
 # Host headers otherwise); operator entries are preserved and come first. The
 # serve/tunnel process runs as a tmux window of the same session, so killing
-# the session stops it and re-running the script never leaks duplicate
-# tailscale-serve/cloudflared processes.
+# the session stops it. Re-running the script is tunnel-idempotent (pi#107):
+# a deploy recycles only the pi-web window and keeps a serve/tunnel window
+# that is alive and forwarding to the current port — its process, and for a
+# quick tunnel its trycloudflare.com URL, survive the redeploy. A stale (wrong
+# port) or dead serve/tunnel is replaced.
 #
 # Two invocation modes:
 #   1. From the repository root:            ./deploy-piweb.sh
@@ -238,8 +241,6 @@ prepare_mode() {
       append_allowed_host "${TS_HOST}"
       echo "==> Tailscale mode: pi-web will be served at https://${TS_HOST}"
       echo "    (hostname appended to PI_WEB_ALLOWED_HOSTS)"
-      # Clear any stale serve config so a redeploy never inherits one.
-      tailscale serve --reset >/dev/null 2>&1 || true
       ;;
     cloudflare)
       install_cloudflared
@@ -257,15 +258,13 @@ prepare_mode() {
           exit 1
         fi
         append_allowed_host "${PIWEB_CF_HOSTNAME}"
-        # Stop any previous named tunnel from this deployment before starting
-        # a new one so redeploys don't accumulate cloudflared processes.
-        pkill -f "cloudflared tunnel --config ${PIWEB_CF_CONFIG}" 2>/dev/null || true
         echo "==> Cloudflare named tunnel: hostname '${PIWEB_CF_HOSTNAME}' appended to PI_WEB_ALLOWED_HOSTS"
       else
-        # Quick tunnel: the URL is only known once cloudflared runs (captured
-        # after the tmux session starts); just stop any previous quick tunnel
-        # from this deployment so redeploys don't accumulate them.
-        pkill -f "cloudflared tunnel --url http://127.0.0.1:${LOCAL_PORT}" 2>/dev/null || true
+        # Quick tunnel: the URL is only known once cloudflared runs — captured
+        # after the tunnel window starts, or recovered from the stable log on
+        # a redeploy whose tunnel is still healthy. Nothing to prepare here;
+        # the deploy step decides reuse vs. replace.
+        :
       fi
       ;;
   esac
@@ -284,8 +283,11 @@ fi
 echo "==> Installing ${PKG}@latest"
 npm install -g "${PKG}@latest"
 
-echo "==> Restarting tmux session '${SESSION}'"
-tmux kill-session -t "${SESSION}" 2>/dev/null || true
+# pi#107: a deploy is tunnel-idempotent — the tmux session is no longer torn
+# down. Only the pi-web restart-loop window is recycled; a healthy
+# serve/tunnel window (and its quick URL) survives the redeploy. (The old
+# script killed the whole session and rebuilt the tunnel on every run, so
+# every deploy minted a fresh trycloudflare.com URL.)
 
 # The restart-loop command is (re)built at the point of use so it always
 # embeds the final EFFECTIVE_ALLOWED_HOSTS (a quick-tunnel hostname is only
@@ -302,58 +304,177 @@ build_loop_cmd() {
 "
 }
 
-build_loop_cmd
+# ---------------------------------------------------------------------------
+# tmux recycling (pi#107: deploys are tunnel-idempotent). A deploy recycles
+# only the pi-web restart-loop window; the session and any serve/tunnel
+# window are kept. Killing a session's last window destroys the session, so
+# session existence is re-checked right before each window is created —
+# never cached from before a kill.
+# ---------------------------------------------------------------------------
+session_exists() {
+  tmux has-session -t "${SESSION}" 2>/dev/null
+}
+
+# Recycle the pi-web restart-loop window (kill + recreate). When the session
+# exists, only this window is replaced; a serve/tunnel window survives with
+# its process. If the recycled window was the session's last, the session
+# dies with it and is created fresh — either way exactly one pi-web loop
+# window runs afterwards.
+recycle_piweb_window() {
+  if session_exists; then
+    tmux kill-window -t "${SESSION}:piweb" 2>/dev/null || true
+  fi
+  if session_exists; then
+    echo "==> Recycling pi-web window in tmux session '${SESSION}'"
+    tmux new-window -t "${SESSION}" -n piweb "${LOOP_CMD}"
+  else
+    echo "==> Creating tmux session '${SESSION}' (window 'piweb')"
+    tmux new-session -d -s "${SESSION}" -n piweb "${LOOP_CMD}"
+  fi
+}
+
+# Replace the 'tunnel' window (same last-window caveat as above: re-check the
+# session after killing the old window, then create the new window in
+# whatever shape survives).
+replace_tunnel_window() {
+  local cmd="$1"
+  if session_exists; then
+    tmux kill-window -t "${SESSION}:tunnel" 2>/dev/null || true
+  fi
+  if session_exists; then
+    tmux new-window -t "${SESSION}" -n tunnel "${cmd}"
+  else
+    tmux new-session -d -s "${SESSION}" -n tunnel "${cmd}"
+  fi
+}
+
+# Quick-tunnel connector log at a stable path (was: a fresh mktemp file per
+# run, which made the previous URL unrecoverable). A redeploy with a healthy
+# connector recovers the URL from this file.
+QUICK_TUNNEL_LOG="${HOME}/.piweb/${SESSION}-quick-tunnel.log"
+
+quick_tunnel_url_from_log() {
+  grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' "${QUICK_TUNNEL_LOG}" 2>/dev/null \
+    | head -n 1 | sed 's|^https://||' || true
+}
+
+# Is a quick-tunnel connector for THIS local port already alive? Identity:
+# a live process whose command line targets http://127.0.0.1:${LOCAL_PORT}.
+# pgrep -f catches a connector started by any means (the [^0-9] anchor keeps
+# :8142 from matching :81421); the tmux-pane fallback catches a connector
+# whose /bin/sh script chain no longer shows the original argv — it is the
+# pane's live process, and its recorded start command carries this exact
+# --url target (a dead pane makes the check miss). A connector forwarding to
+# a different port (PIWEB_PORT changed) misses both and is replaced.
+quick_tunnel_alive() {
+  if pgrep -f "cloudflared tunnel --url http://127\.0\.0\.1:${LOCAL_PORT}([^0-9]|$)" >/dev/null 2>&1; then
+    return 0
+  fi
+  local pane
+  pane="$(tmux list-panes -t "${SESSION}:tunnel" -F '#{pane_dead}|#{pane_start_command}' 2>/dev/null | head -n 1 || true)"
+  case "${pane}" in
+    "" | 1\|*) return 1 ;; # no tunnel window, or its process exited
+  esac
+  case "${pane}" in
+    *"cloudflared tunnel --url http://127.0.0.1:${LOCAL_PORT}") return 0 ;;
+    *"cloudflared tunnel --url http://127.0.0.1:${LOCAL_PORT}"[!0-9]*) return 0 ;;
+  esac
+  return 1
+}
+
+# Named tunnel: identity is a live connector for this exact config, plus the
+# config's ingress service port must equal the port pi-web binds now (a
+# PIWEB_PORT change means the running tunnel forwards to a stale port).
+named_tunnel_alive() {
+  pgrep -f "cloudflared tunnel --config ${PIWEB_CF_CONFIG}" >/dev/null 2>&1 || return 1
+  local cfg_port
+  cfg_port="$(grep -oE 'http://(127\.0\.0\.1|localhost):[0-9]+' "${PIWEB_CF_CONFIG}" 2>/dev/null | head -n 1 | grep -oE '[0-9]+$' || true)"
+  [ "${cfg_port}" = "${LOCAL_PORT}" ]
+}
+
+# Does 'tailscale serve' already map the served origin to this local port?
+# (serve config persists in tailscaled, so a healthy mapping survives
+# redeploys and must be kept, not reset.)
+tailscale_serve_current() {
+  tailscale serve status 2>/dev/null | grep -qE "(127\.0\.0\.1|localhost):${LOCAL_PORT}([^0-9]|$)"
+}
 
 case "${EXPOSE}" in
   "" | lan | tailscale)
-    # Legacy / LAN path: identical to the original script (LAN prepared
-    # nothing but an informational echo above).
-    tmux new-session -d -s "${SESSION}" "${LOOP_CMD}"
+    # Legacy / LAN path: identical to the original script except that a
+    # redeploy recycles only the pi-web window instead of killing the whole
+    # session (LAN prepared nothing but an informational echo above).
+    build_loop_cmd
+    recycle_piweb_window
     if [ "${EXPOSE}" = "tailscale" ]; then
-      echo "==> Starting 'tailscale serve' (foreground; dies with this session)"
-      tmux new-window -t "${SESSION}" -n serve \
-        "tailscale serve --https=443 http://127.0.0.1:${LOCAL_PORT}"
+      if tailscale_serve_current; then
+        echo "==> 'tailscale serve' already forwards to 127.0.0.1:${LOCAL_PORT}; keeping it"
+      else
+        # No serve mapping for this port (fresh, stale, or dead): reset any
+        # stale config so this deploy never inherits one, then re-assert it
+        # with a foreground holder window.
+        tailscale serve --reset >/dev/null 2>&1 || true
+        echo "==> Starting 'tailscale serve' (foreground; dies with this session)"
+        tmux new-window -t "${SESSION}" -n serve \
+          "tailscale serve --https=443 http://127.0.0.1:${LOCAL_PORT}"
+      fi
       echo "==> pi-web served at https://${TS_HOST} (proxying 127.0.0.1:${LOCAL_PORT})"
     fi
     ;;
   cloudflare)
     if [ "${TUNNEL}" = "quick" ]; then
-      # The trycloudflare.com URL only exists once cloudflared runs, so the
-      # tunnel window starts first, the URL is captured from its output, and
-      # only then is the pi-web restart-loop window built with the hostname
-      # appended to PI_WEB_ALLOWED_HOSTS.
-      CF_LOG="$(mktemp)"
-      echo "==> Starting cloudflared quick tunnel (tmux window 'tunnel')"
-      tmux new-session -d -s "${SESSION}" -n tunnel \
-        "cloudflared tunnel --url http://127.0.0.1:${LOCAL_PORT} >'${CF_LOG}' 2>&1"
-      echo "==> Waiting for the trycloudflare.com URL (full log: ${CF_LOG})"
+      # The trycloudflare.com URL only exists once cloudflared runs. A healthy
+      # connector for this port is reused as-is and its URL recovered from
+      # the stable log; only when the tunnel is missing, stale (different
+      # port), or its URL is unrecoverable is the tunnel window replaced and
+      # a fresh URL captured — in which case the rebuilt pi-web allow-list
+      # carries the new URL.
+      mkdir -p "${HOME}/.piweb"
       CF_HOST=""
-      i=0
-      while [ "${i}" -lt 30 ]; do
-        CF_HOST="$(grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' "${CF_LOG}" 2>/dev/null | head -n 1 | sed 's|^https://||' || true)"
-        [ -n "${CF_HOST}" ] && break
-        i=$((i + 1))
-        sleep 1
-      done
+      if quick_tunnel_alive; then
+        echo "==> Reusing healthy cloudflared quick tunnel (tmux window 'tunnel')"
+        CF_HOST="$(quick_tunnel_url_from_log)"
+        if [ -z "${CF_HOST}" ]; then
+          echo "==> Tunnel alive but its URL is not recoverable from ${QUICK_TUNNEL_LOG}; restarting it"
+        fi
+      fi
       if [ -z "${CF_HOST}" ]; then
-        echo "ERROR: could not capture the trycloudflare.com URL. cloudflared output:" >&2
-        cat "${CF_LOG}" >&2 2>/dev/null || true
-        tmux kill-session -t "${SESSION}" 2>/dev/null || true
-        rm -f "${CF_LOG}"
-        exit 1
+        : >"${QUICK_TUNNEL_LOG}"
+        echo "==> Starting cloudflared quick tunnel (tmux window 'tunnel')"
+        replace_tunnel_window \
+          "cloudflared tunnel --url http://127.0.0.1:${LOCAL_PORT} >'${QUICK_TUNNEL_LOG}' 2>&1"
+        echo "==> Waiting for the trycloudflare.com URL (full log: ${QUICK_TUNNEL_LOG})"
+        i=0
+        while [ "${i}" -lt 30 ]; do
+          CF_HOST="$(quick_tunnel_url_from_log)"
+          [ -n "${CF_HOST}" ] && break
+          i=$((i + 1))
+          sleep 1
+        done
+        if [ -z "${CF_HOST}" ]; then
+          echo "ERROR: could not capture the trycloudflare.com URL. cloudflared output:" >&2
+          cat "${QUICK_TUNNEL_LOG}" >&2 2>/dev/null || true
+          tmux kill-session -t "${SESSION}" 2>/dev/null || true
+          exit 1
+        fi
       fi
       append_allowed_host "${CF_HOST}"
       build_loop_cmd
       echo "==> Quick tunnel up: https://${CF_HOST} (hostname appended to PI_WEB_ALLOWED_HOSTS)"
-      echo "    WARNING: quick-tunnel URLs are DEMO-ONLY. The URL drifts on every restart;"
-      echo "    never bake a trycloudflare.com URL into a PWA/TWA client. Use PIWEB_TUNNEL=named"
-      echo "    (or PIWEB_EXPOSE=tailscale) for a stable origin."
-      tmux new-window -t "${SESSION}" -n piweb "${LOOP_CMD}"
+      echo "    WARNING: quick-tunnel URLs are DEMO-ONLY. Reusing a healthy tunnel keeps the"
+      echo "    URL stable across redeploys, but the connector restarting (or dying) still"
+      echo "    mints a new one; never bake a trycloudflare.com URL into a PWA/TWA client."
+      echo "    Use PIWEB_TUNNEL=named (or PIWEB_EXPOSE=tailscale) for a stable origin."
+      recycle_piweb_window
     else
-      tmux new-session -d -s "${SESSION}" "${LOOP_CMD}"
-      echo "==> Starting cloudflared named tunnel (config: ${PIWEB_CF_CONFIG})"
-      tmux new-window -t "${SESSION}" -n tunnel \
-        "cloudflared tunnel --config ${PIWEB_CF_CONFIG}"
+      if named_tunnel_alive; then
+        echo "==> Reusing cloudflared named tunnel (config: ${PIWEB_CF_CONFIG})"
+      else
+        echo "==> Starting cloudflared named tunnel (config: ${PIWEB_CF_CONFIG})"
+        replace_tunnel_window "cloudflared tunnel --config ${PIWEB_CF_CONFIG}"
+      fi
+      build_loop_cmd
+      recycle_piweb_window
     fi
     ;;
 esac

@@ -171,25 +171,25 @@ Zero extra tooling: pi-web stays reachable at `http://<host-LAN-IP>:<port>` on t
 
 Installs Tailscale when absent (macOS via Homebrew, Linux via the upstream install script), runs `tailscale up` (SSO login), and mounts pi-web at `https://<machine>.<tailnet>.ts.net` through `tailscale serve` with an auto-provisioned Let's Encrypt cert — no domain, no ports, no Caddy.
 
-The ts.net HTTPS origin satisfies **both** mobile clients on one origin: the Chrome PWA install criteria and the TWA `assetlinks.json` verification. `tailscale serve` runs as a tmux window of the deploy session, so killing the session stops it, and redeploys reset any stale serve config instead of leaking duplicates.
+The ts.net HTTPS origin satisfies **both** mobile clients on one origin: the Chrome PWA install criteria and the TWA `assetlinks.json` verification. `tailscale serve` runs as a tmux window of the deploy session, so killing the session stops it; redeploys keep a serve mapping that already forwards to the current port (re-asserting it otherwise), so a healthy serve survives a redeploy.
 
 Node sharing (share this machine with family/colleagues' tailnet accounts) covers the "people I trust" case; public sharing needs Cloudflare mode or Tailscale Funnel (not automated by this script).
 
 ### Cloudflare mode
 
-`cloudflared` runs outbound-only — no inbound ports. `PIWEB_TUNNEL=quick` (default) starts a quick tunnel and prints its `*.trycloudflare.com` URL, captured and wired into `PI_WEB_ALLOWED_HOSTS` automatically. **Quick-tunnel URLs are demo-only**: the URL drifts on every restart — never bake one into a PWA/TWA client.
+`cloudflared` runs outbound-only — no inbound ports. `PIWEB_TUNNEL=quick` (default) starts a quick tunnel and prints its `*.trycloudflare.com` URL, captured and wired into `PI_WEB_ALLOWED_HOSTS` automatically. **Quick-tunnel URLs are demo-only**: reusing a healthy connector keeps the URL stable across redeploys, but the connector restarting (or dying) still mints a fresh one — never bake one into a PWA/TWA client.
 
 `PIWEB_TUNNEL=named` is for public distribution at scale. It requires a Cloudflare account with your domain on Cloudflare DNS and two operator-supplied settings:
 
 - `PIWEB_CF_CONFIG` — your `cloudflared` `config.yml` (tunnel ID, credentials-file, and an ingress entry mapping your hostname to `http://127.0.0.1:<port>`)
 - `PIWEB_CF_HOSTNAME` — the public ingress hostname to allow
 
-The cloudflared process runs as a tmux window of the deploy session; any previous `cloudflared` from this deployment is killed first so redeploys don't accumulate tunnels.
+The cloudflared process runs as a tmux window of the deploy session; a redeploy keeps a healthy connector that forwards to the current port running (its PID — and the quick URL — survive), and replaces it only when it is stale or dead, so redeploys don't accumulate tunnels.
 
 ### Common behavior in exposed modes
 
 - In `tailscale`/`cloudflare` modes the served/tunnel hostname is appended to `PI_WEB_ALLOWED_HOSTS` before pi-web starts (operator entries are preserved and come first) — otherwise request-security rejects the unknown `Host` header. `lan` mode and the unset path append nothing.
-- Serve/tunnel lifecycle is tied to the `${PIWEB_TMUX_SESSION:-piweb}` tmux session: killing it stops the tunnel, re-running the script replaces it.
+- Serve/tunnel lifecycle is tied to the `${PIWEB_TMUX_SESSION:-piweb}` tmux session: killing it stops the tunnel. Re-running the script is tunnel-idempotent — only the pi-web window is recycled; a serve/tunnel window that is alive and forwarding to the current port survives with its process (and the quick URL, recovered from `~/.piweb/<session>-quick-tunnel.log`).
 - Phone client: install the PWA over the HTTPS origin (Chrome → Install app) or point the TWA shell APK from [`mobile-twa/`](./mobile-twa/) at the same origin.
 
 ### China notes
