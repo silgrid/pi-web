@@ -9,6 +9,10 @@ const STEP_STATUS_COLORS: Record<string, string> = {
   done: "#16a34a",
   failed: "#dc2626",
   blocked: "#d97706",
+  // pi#114: state the full contract — pending/cancelled are gray explicitly;
+  // unknown statuses keep the same gray via the fallback in stepNodeColor.
+  pending: "var(--text-dim)",
+  cancelled: "var(--text-dim)",
 };
 
 const CANDIDATE_MAX = 24;
@@ -128,6 +132,71 @@ export function formatEventValues(event: PolyforgeEvent): string {
   const head = shown.slice(0, -2).join(" · ");
   const tail = shown.slice(-2).join(" → ");
   return head ? `${head} · ${tail}` : tail;
+}
+
+/** Node colour for the step flow graph (pi#114, R6): status colour from the
+ *  explicit map; unknown statuses read gray, never a missing entry. */
+export function stepNodeColor(status: string): string {
+  return STEP_STATUS_COLORS[status] ?? "var(--text-dim)";
+}
+
+export interface StepGraph {
+  nodes: { id: string; status: string }[];
+  sequenceEdges: [string, string][];
+  rewindEdges: [string, string][];
+}
+
+/** Flow-graph model for the step display (pi#114, R2–R5). Pure: no I/O, no
+ *  throw, so a malformed snapshot degrades silently instead of surfacing an
+ *  error.
+ *  - `declaredSteps` present: nodes follow declaration order; declared ids
+ *    missing from `steps` become pending gray placeholders; steps absent from
+ *    the declaration are appended in started-at fallback order (the order
+ *    `steps` already carries) with no sequence edges.
+ *  - `declaredSteps` null (absent/malformed/empty): nodes follow the
+ *    started-at fallback order of `steps`; sequence edges join consecutive
+ *    started (non-pending) steps only, so the last started node is not edged
+ *    to the first unstarted one.
+ *  - Rewind edges: only tail `rewind` events whose gate AND target are both
+ *    nodes, one edge per distinct gate→target pair. `on_fail` targets are
+ *    not nodes in this model, so they can never be drawn. */
+export function buildStepGraph(
+  steps: { name: string; status: string }[],
+  declaredSteps: { id: string }[] | null,
+  events: { kind: string; gate?: string; target?: string }[],
+): StepGraph {
+  const statusByName = new Map(steps.map((step) => [step.name, step.status]));
+  const sequenceEdges: [string, string][] = [];
+  let nodes: { id: string; status: string }[];
+  if (declaredSteps && declaredSteps.length > 0) {
+    nodes = declaredSteps.map(({ id }) => ({ id, status: statusByName.get(id) ?? "pending" }));
+    const declared = new Set(declaredSteps.map(({ id }) => id));
+    for (const step of steps) {
+      if (!declared.has(step.name)) nodes.push({ id: step.name, status: step.status });
+    }
+    for (let i = 1; i < declaredSteps.length; i++) {
+      sequenceEdges.push([declaredSteps[i - 1].id, declaredSteps[i].id]);
+    }
+  } else {
+    nodes = steps.map((step) => ({ id: step.name, status: step.status }));
+    for (let i = 1; i < nodes.length; i++) {
+      if (nodes[i - 1].status !== "pending" && nodes[i].status !== "pending") {
+        sequenceEdges.push([nodes[i - 1].id, nodes[i].id]);
+      }
+    }
+  }
+  const nodeIds = new Set(nodes.map((node) => node.id));
+  const rewindEdges: [string, string][] = [];
+  const seenRewinds = new Set<string>();
+  for (const event of events) {
+    if (event.kind !== "rewind" || !event.gate || !event.target) continue;
+    if (!nodeIds.has(event.gate) || !nodeIds.has(event.target)) continue;
+    const key = `${event.gate}\u0000${event.target}`;
+    if (seenRewinds.has(key)) continue;
+    seenRewinds.add(key);
+    rewindEdges.push([event.gate, event.target]);
+  }
+  return { nodes, sequenceEdges, rewindEdges };
 }
 
 export function PolyforgePanel({

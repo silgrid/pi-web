@@ -238,3 +238,146 @@ test("pi#113: a manual refresh click spins the icon and disables the button for 
   // The settle promise flows through the prop contract.
   assert.ok(source.includes("onRefresh: () => void | Promise<void>;"), "onRefresh may return a promise");
 });
+
+test("pi#114 buildStepGraph: declared_steps drives node order with pending placeholders and declared-only edges", () => {
+  const context = vm.createContext({});
+  vm.runInContext(stripTypeScriptTypes(extractPureFunction("buildStepGraph").replace(/export /g, "")), context);
+  const graph = JSON.parse(JSON.stringify(context.buildStepGraph(
+    [
+      { name: "spec", status: "done" },
+      { name: "grill", status: "done" },
+      { name: "code", status: "in_progress" },
+    ],
+    [{ id: "grill" }, { id: "grill-review" }, { id: "spec" }, { id: "code" }],
+    [],
+  )));
+  // Declaration order wins over started-at order; declared-but-missing id is a pending placeholder.
+  assert.deepEqual(graph.nodes.map((n) => [n.id, n.status]), [
+    ["grill", "done"],
+    ["grill-review", "pending"],
+    ["spec", "done"],
+    ["code", "in_progress"],
+  ]);
+  // Sequence edges join consecutive declared steps only.
+  assert.deepEqual(graph.sequenceEdges, [["grill", "grill-review"], ["grill-review", "spec"], ["spec", "code"]]);
+  assert.deepEqual(graph.rewindEdges, []);
+});
+
+test("pi#114 buildStepGraph: on_fail can never become a node or an edge", () => {
+  const context = vm.createContext({});
+  vm.runInContext(stripTypeScriptTypes(extractPureFunction("buildStepGraph").replace(/export /g, "")), context);
+  // Even if a raw declaration sneaks extra fields past the caller, the model
+  // keeps id+status only, and non-rewind events produce no edges.
+  const graph = JSON.parse(JSON.stringify(context.buildStepGraph(
+    [{ name: "grill", status: "done" }],
+    [{ id: "grill", on_fail: "spec" }],
+    [{ kind: "step_failed", step: "grill", cause: "x" }, { kind: "gate_verdict" }],
+  )));
+  assert.deepEqual(graph.nodes, [{ id: "grill", status: "done" }]);
+  assert.equal(JSON.stringify(graph).includes("on_fail"), false, "on_fail leaked into the graph model");
+  assert.deepEqual(graph.sequenceEdges, []);
+  assert.deepEqual(graph.rewindEdges, []);
+});
+
+test("pi#114 buildStepGraph: null declared_steps falls back to started-at order with started-only edges", () => {
+  const context = vm.createContext({});
+  vm.runInContext(stripTypeScriptTypes(extractPureFunction("buildStepGraph").replace(/export /g, "")), context);
+  for (const declared of [null, []]) {
+    const graph = JSON.parse(JSON.stringify(context.buildStepGraph(
+      [
+        { name: "zulu-grill", status: "done" },
+        { name: "mike-spec", status: "done" },
+        { name: "alpha-plan", status: "in_progress" },
+        { name: "kilo-author", status: "pending" },
+        { name: "bravo-code", status: "pending" },
+      ],
+      declared,
+      [],
+    )));
+    assert.deepEqual(graph.nodes.map((n) => n.id), ["zulu-grill", "mike-spec", "alpha-plan", "kilo-author", "bravo-code"], "nodes follow steps order when declared_steps is null or empty");
+    assert.deepEqual(graph.sequenceEdges, [["zulu-grill", "mike-spec"], ["mike-spec", "alpha-plan"]], "only consecutive started steps are edged");
+  }
+});
+
+test("pi#114 buildStepGraph: mismatch appends extras unedged after the declaration", () => {
+  const context = vm.createContext({});
+  vm.runInContext(stripTypeScriptTypes(extractPureFunction("buildStepGraph").replace(/export /g, "")), context);
+  const graph = JSON.parse(JSON.stringify(context.buildStepGraph(
+    [
+      { name: "grill", status: "done" },
+      { name: "spec", status: "in_progress" },
+      { name: "plan", status: "done" },
+      { name: "code", status: "done" },
+    ],
+    [{ id: "grill" }, { id: "spec" }, { id: "ghost-step" }],
+    [],
+  )));
+  assert.deepEqual(graph.nodes.map((n) => [n.id, n.status]), [
+    ["grill", "done"],
+    ["spec", "in_progress"],
+    ["ghost-step", "pending"],
+    ["plan", "done"],
+    ["code", "done"],
+  ]);
+  assert.deepEqual(graph.sequenceEdges, [["grill", "spec"], ["spec", "ghost-step"]], "consecutive declared pairs are edged; declared→extra and extra→extra are not");
+});
+
+test("pi#114 buildStepGraph: one node per step after a rewind re-run, no attempt counter", () => {
+  const context = vm.createContext({});
+  vm.runInContext(stripTypeScriptTypes(extractPureFunction("buildStepGraph").replace(/export /g, "")), context);
+  const graph = JSON.parse(JSON.stringify(context.buildStepGraph(
+    [
+      { name: "grill", status: "done" },
+      { name: "spec", status: "in_progress" },
+      { name: "grill-review", status: "failed" },
+      { name: "plan", status: "pending" },
+      { name: "code", status: "pending" },
+    ],
+    ["grill", "spec", "grill-review", "plan", "code"].map((id) => ({ id })),
+    [{ kind: "rewind", gate: "grill-review", target: "spec" }],
+  )));
+  assert.deepEqual(graph.nodes.map((n) => n.id), ["grill", "spec", "grill-review", "plan", "code"], "exactly one node per step");
+  assert.ok(graph.nodes.every((n) => Object.keys(n).sort().join(",") === "id,status"), "nodes carry no attempt counter fields");
+});
+
+test("pi#114 buildStepGraph: rewind edges need the tail, both endpoints, and dedupe", () => {
+  const context = vm.createContext({});
+  vm.runInContext(stripTypeScriptTypes(extractPureFunction("buildStepGraph").replace(/export /g, "")), context);
+  const steps = [
+    { name: "grill", status: "done" },
+    { name: "spec", status: "in_progress" },
+    { name: "grill-review", status: "failed" },
+    { name: "plan", status: "pending" },
+    { name: "code", status: "pending" },
+  ];
+  const declared = steps.map((s) => ({ id: s.name }));
+  // Tail-window limitation: a rewind outside the passed tail (the sanitizer
+  // only forwards the newest 40) produces no edge.
+  const outsideTail = JSON.parse(JSON.stringify(context.buildStepGraph(steps, declared, [])));
+  assert.deepEqual(outsideTail.rewindEdges, [], "no tail rewind events → no rewind edges");
+  const tail = JSON.parse(JSON.stringify(context.buildStepGraph(steps, declared, [
+    { kind: "rewind", gate: "code", target: "plan" },
+    { kind: "published" },
+    { kind: "rewind", gate: "grill-review", target: "spec" },
+    { kind: "rewind", gate: "ghost-gate", target: "spec" },
+    { kind: "rewind", gate: "spec", target: "ghost-target" },
+    { kind: "rewind", gate: "grill-review", target: "spec" },
+  ])));
+  assert.deepEqual(tail.rewindEdges, [["code", "plan"], ["grill-review", "spec"]], "only tail rewinds with both endpoints as nodes, deduplicated");
+});
+
+test("pi#114 stepNodeColor: explicit gray for pending/cancelled, unknown statuses fall back gray", () => {
+  const context = vm.createContext({});
+  const colorMap = source.match(/const STEP_STATUS_COLORS: Record<string, string> = \{[\s\S]*?\n\};/);
+  assert.ok(colorMap, "STEP_STATUS_COLORS map literal");
+  vm.runInContext(stripTypeScriptTypes(colorMap[0]), context);
+  vm.runInContext(stripTypeScriptTypes(extractPureFunction("stepNodeColor").replace(/export /g, "")), context);
+  assert.equal(context.stepNodeColor("done"), "#16a34a");
+  assert.equal(context.stepNodeColor("failed"), "#dc2626");
+  assert.equal(context.stepNodeColor("blocked"), "#d97706");
+  assert.equal(context.stepNodeColor("in_progress"), "var(--accent)");
+  const gray = context.stepNodeColor("pending");
+  assert.equal(gray, "var(--text-dim)", "pending is explicit gray");
+  assert.equal(context.stepNodeColor("cancelled"), gray, "cancelled is the same gray as pending");
+  assert.equal(context.stepNodeColor("paused"), gray, "unknown status falls back to the same gray");
+});
