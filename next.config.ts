@@ -111,19 +111,6 @@ const nextConfig: NextConfig = {
           { key: "Cache-Control", value: "public, max-age=0, must-revalidate" },
         ],
       },
-      {
-        // Digital Asset Links for the Android TWA shell (pi#40). Must stay
-        // reachable WITHOUT the web-password gate — the browser's TWA
-        // verification fetches it unauthenticated. proxy.ts's matcher
-        // (["/", "/login", "/api/:path*"]) never matches this path, so no
-        // proxy change is needed. Regenerate per APK re-sign with
-        // mobile-twa/scripts/assetlinks.sh; max-age=0 so Chrome re-verifies
-        // right after an APK re-sign instead of serving a stale statement.
-        source: "/.well-known/assetlinks.json",
-        headers: [
-          { key: "Cache-Control", value: "public, max-age=0, must-revalidate" },
-        ],
-      },
     ];
   },
   env: {
