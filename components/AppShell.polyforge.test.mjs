@@ -78,3 +78,29 @@ test("no RegExp lookbehind anywhere in the new client sources", () => {
     assert.doesNotMatch(src, /\(\?<[=!]/, `${name} uses a RegExp lookbehind (forbidden in client code)`);
   }
 });
+
+test("pi#113: a pointer press outside the desktop dock dismisses it, without eating the click", () => {
+  // The listener lives only while the desktop dock is open (mobile keeps its
+  // backdrop; a closed dock leaves nothing attached).
+  assert.match(source, /if \(!pfPanelOpen \|\| isMobile\) return;/, "gated on desktop-dock-open");
+  assert.match(source, /document\.addEventListener\("pointerdown", dismissOnOutsidePress\);/);
+  assert.match(source, /return \(\) => document\.removeEventListener\("pointerdown", dismissOnOutsidePress\);/, "cleanup detaches the listener");
+  // The dismissal path must not swallow the press: the same click still fires
+  // on its target (mem_Y6pX8exg — eating the events loses the click).
+  const start = source.indexOf("const dismissOnOutsidePress");
+  assert.ok(start >= 0, "dismissOnOutsidePress handler exists");
+  const body = source.slice(start, source.indexOf("};", start));
+  assert.match(body, /setPfPanelOpen\(false\);/, "an outside press closes the dock");
+  assert.doesNotMatch(body, /preventDefault|stopPropagation/, "the dismissing press must not be eaten");
+  // Presses inside the dock (rows, refresh, ×, event-mode controls) and on
+  // the topbar toggle (whose own click already ends closed — a pointerdown
+  // dismissal there would close-then-reopen) never dismiss.
+  assert.match(body, /target\.closest\("\[data-pf-dock\], \[data-pf-toggle\]"\)/, "dock and toggle are exempt");
+  const attrUses = (name) => (source.match(new RegExp(`${name}`, "g")) ?? []).length
+    - (source.match(new RegExp(`\\[${name}\\]`, "g")) ?? []).length;
+  assert.equal(attrUses("data-pf-dock"), 1, "exactly the desktop dock is marked (mobile sheet and bg dock are not)");
+  assert.ok(attrUses("data-pf-toggle") >= 1, "the topbar Polyforge toggle is marked");
+  // The toggle keeps its functional-update semantics: press-then-click on it
+  // ends closed, never a close-then-reopen.
+  assert.match(source, /setPfPanelOpen\(\(open\) => \{\s*const next = !open;\s*if \(next\) setBgPanelOpen\(false\);\s*return next;\s*\}\);/);
+});

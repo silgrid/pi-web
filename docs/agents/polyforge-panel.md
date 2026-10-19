@@ -79,6 +79,15 @@ ties by name.
   mobile sheet) — enforced on every path that opens either panel, including
   the bg-task terminal notification's jump: its onClick closes the Polyforge
   panel before showing bg-tasks, so the jump never lands on a covered dock.
+  Desktop dock dismissal (pi#113): while the dock is open, a `pointerdown`
+  anywhere outside its own DOM (`data-pf-dock`) closes it — the press is
+  never eaten (no `preventDefault`/`stopPropagation`; the dock is an overlay,
+  so nothing under it unmounts mid-click), so the same click still performs
+  its normal action on its target. The topbar toggle (`data-pf-toggle`) is
+  exempt: its own click already ends closed, and a pointerdown dismissal
+  there would close-then-reopen. The listener exists only while the desktop
+  dock is open; the mobile sheet keeps its backdrop tap and the bg-tasks dock
+  gets no outside-click close.
 - **Event tail display modes (pi#112):** panel-local state with a global
   localStorage key `pi-web:polyforge-event-mode` (`"simple"|"verbose"`;
   absent/invalid reads as simple). Simple mode (the default) collapses each

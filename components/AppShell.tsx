@@ -282,6 +282,27 @@ export function AppShell() {
     refreshStatus: refreshPolyforgeStatus,
   } = usePolyforge(pfPanelOpen);
 
+  // pi#113: while the DESKTOP dock is open, a pointer press anywhere outside
+  // its own DOM dismisses it — and the press still reaches its target: no
+  // preventDefault/stopPropagation, and the dock is an overlay, so nothing
+  // under it unmounts between press and release (mem_Y6pX8exg: replacing the
+  // press target mid-click eats the click). The topbar toggle is exempt: its
+  // own click already toggles the dock closed, and a pointerdown dismissal
+  // here would flip that functional update into a close-then-reopen. Mobile
+  // keeps its backdrop tap (unchanged); the listener exists only while the
+  // desktop dock is open.
+  useEffect(() => {
+    if (!pfPanelOpen || isMobile) return;
+    const dismissOnOutsidePress = (event: PointerEvent) => {
+      const target = event.target;
+      if (!(target instanceof Element)) return;
+      if (target.closest("[data-pf-dock], [data-pf-toggle]")) return;
+      setPfPanelOpen(false);
+    };
+    document.addEventListener("pointerdown", dismissOnOutsidePress);
+    return () => document.removeEventListener("pointerdown", dismissOnOutsidePress);
+  }, [pfPanelOpen, isMobile]);
+
   // Live background-task events arrive per session pane (split view feeds every
   // pane's stream; the classic single chat feeds its own). Panel state only
   // accepts events from the session the panel currently follows; the terminal
@@ -1869,6 +1890,7 @@ export function AppShell() {
         {pfPresent && (
           <button
             type="button"
+            data-pf-toggle
             onClick={() => {
               setPfPanelOpen((open) => {
                 const next = !open;
@@ -3295,6 +3317,7 @@ export function AppShell() {
             ) : (
               <div
                 role="complementary"
+                data-pf-dock
                 aria-label={translate("polyforge.title")}
                 style={{
                   position: "absolute", top: 0, right: 0, bottom: 0, width: 340,
