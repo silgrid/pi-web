@@ -9,6 +9,10 @@ const STEP_STATUS_COLORS: Record<string, string> = {
   done: "#16a34a",
   failed: "#dc2626",
   blocked: "#d97706",
+  // pi#114: state the full contract — pending/cancelled are gray explicitly;
+  // unknown statuses keep the same gray via the fallback in stepNodeColor.
+  pending: "var(--text-dim)",
+  cancelled: "var(--text-dim)",
 };
 
 const CANDIDATE_MAX = 24;
@@ -130,6 +134,83 @@ export function formatEventValues(event: PolyforgeEvent): string {
   return head ? `${head} · ${tail}` : tail;
 }
 
+/** Node colour for the step flow graph (pi#114, R6): status colour from the
+ *  explicit map; unknown statuses read gray, never a missing entry. */
+export function stepNodeColor(status: string): string {
+  return STEP_STATUS_COLORS[status] ?? "var(--text-dim)";
+}
+
+export interface StepGraph {
+  nodes: { id: string; status: string }[];
+  sequenceEdges: [string, string][];
+  rewindEdges: [string, string][];
+}
+
+/** Flow-graph model for the step display (pi#114, R2–R5). Pure: no I/O, no
+ *  throw, so a malformed snapshot degrades silently instead of surfacing an
+ *  error.
+ *  - `declaredSteps` present: nodes follow declaration order; declared ids
+ *    missing from `steps` become pending gray placeholders; steps absent from
+ *    the declaration are appended in started-at fallback order (the order
+ *    `steps` already carries) with no sequence edges.
+ *  - `declaredSteps` null (absent/malformed/empty): nodes follow the
+ *    started-at fallback order of `steps`; the started segment is the prefix of
+ *    steps up to and including the LAST node whose status is not 'pending',
+ *    and sequence edges join every consecutive pair inside that prefix, so
+ *    never-started (always pending) steps trail unedged.
+ *    Basis: pf stamps `step_started_at` on claim (transition.go ~293-309), so a
+ *    step that never started is always pending; but a rewind
+ *    (applyRewindRangeLocked) resets [target, gate) to 'pending' while keeping
+ *    `step_started_at`, so pending steps can sit inside the started segment —
+ *    testing pairs individually would wrongly break the chain around them.
+ *  - Rewind edges: only tail `rewind` events whose gate AND target are both
+ *    nodes, one edge per distinct gate→target pair. `on_fail` targets are
+ *    not nodes in this model, so they can never be drawn. */
+export function buildStepGraph(
+  steps: { name: string; status: string }[],
+  declaredSteps: { id: string }[] | null,
+  events: { kind: string; gate?: string; target?: string }[],
+): StepGraph {
+  const statusByName = new Map(steps.map((step) => [step.name, step.status]));
+  const sequenceEdges: [string, string][] = [];
+  let nodes: { id: string; status: string }[];
+  if (declaredSteps && declaredSteps.length > 0) {
+    nodes = declaredSteps.map(({ id }) => ({ id, status: statusByName.get(id) ?? "pending" }));
+    const declared = new Set(declaredSteps.map(({ id }) => id));
+    for (const step of steps) {
+      if (!declared.has(step.name)) nodes.push({ id: step.name, status: step.status });
+    }
+    for (let i = 1; i < declaredSteps.length; i++) {
+      sequenceEdges.push([declaredSteps[i - 1].id, declaredSteps[i].id]);
+    }
+  } else {
+    nodes = steps.map((step) => ({ id: step.name, status: step.status }));
+    // Started segment = prefix up to and including the LAST non-pending node.
+    // pf rewinds reset [target, gate) to 'pending' while keeping started_at, so
+    // pending steps can sit inside the started segment; edge the whole prefix
+    // and leave the trailing never-started steps unedged.
+    let lastStarted = -1;
+    for (let i = 0; i < nodes.length; i++) {
+      if (nodes[i].status !== "pending") lastStarted = i;
+    }
+    for (let i = 1; i <= lastStarted; i++) {
+      sequenceEdges.push([nodes[i - 1].id, nodes[i].id]);
+    }
+  }
+  const nodeIds = new Set(nodes.map((node) => node.id));
+  const rewindEdges: [string, string][] = [];
+  const seenRewinds = new Set<string>();
+  for (const event of events) {
+    if (event.kind !== "rewind" || !event.gate || !event.target) continue;
+    if (!nodeIds.has(event.gate) || !nodeIds.has(event.target)) continue;
+    const key = `${event.gate}\u0000${event.target}`;
+    if (seenRewinds.has(key)) continue;
+    seenRewinds.add(key);
+    rewindEdges.push([event.gate, event.target]);
+  }
+  return { nodes, sequenceEdges, rewindEdges };
+}
+
 export function PolyforgePanel({
   opsStatus,
   opsError,
@@ -232,6 +313,12 @@ export function PolyforgePanel({
       </div>
     );
   }, [eventMode, formatEventTime, eventKindLabel]);
+
+  // Step flow graph (pi#114): derived from the sanitized watch snapshot.
+  // Null exactly when watchStatus is null (the detail section's loading state).
+  const graph = watchStatus
+    ? buildStepGraph(watchStatus.steps, watchStatus.declared_steps, watchStatus.events)
+    : null;
 
   const jobs = opsStatus?.jobs ?? [];
 
@@ -351,16 +438,71 @@ export function PolyforgePanel({
                     </div>
                     {watchStatus ? (
                       <>
-                        {/* Steps in execution order */}
-                        <div style={{ padding: "6px 12px", display: "flex", flexWrap: "wrap", gap: 4, borderBottom: "1px solid var(--border)", flexShrink: 0 }}>
-                          {watchStatus.steps.map((step) => (
-                            <span key={step.name} title={stepStatusLabel(step.status)} style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "2px 6px", borderRadius: 6, border: "1px solid var(--border)", fontSize: 11, color: "var(--text)", fontFamily: "var(--font-mono, monospace)" }}>
-                              <span aria-hidden="true" style={{ width: 7, height: 7, borderRadius: 4, flexShrink: 0, background: STEP_STATUS_COLORS[step.status] ?? "var(--text-dim)" }} />
-                              {step.name}
-                              <span style={{ color: "var(--text-dim)", fontSize: 10 }}>{stepStatusLabel(step.status)}</span>
-                            </span>
-                          ))}
+                        {/* Step flow graph (pi#114): display-only nodes with
+                            status dots, solid sequence connectors between
+                            consecutive nodes, dashed rewind chips below.
+                            Nodes wrap; the container never scrolls. */}
+                        {graph && (
+                        <div style={{ padding: "6px 12px", borderBottom: "1px solid var(--border)", flexShrink: 0, overflow: "hidden" }}>
+                          <div role="list" style={{ display: "flex", flexWrap: "wrap", alignItems: "center", rowGap: 6 }}>
+                            {graph.nodes.map((node, index) => (
+                              <span key={`${node.id}-${index}`} style={{ display: "inline-flex", alignItems: "center" }}>
+                                {/* Connector only for pairs the model actually
+                                    edges: started-only in fallback (G5), and
+                                    declared-consecutive pairs only (G6). */}
+                                {index > 0 &&
+                                  graph.sequenceEdges.some(
+                                    ([from, to]) => from === graph.nodes[index - 1].id && to === node.id,
+                                  ) && (
+                                  <span aria-hidden="true" style={{ color: "var(--text-dim)", fontSize: 10, padding: "0 3px", flexShrink: 0 }}>
+                                    →
+                                  </span>
+                                )}
+                                <span
+                                  role="listitem"
+                                  title={`${node.id} · ${stepStatusLabel(node.status)}`}
+                                  aria-label={`${node.id} · ${stepStatusLabel(node.status)}`}
+                                  style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "2px 6px", borderRadius: 6, border: "1px solid var(--border)", fontSize: 11, color: "var(--text)", fontFamily: "var(--font-mono, monospace)" }}
+                                >
+                                  <span
+                                    aria-hidden="true"
+                                    className={node.status === "in_progress" ? "pf-step-node-pulse" : undefined}
+                                    style={{ width: 7, height: 7, borderRadius: 4, flexShrink: 0, background: stepNodeColor(node.status) }}
+                                  />
+                                  {shortenCandidate(node.id)}
+                                </span>
+                              </span>
+                            ))}
+                          </div>
+                          {graph.rewindEdges.length > 0 && (
+                            <div style={{ display: "flex", flexWrap: "wrap", gap: 4, paddingTop: 4 }}>
+                              {graph.rewindEdges.map(([gate, target]) => (
+                                <span
+                                  key={`${gate}->${target}`}
+                                  title={`${eventKindLabel("rewind")}: ${gate} → ${target}`}
+                                  aria-label={`${eventKindLabel("rewind")}: ${gate} → ${target}`}
+                                  style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "1px 6px", borderRadius: 6, border: "1px dashed var(--border)", fontSize: 10, color: "var(--text-dim)", fontFamily: "var(--font-mono, monospace)" }}
+                                >
+                                  <span aria-hidden="true">⇢</span>
+                                  {`${shortenCandidate(gate)} → ${shortenCandidate(target)}`}
+                                </span>
+                              ))}
+                            </div>
+                          )}
+                          {/* Verbose-only: the pre-graph name+status chips. */}
+                          {eventMode === "verbose" && (
+                            <div style={{ display: "flex", flexWrap: "wrap", gap: 4, paddingTop: 4 }}>
+                              {watchStatus.steps.map((step) => (
+                                <span key={step.name} title={stepStatusLabel(step.status)} style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "2px 6px", borderRadius: 6, border: "1px solid var(--border)", fontSize: 11, color: "var(--text)", fontFamily: "var(--font-mono, monospace)" }}>
+                                  <span aria-hidden="true" style={{ width: 7, height: 7, borderRadius: 4, flexShrink: 0, background: stepNodeColor(step.status) }} />
+                                  {step.name}
+                                  <span style={{ color: "var(--text-dim)", fontSize: 10 }}>{stepStatusLabel(step.status)}</span>
+                                </span>
+                              ))}
+                            </div>
+                          )}
                         </div>
+                        )}
                         {/* Event tail (newest last) */}
                         <div style={{ flexShrink: 0, display: "flex", justifyContent: "flex-end", padding: "2px 12px 0" }}>
                           <button
