@@ -466,8 +466,8 @@ try {
     const panel = await openPanel(page);
     await panel.getByText("pi#108", { exact: true }).first().click();
     await panel.getByText("zulu-grill").first().waitFor();
-    // pi#114: in simple mode the step names render only as flow-graph nodes (chips
-    // return in Verbose), so this order check now guards the graph; the strict
+    // pi#114/#116: the step names render only as flow-graph nodes (no step-chip
+    // row in any mode), so this order check guards the graph; the strict
     // node-order/edge contract lives in e2e/polyforge-graph.mjs.
     const text = await panel.innerText();
     const idx = STEP_ORDER.map((s) => text.indexOf(s));
