@@ -13,7 +13,8 @@ the `polyforge.*` wiring in `components/AppShell.tsx`.
   Pf absent answers `{pfPresent:false,status:null}` (no error, the client stops
   polling); daemon down / auth failure / hang answer `{pfPresent:true,status:null,error}`.
 - `GET /api/polyforge/watch?wi=<slug|wi_id>` → 200 `{status:{wi,slug,workflowStatus,
-  currentStep,updatedAt,steps:[{name,status}],events:[{at,kind,summary?}]} | null, error?}`.
+  currentStep,updatedAt,steps:[{name,status}],declared_steps:[{id}]|null,
+  events:[{at,kind,summary?}]} | null, error?}`.
   A malformed `wi` answers 400 and never spawns pf.
 - There is no 5xx path on either route, and every failure answers decodable
   JSON: the e2e suite treats any 5xx as a browser error. Both routes re-check
@@ -54,6 +55,56 @@ particular `needs_input` carries kind and step only, never the question
 text. `progress`, raw event bodies and `job` are dropped. Step order is
 execution order: started steps by `started_at` ascending, unstarted last,
 ties by name.
+
+`execution.declared_steps` (pi#114, raw shape proposed to companion WI
+#213) is sanitized by `sanitizeDeclaredSteps` to the client shape
+`declared_steps: [{id}] | null`: each entry contributes only its trimmed
+non-empty `id`, in declaration order — `on_fail` and every other declared
+field (e.g. `path`) are dropped server-side and never reach a response.
+Absent, null, non-array, empty, or any entry without a valid id degrades
+the whole field to `null` (pure, never throws, so the 2xx no-error-surface
+contract holds); `steps`/`events` are unaffected either way.
+
+## Step flow graph (pi#114)
+
+The selected detail renders the steps as a flow graph instead of a plain
+chip row (`buildStepGraph` in `components/PolyforgePanel.tsx`, pure):
+
+- **Nodes** — one node per step, `role="list"`/`role="listitem"`,
+  display-only (no click handler, no navigation). A node shows the 24-char
+  cut step name plus a status dot; the full untruncated name and the
+  translated status label (`polyforge.stepStatus.*`) are carried in the
+  node's `title` and `aria-label`. Colours: done green (#16a34a), failed
+  red (#dc2626), blocked amber (#d97706), in_progress `var(--accent)`,
+  pending/cancelled/unknown gray (`var(--text-dim)`). Only the
+  in_progress node's dot pulses (`.pf-step-node-pulse`, reusing the
+  existing `pulse` keyframes); `prefers-reduced-motion: reduce` disables
+  the animation.
+- **Order and sequence edges** — with a valid `declared_steps`, nodes
+  follow the declaration order; declared ids missing from `steps` render
+  as pending gray placeholders; steps absent from the declaration are
+  appended in started-at fallback order with no edges. Solid inline
+  connectors (`→`, aria-hidden) join consecutive declared nodes only —
+  never the last declared node to an appended extra, and never two
+  extras. Without usable `declared_steps` (absent/malformed → `null`),
+  the graph falls back to the started-at order and edges only consecutive
+  started steps, so unstarted steps trail unedged. `on_fail` targets are
+  not part of the node model, so they are never drawn. The node row is a
+  `flex-wrap` container with `overflow: hidden` — rows wrap in the 340 px
+  dock and the mobile sheet with no horizontal scroll; a connector that
+  lands at a line end simply ends that line.
+- **Rewind edges** — each taken `rewind` event in the sanitized 40-event
+  tail whose gate AND target are both nodes renders as one dashed chip on
+  its own line under the node row, `title`/`aria-label`
+  `${polyforge.eventKind.rewind}: gate → target` (existing keys, no new
+  i18n labels). Rewinds outside the tail window or with an unknown
+  endpoint are not drawn, and no dashed element exists in the panel
+  otherwise.
+- **Verbose chips** — in Verbose event mode, the pre-graph
+  name+status chips render below the graph in addition to the nodes; in
+  simple mode (the default, and for an invalid stored mode) only the
+  graph shows. The mode toggle behavior is unchanged and stays
+  client-side.
 
 ## Client behavior
 
