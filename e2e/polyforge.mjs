@@ -322,6 +322,15 @@ const textContrast = (panel, needle) => panel.first().evaluate((root, needle) =>
   const fg = lum(getComputedStyle(smallest).color);
   return fg === null ? null : Math.abs(fg - bg);
 }, needle);
+// en label for a polyforge event kind, read from the message source so the
+// contrast checks below compare like with like (label span vs label span)
+// without hardcoding wording.
+const enKindLabel = (kind) => {
+  const source = readFileSync(join(root, "lib", "i18n", "messages", "en.ts"), "utf8");
+  const m = new RegExp(`"polyforge\\.eventKind\\.${kind}":\\s*"([^"]+)"`).exec(source);
+  assert.ok(m, `en label for ${kind} not found`);
+  return m[1];
+};
 async function ensureDetail112(page) {
   // The pi#112 detail is showing iff its tail renders the raw kind
   // `future_kind_e2e` (unique to this fixture, raw before and after the change
@@ -585,6 +594,8 @@ try {
       assert.ok(event, `${kind} event missing from the tail`);
       assert.ok(JSON.stringify(event).includes("zulu-grill") || JSON.stringify(event).includes("kilo-author"), `${kind} event lost its step`);
     }
+    const switchedEvent = events.find((e) => e && e.kind === "candidate_switched");
+    assert.ok(switchedEvent && JSON.stringify(switchedEvent).includes("alpha-plan"), "candidate_switched.step is not exposed by the watch route");
     for (const secret of SECRETS112) assert.ok(!r.text.includes(secret), `watch response leaks ${secret}`);
   });
 
@@ -600,6 +611,7 @@ try {
     const started2 = await rowText(panel, "step_started", 1);
     assert.ok(started2?.includes("kilo-author"), `second step_started row lacks its step: ${JSON.stringify(started2)}`);
     const switched = await rowText(panel, "candidate_switched");
+    assert.ok(switched?.includes("alpha-plan"), `candidate_switched row lacks its step: ${JSON.stringify(switched)}`);
     assert.ok(switched?.includes(FROM112) && switched.includes(TO112), `candidate_switched row lacks from/to: ${JSON.stringify(switched)}`);
     assert.match(switched ?? "", /→|->/, "candidate_switched row shows no from → to form");
     const failed = await rowText(panel, "step_failed");
@@ -675,8 +687,11 @@ try {
     assert.equal(await panel.getByText(/sync\s*[×x]\s*\d/i).count(), 0, "verbose mode must not collapse noise runs");
     const pushed = await rowText(panel, "push_failed");
     assert.ok(pushed?.includes("push_failed"), `the raw kind is not shown inline on verbose rows: ${JSON.stringify(pushed)}`);
-    const noiseContrast = await textContrast(panel, "exec_init");
-    const anchorContrast = await textContrast(panel, "zulu-grill");
+    // Like-with-like: compare the noise row's friendly label against a
+    // meaningful neutral row's label (the raw-kind spans are dim on every
+    // verbose row, so comparing those would pass even without noise styling).
+    const noiseContrast = await textContrast(panel, enKindLabel("exec_init"));
+    const anchorContrast = await textContrast(panel, enKindLabel("gate_verdict"));
     assert.ok(noiseContrast !== null && anchorContrast !== null && noiseContrast < anchorContrast,
       `verbose noise rows are not grayed (noise ${noiseContrast}, anchor ${anchorContrast})`);
   });
