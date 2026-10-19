@@ -352,7 +352,11 @@ try {
       const t0 = Date.now(); await delay(300);
       for (const n of g.nodes) await panel.getByText(n.text, { exact: true }).first().click({ timeout: 2000 });
       await delay(Math.max(0, 2500 - (Date.now() - t0)));
-      const early = hits.filter((h) => h.t > t0 + 250 && h.t < t0 + 2500 && h.path !== "/api/polyforge/status");
+      // Owner-authorized amendment (Q 114-code-g11-running-poll-conflict):
+      // exclude the sidebar's background GET /api/agent/running poll
+      // (RUNNING_SESSIONS_POLL_MS=2500ms); PROBE_CLICK=0 showed an identical
+      // request signature with zero clicks. Any click-caused request still fails.
+      const early = hits.filter((h) => h.t > t0 + 250 && h.t < t0 + 2500 && h.path !== "/api/polyforge/status" && h.path !== "/api/agent/running");
       assert.deepEqual(early, [], `clicking nodes issued ${JSON.stringify(early)}`);
       assert.equal(page.url(), url, "clicking a node navigated");
       assert.ok((await panel.getByText(marker("pi#209")).count()) > 0 && (await panel.locator("[title]").count()) === titled, "clicking a node changed the detail or filtered the tail");
