@@ -1,7 +1,7 @@
 "use client";
 
-import { useCallback } from "react";
-import type { PolyforgeJob, PolyforgeOpsStatus, PolyforgeWatchStatus } from "@/lib/polyforge-status";
+import { useCallback, useEffect, useState } from "react";
+import type { PolyforgeEvent, PolyforgeJob, PolyforgeOpsStatus, PolyforgeWatchStatus } from "@/lib/polyforge-status";
 import { useI18n } from "@/hooks/useI18n";
 
 const STEP_STATUS_COLORS: Record<string, string> = {
@@ -34,9 +34,87 @@ const JOB_STATUS_KEYS = new Set(["running", "needs_input", "queued", "completed"
 const STEP_STATUS_KEYS = new Set(["done", "in_progress", "pending", "failed", "blocked", "cancelled"]);
 const WORKFLOW_STATUS_KEYS = new Set(["running", "needs_input", "queued", "completed", "blocked", "failed", "cancelled", "done"]);
 const EVENT_KIND_KEYS = new Set([
-  "published", "step_started", "step_done", "step_failed", "step_blocked",
-  "job_started", "needs_input", "job_done", "job_blocked",
+  "published", "transcript_missing", "exec_init", "step_started", "step_done",
+  "step_failed", "step_dead", "candidate_switched", "needs_input", "answered",
+  "gate_verdict", "rewind", "envelope_rejected", "needs_recovery", "push_failed",
+  "job_started", "job_stopped", "terminal", "authored_tests_rebaselined",
 ]);
+const EVENT_ARROW_KINDS = new Set(["candidate_switched", "rewind"]);
+
+/** Severity colours (pi#112): amber needs_input; red failure kinds; green
+ *  terminal completed; terminal cancelled and everything else neutral. */
+const EVENT_SEVERITY_COLORS: Record<string, string> = {
+  amber: "#d97706",
+  red: "#dc2626",
+  green: "#16a34a",
+};
+
+/** Global (browser-wide) storage key for the event tail display mode. */
+const EVENT_MODE_STORAGE_KEY = "pi-web:polyforge-event-mode";
+
+type EventMode = "simple" | "verbose";
+
+export type PolyforgeTailRow =
+  | { noise: true; count: number }
+  | { noise: false; event: PolyforgeEvent };
+
+/** Collapse each consecutive run of noise events into a single
+ *  `{ noise: true, count }` marker (N≥1 uniform). Meaningful events are
+ *  never collapsed. Pure helper, no I/O. */
+export function collapseNoiseRuns(events: PolyforgeEvent[]): PolyforgeTailRow[] {
+  const noise = new Set(["published", "transcript_missing", "exec_init"]);
+  const rows: PolyforgeTailRow[] = [];
+  for (const event of events) {
+    const last = rows[rows.length - 1];
+    if (noise.has(event.kind)) {
+      if (last && last.noise) last.count += 1;
+      else rows.push({ noise: true, count: 1 });
+    } else {
+      rows.push({ noise: false, event });
+    }
+  }
+  return rows;
+}
+
+/** Severity emphasis per kind (pi#112): amber needs_input; red failure kinds;
+ *  green terminal completed; terminal cancelled and everything else neutral. */
+export function eventSeverity(event: { kind: string; status?: string }): "amber" | "red" | "green" | null {
+  if (event.kind === "needs_input") return "amber";
+  if (event.kind === "terminal") {
+    if (event.status === "completed") return "green";
+    if (event.status === "failed") return "red";
+    return null;
+  }
+  if (
+    event.kind === "step_failed"
+    || event.kind === "step_dead"
+    || event.kind === "push_failed"
+    || event.kind === "envelope_rejected"
+    || event.kind === "needs_recovery"
+  ) {
+    return "red";
+  }
+  return null;
+}
+
+/** Whitelisted field values of an event, in display order (untruncated). */
+export function eventValueParts(event: PolyforgeEvent): (string | undefined)[] {
+  switch (event.kind) {
+    case "step_started":
+      return [event.step, event.model];
+    case "candidate_switched":
+      return [event.from, event.to];
+    case "step_failed":
+    case "step_dead":
+      return [event.step, event.cause];
+    case "rewind":
+      return [event.gate, event.target];
+    case "terminal":
+      return [event.status];
+    default:
+      return [event.step];
+  }
+}
 
 export function PolyforgePanel({
   opsStatus,
@@ -56,6 +134,28 @@ export function PolyforgePanel({
   onRefresh: () => void;
 }) {
   const { t, locale } = useI18n();
+
+  // Event tail display mode (pi#112): defaults to simple; the stored global
+  // preference is read in a mount effect because window is unavailable at
+  // first render (client components still SSR).
+  const [eventMode, setEventMode] = useState<EventMode>("simple");
+  useEffect(() => {
+    try {
+      if (window.localStorage.getItem(EVENT_MODE_STORAGE_KEY) === "verbose") setEventMode("verbose");
+    } catch {
+      // storage unavailable — keep the default
+    }
+  }, []);
+  // Client-side only: no fetch/network I/O on toggle.
+  const toggleEventMode = useCallback(() => {
+    const next: EventMode = eventMode === "simple" ? "verbose" : "simple";
+    setEventMode(next);
+    try {
+      window.localStorage.setItem(EVENT_MODE_STORAGE_KEY, next);
+    } catch {
+      // best effort persistence
+    }
+  }, [eventMode]);
 
   const jobStatusLabel = useCallback((status: string) => (
     JOB_STATUS_KEYS.has(status) ? t(`polyforge.jobStatus.${status}`) : status
@@ -79,6 +179,28 @@ export function PolyforgePanel({
       return at;
     }
   }, [locale]);
+
+  const renderEventRow = useCallback((event: PolyforgeEvent, index: number) => {
+    const severity = eventSeverity(event);
+    const parts = eventValueParts(event).filter((v): v is string => !!v);
+    const joiner = EVENT_ARROW_KINDS.has(event.kind) ? " → " : " · ";
+    const displayText = parts.map(shortenCandidate).join(joiner);
+    const titleText = [event.kind, ...parts].join(" ");
+    return (
+      <div
+        key={`${event.at}-${event.kind}-${index}`}
+        title={titleText}
+        style={{ display: "flex", gap: 8, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", color: severity ? EVENT_SEVERITY_COLORS[severity] : "var(--text-muted)" }}
+      >
+        <span style={{ color: "var(--text-dim)", flexShrink: 0 }}>{formatEventTime(event.at)}</span>
+        <span style={{ flexShrink: 0 }}>{eventKindLabel(event.kind)}</span>
+        {displayText && <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{displayText}</span>}
+        {eventMode === "verbose" && EVENT_KIND_KEYS.has(event.kind) && (
+          <span style={{ color: "var(--text-dim)", flexShrink: 0 }}>{event.kind}</span>
+        )}
+      </div>
+    );
+  }, [eventMode, formatEventTime, eventKindLabel]);
 
   const jobs = opsStatus?.jobs ?? [];
 
@@ -208,17 +330,36 @@ export function PolyforgePanel({
                           ))}
                         </div>
                         {/* Event tail (newest last) */}
+                        <div style={{ flexShrink: 0, display: "flex", justifyContent: "flex-end", padding: "2px 12px 0" }}>
+                          <button
+                            type="button"
+                            onClick={toggleEventMode}
+                            aria-pressed={eventMode === "verbose"}
+                            style={{ display: "flex", alignItems: "center", background: "none", border: "1px solid var(--border)", borderRadius: 4, color: "var(--text-muted)", cursor: "pointer", fontSize: 11, padding: "2px 8px" }}
+                          >
+                            {t(eventMode === "simple" ? "polyforge.eventMode.verbose" : "polyforge.eventMode.simple")}
+                          </button>
+                        </div>
                         <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "6px 12px", fontSize: 11, lineHeight: 1.45, fontFamily: "var(--font-mono, monospace)" }}>
                           {watchStatus.events.length === 0 && (
                             <div style={{ color: "var(--text-dim)", fontFamily: "var(--font-sans, sans-serif)" }}>{t("polyforge.emptyEvents")}</div>
                           )}
-                          {watchStatus.events.map((event, index) => (
-                            <div key={`${event.at}-${event.kind}-${index}`} style={{ display: "flex", gap: 8, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                              <span style={{ color: "var(--text-dim)", flexShrink: 0 }}>{formatEventTime(event.at)}</span>
-                              <span style={{ color: "var(--text-muted)", flexShrink: 0 }}>{eventKindLabel(event.kind)}</span>
-                              {event.step && <span style={{ color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis" }}>{event.step}</span>}
-                            </div>
-                          ))}
+                          {eventMode === "verbose"
+                            ? watchStatus.events.map((event, index) => renderEventRow(event, index))
+                            : collapseNoiseRuns(watchStatus.events).map((row, index) =>
+                                row.noise ? (
+                                  <div
+                                    key={`sync-${index}`}
+                                    style={{ display: "flex", gap: 8, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", color: "var(--text-dim)" }}
+                                  >
+                                    <span>
+                                      {t("polyforge.eventSync")} ×{row.count}
+                                    </span>
+                                  </div>
+                                ) : (
+                                  renderEventRow(row.event, index)
+                                ),
+                              )}
                         </div>
                       </>
                     ) : (

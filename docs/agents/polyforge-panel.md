@@ -79,3 +79,19 @@ ties by name.
   mobile sheet) — enforced on every path that opens either panel, including
   the bg-task terminal notification's jump: its onClick closes the Polyforge
   panel before showing bg-tasks, so the jump never lands on a covered dock.
+- **Event tail display modes (pi#112):** panel-local state with a global
+  localStorage key `pi-web:polyforge-event-mode` (`"simple"|"verbose"`;
+  absent/invalid reads as simple). Simple mode (the default) collapses each
+  consecutive run of noise events (`published`, `transcript_missing`,
+  `exec_init`) into one gray `sync ×N` row (×1 included); verbose mode renders
+  every event on its own row with the raw kind shown inline and noise grayed
+  individually. Every row puts the raw kind and full whitelisted field values
+  in its hover `title`, and renders whitelisted values as mono spans
+  (`step · model`, `from → to`, `step · cause`, `gate → target`, terminal
+  status, or lone step), ellipsized at 24 chars like the job candidate.
+  Severity emphasis: `needs_input` amber (#d97706); `step_failed`,
+  `step_dead`, `push_failed`, `envelope_rejected`, `needs_recovery` and
+  `terminal` failed red (#dc2626); `terminal` completed green (#16a34a);
+  `terminal` cancelled and all other kinds neutral. The mode toggle lives in
+  the event-tail area of the selected detail and is purely client-side — no
+  network request on toggle.
