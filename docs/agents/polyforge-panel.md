@@ -41,11 +41,19 @@ the `polyforge.*` wiring in `components/AppShell.tsx`.
 `sanitizeOpsStatus` keeps only queue running/max and per-job
 wi/slug/status/stepAgeSec/idleAgeSec/candidate/spawnN — `env_names`,
 `workspaces`, `workflows_dir`, `machine_id`, `origin`, `session_fingerprint`
-are dropped. `sanitizeWatch` maps events to `{at,kind,summary?}` where
-`summary` derives only from `body.step` (step_started/done/failed) or
-`body.spawn_n`; `needs_input` carries kind only, never the question text.
-`progress`, raw event bodies and `job` are dropped. Step order is execution
-order: started steps by `started_at` ascending, unstarted last, ties by name.
+are dropped. `sanitizeWatch` maps events to
+`{at,kind,step?,model?,from?,to?,cause?,gate?,target?,status?}` using a
+per-kind body whitelist (pi#112): `step_started` → step+model;
+`candidate_switched` → step+from+to; `step_failed`/`step_dead` → step+cause;
+`rewind` → gate+target; `terminal` → status; every other kind (including
+unknown kinds) → step only. Never leaves the sanitizer: question,
+question_id, detail, evidence, error, answered_by, local_commit/commits,
+files, reason, disposition, effort, resume, failure_count, from_model/
+to_model, archived, version, commit_ms/push_ms/pushed, spawn_n — in
+particular `needs_input` carries kind and step only, never the question
+text. `progress`, raw event bodies and `job` are dropped. Step order is
+execution order: started steps by `started_at` ascending, unstarted last,
+ties by name.
 
 ## Client behavior
 
@@ -71,3 +79,24 @@ order: started steps by `started_at` ascending, unstarted last, ties by name.
   mobile sheet) — enforced on every path that opens either panel, including
   the bg-task terminal notification's jump: its onClick closes the Polyforge
   panel before showing bg-tasks, so the jump never lands on a covered dock.
+- **Event tail display modes (pi#112):** panel-local state with a global
+  localStorage key `pi-web:polyforge-event-mode` (`"simple"|"verbose"`;
+  absent/invalid reads as simple). Simple mode (the default) collapses each
+  consecutive run of noise events (`published`, `transcript_missing`,
+  `exec_init`) into one gray `sync ×N` row (×1 included); verbose mode renders
+  every event on its own row with the raw kind shown inline and noise kinds
+  de-emphasized individually (whole row in `var(--text-dim)`, the same
+  treatment as the sync row), while meaningful neutral rows keep their values
+  in `var(--text)` for clear contrast against grayed noise. Every row puts
+  the raw kind and full whitelisted field values in its hover `title`, and
+  renders whitelisted values as mono spans (`step · model`,
+  `step · from → to`, `step · cause`, `gate → target`, terminal status, or
+  lone step), ellipsized at 24 chars like the job candidate. The mode toggle
+  uses the action-label model: its label names the mode it switches to
+  (`Simple`/`Verbose`) and it carries no `aria-pressed` state.
+  Severity emphasis: `needs_input` amber (#d97706); `step_failed`,
+  `step_dead`, `push_failed`, `envelope_rejected`, `needs_recovery` and
+  `terminal` failed red (#dc2626); `terminal` completed green (#16a34a);
+  `terminal` cancelled and all other kinds neutral. The mode toggle lives in
+  the event-tail area of the selected detail and is purely client-side — no
+  network request on toggle.

@@ -110,3 +110,111 @@ test("all three locales carry the polyforge keys in parity", () => {
     assert.ok(!localeSource.includes("polyforge.queue\": \"Queue\""), `${name} must actually translate, not copy en`);
   }
 });
+
+test("pi#112: EVENT_KIND_KEYS covers exactly the 19 live kinds with raw fallback", () => {
+  const match = source.match(/const EVENT_KIND_KEYS = new Set\(\[([\s\S]*?)\]\)/);
+  assert.ok(match, "EVENT_KIND_KEYS set literal");
+  const kinds = [...match[1].matchAll(/"([a-z_]+)"/g)].map((m) => m[1]);
+  const expected = [
+    "published", "transcript_missing", "exec_init", "step_started", "step_done",
+    "step_failed", "step_dead", "candidate_switched", "needs_input", "answered",
+    "gate_verdict", "rewind", "envelope_rejected", "needs_recovery", "push_failed",
+    "job_started", "job_stopped", "terminal", "authored_tests_rebaselined",
+  ];
+  assert.equal(kinds.length, 19, `expected 19 kinds, got ${kinds.length}`);
+  assert.deepEqual(kinds.slice().sort(), expected.slice().sort());
+  assert.match(source, /EVENT_KIND_KEYS\.has\(kind\) \? t\(`polyforge\.eventKind\.\$\{kind\}`\) : kind/, "unknown kinds must render raw");
+});
+
+test("pi#112: collapseNoiseRuns collapses noise runs to one marker, meaningful events never collapse", () => {
+  const context = vm.createContext({});
+  // The helper reads the module-level noise set; inject it from source so the
+  // test tracks the shipped definition rather than a copy.
+  const noiseSet = source.match(/const EVENT_NOISE_KINDS = new Set\(\[[\s\S]*?\]\)/);
+  assert.ok(noiseSet, "EVENT_NOISE_KINDS set literal");
+  vm.runInContext(stripTypeScriptTypes(noiseSet[0]), context);
+  vm.runInContext(stripTypeScriptTypes(extractPureFunction("collapseNoiseRuns").replace(/export /g, "")), context);
+  const ev = (kind, i) => ({ at: `2026-01-01T00:00:${String(i).padStart(2, "0")}Z`, kind });
+  // JSON round-trip normalizes cross-realm object prototypes from the vm.
+  const rows = JSON.parse(JSON.stringify(context.collapseNoiseRuns([
+    ev("step_started", 0),
+    ev("published", 1), ev("transcript_missing", 2), ev("exec_init", 3), ev("published", 4), ev("published", 5),
+    ev("step_failed", 6),
+    ev("transcript_missing", 7),
+    ev("terminal", 8),
+  ])));
+  assert.deepEqual(rows, [
+    { noise: false, event: ev("step_started", 0) },
+    { noise: true, count: 5 },
+    { noise: false, event: ev("step_failed", 6) },
+    { noise: true, count: 1 },
+    { noise: false, event: ev("terminal", 8) },
+  ]);
+  assert.deepEqual(JSON.parse(JSON.stringify(context.collapseNoiseRuns([]))), [], "empty tail yields no rows");
+});
+
+test("pi#112: formatEventValues renders step · from → to for candidate_switched", () => {
+  const context = vm.createContext({});
+  const arrowSet = source.match(/const EVENT_ARROW_KINDS = new Set\(\[[\s\S]*?\]\)/);
+  assert.ok(arrowSet, "EVENT_ARROW_KINDS set literal");
+  vm.runInContext("const CANDIDATE_MAX = 24;\n" + stripTypeScriptTypes(arrowSet[0]), context);
+  vm.runInContext(stripTypeScriptTypes(extractPureFunction("shortenCandidate").replace(/export /g, "")), context);
+  vm.runInContext(stripTypeScriptTypes(extractPureFunction("eventValueParts").replace(/export /g, "")), context);
+  vm.runInContext(stripTypeScriptTypes(extractPureFunction("formatEventValues").replace(/export /g, "")), context);
+  const ev = { at: "2026-01-01T00:00:00Z", kind: "candidate_switched", step: "alpha-plan", from: "pi:old", to: "claude:new" };
+  assert.equal(context.formatEventValues(ev), "alpha-plan · pi:old → claude:new", "step must be rendered before from → to");
+  const longStep = { at: "2026-01-01T00:00:00Z", kind: "candidate_switched", step: "s".repeat(30), from: "pi:old", to: "claude:new" };
+  const rendered = context.formatEventValues(longStep);
+  assert.ok(rendered.includes("…"), "long step is ellipsized");
+  assert.ok(rendered.includes(" → "), "arrow pair preserved");
+  // Other kinds keep the plain dot join.
+  assert.equal(context.formatEventValues({ at: "2026-01-01T00:00:00Z", kind: "step_started", step: "zulu-grill", model: "m" }), "zulu-grill · m");
+  assert.equal(context.formatEventValues({ at: "2026-01-01T00:00:00Z", kind: "rewind", gate: "spec-review", target: "kilo-author" }), "spec-review → kilo-author");
+  // Absent optional fields never produce stray separators.
+  assert.equal(context.formatEventValues({ at: "2026-01-01T00:00:00Z", kind: "candidate_switched", from: "pi:old", to: "claude:new" }), "pi:old → claude:new");
+});
+
+test("pi#112: eventSeverity map is amber/red/green/neutral including terminal statuses", () => {
+  const context = vm.createContext({});
+  vm.runInContext(stripTypeScriptTypes(extractPureFunction("eventSeverity").replace(/export /g, "")), context);
+  assert.equal(context.eventSeverity({ kind: "needs_input" }), "amber");
+  for (const kind of ["step_failed", "step_dead", "push_failed", "envelope_rejected", "needs_recovery"]) {
+    assert.equal(context.eventSeverity({ kind }), "red", kind);
+  }
+  assert.equal(context.eventSeverity({ kind: "terminal", status: "completed" }), "green");
+  assert.equal(context.eventSeverity({ kind: "terminal", status: "failed" }), "red");
+  assert.equal(context.eventSeverity({ kind: "terminal", status: "cancelled" }), null, "cancelled terminal is neutral");
+  assert.equal(context.eventSeverity({ kind: "terminal" }), null, "terminal without status is neutral");
+  for (const kind of ["answered", "gate_verdict", "rewind"]) {
+    assert.equal(context.eventSeverity({ kind }), null, `${kind} is neutral`);
+  }
+});
+
+test("pi#112: event mode toggle defaults simple, persists via localStorage, issues no request", () => {
+  assert.match(source, /const EVENT_MODE_STORAGE_KEY = "pi-web:polyforge-event-mode"/, "global localStorage key");
+  assert.match(source, /useState<EventMode>\("simple"\)/, "defaults to simple");
+  assert.match(source, /window\.localStorage\.getItem\(EVENT_MODE_STORAGE_KEY\)/, "preference read");
+  assert.match(source, /window\.localStorage\.setItem\(EVENT_MODE_STORAGE_KEY, next\)/, "preference written on toggle");
+  const start = source.indexOf("const toggleEventMode = useCallback");
+  assert.ok(start >= 0, "toggleEventMode exists");
+  const end = source.indexOf("}, [eventMode]);", start);
+  const body = source.slice(start, end);
+  assert.doesNotMatch(body, /fetch|XMLHttpRequest|api\//i, "toggle click path must issue no request");
+  assert.match(source, /onClick=\{toggleEventMode\}/, "toggle is wired to a control");
+});
+
+test("pi#112: mode toggle strings and eventSync word are translated in all three locales", () => {
+  for (const [name, localeSource] of [["en", enSource], ["zh-CN", zhCNSource], ["zh-TW", zhTWSource]]) {
+    for (const key of ["polyforge.eventMode.simple", "polyforge.eventMode.verbose", "polyforge.eventSync"]) {
+      assert.match(localeSource, new RegExp(`"${key.replace(/\./g, "\\.")}": "\\S`), `${name} must translate ${key}`);
+    }
+  }
+});
+
+test("pi#112: dead event-kind labels removed from all three locales", () => {
+  for (const [name, localeSource] of [["en", enSource], ["zh-CN", zhCNSource], ["zh-TW", zhTWSource]]) {
+    for (const kind of ["step_blocked", "job_done", "job_blocked"]) {
+      assert.ok(!localeSource.includes(`polyforge.eventKind.${kind}`), `${name} still ships the dead label ${kind}`);
+    }
+  }
+});
