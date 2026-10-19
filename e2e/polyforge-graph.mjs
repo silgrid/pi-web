@@ -99,7 +99,7 @@ const T = {
   G10: "G10: Node shows the 24-char-cut name; title and aria label carry full name and status",
   G11: "G11: Clicking a node does nothing",
   G12: "G12: Nine nodes wrap onto rows without horizontal scroll in the 340px dock and the mobile sheet",
-  G13: "G13: Verbose mode adds the status chips beside the graph; simple or invalid mode shows none",
+  G13: "G13: No step name+status chips in any event mode (verbose, simple, invalid)",
   G14: "G14: Watch route sanitizes declared_steps to ordered ids only",
   G15: "G15: Docs describe the graph contract and polyforge labels stay in all three locales",
 };
@@ -232,7 +232,9 @@ function assertWraps(g) {
   assert.ok(g.nodes.every((n) => n.inside) && !g.hscroll, "the step area scrolls or overflows horizontally");
 }
 const requireNodes = (g, n) => assert.ok(g.nodes.length >= n, `graph shows ${g.nodes.length} nodes (${JSON.stringify(names(g))}), want ${n}`);
-// Step chips (the pre-graph display): small element whose text is name + status label.
+// Step chips (the pre-graph display removed in pi#116): any element whose text
+// is name + status label; must count 0 in every mode — the nodes are the only
+// step display.
 const chipCount = (panel, steps) => panel.first().evaluate((root, steps) => steps.filter(([name, label]) => [...root.querySelectorAll("*")].some((e) => {
   const t = (e.textContent || "").replace(/\s+/g, "");
   return t.startsWith(name) && t.includes(label.replace(/\s+/g, ""), name.length) && t.length <= name.length + label.length + 4;
@@ -272,10 +274,16 @@ try {
   await onPage([T.G12], { viewport: { width: 600, height: 900 } }, "pi#201", async (page, panel, g) => {
     await check(T.G12, "mobile sheet", async () => assertWraps(g));
   });
+  await onPage([T.G13], {}, "pi#201", async (page, panel, g) => {
+    await check(T.G13, "simple mode", async () => {
+      requireNodes(g, 9);
+      assert.equal(await chipCount(panel, CHIPS201), 0, "simple mode shows name+status chips");
+    });
+  });
   await onPage([T.G13], { mode: "verbose" }, "pi#201", async (page, panel, g) => {
     await check(T.G13, "verbose", async () => {
       requireNodes(g, 9);
-      assert.equal(await chipCount(panel, CHIPS201), 9, "verbose mode does not show a name+status chip per step");
+      assert.equal(await chipCount(panel, CHIPS201), 0, "verbose mode shows name+status chips");
     });
   });
   await onPage([T.G13], { mode: "bogus" }, "pi#201", async (page, panel, g) => {

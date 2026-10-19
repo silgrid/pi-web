@@ -105,10 +105,12 @@ chip row (`buildStepGraph` in `components/PolyforgePanel.tsx`, pure):
   i18n labels). Rewinds outside the tail window or with an unknown
   endpoint are not drawn, and no dashed element exists in the panel
   otherwise.
-- **Verbose chips** — in Verbose event mode, the pre-graph
-  name+status chips render below the graph in addition to the nodes; in
-  simple mode (the default, and for an invalid stored mode) only the
-  graph shows. The mode toggle behavior is unchanged and stays
+- **Step status display** — the graph nodes are the only step status
+  display in every event mode (simple, verbose, invalid): status colour
+  plus the full name and translated status label in each node's
+  `title`/`aria-label`. The pre-graph per-step name+status chip row was
+  removed in pi#116; the dashed rewind chips under the node row are
+  unaffected. The mode toggle behavior is unchanged and stays
   client-side.
 
 ## Client behavior

@@ -489,18 +489,6 @@ export function PolyforgePanel({
                               ))}
                             </div>
                           )}
-                          {/* Verbose-only: the pre-graph name+status chips. */}
-                          {eventMode === "verbose" && (
-                            <div style={{ display: "flex", flexWrap: "wrap", gap: 4, paddingTop: 4 }}>
-                              {watchStatus.steps.map((step) => (
-                                <span key={step.name} title={stepStatusLabel(step.status)} style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "2px 6px", borderRadius: 6, border: "1px solid var(--border)", fontSize: 11, color: "var(--text)", fontFamily: "var(--font-mono, monospace)" }}>
-                                  <span aria-hidden="true" style={{ width: 7, height: 7, borderRadius: 4, flexShrink: 0, background: stepNodeColor(step.status) }} />
-                                  {step.name}
-                                  <span style={{ color: "var(--text-dim)", fontSize: 10 }}>{stepStatusLabel(step.status)}</span>
-                                </span>
-                              ))}
-                            </div>
-                          )}
                         </div>
                         )}
                         {/* Event tail (newest last) */}
