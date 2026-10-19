@@ -64,7 +64,9 @@ ties by name.
   status keeps the previous snapshot, so the selection survives the job
   leaving the job list until the user deselects. Stale responses are dropped
   by sequence counters (effect cleanups advance them, never reset to an
-  observation + 1).
+  observation + 1). `refreshStatus` returns its settle promise (pi#113) so a
+  manual caller can show in-flight state; the mount probe and the interval
+  polls ignore it.
 - `components/PolyforgePanel.tsx`: all jobs on the machine (no owner filter);
   the candidate is shortened client-side to 24 chars + `…`; unknown status
   values pass through raw (known ones use `polyforge.*` keys present in en,
@@ -72,13 +74,27 @@ ties by name.
   split and carries a back button (`polyforge.deselect`) calling
   `onSelect(null)` — the deselect gesture survives the job leaving the list
   and the snapshot still loading. A blocked WI shows its status only — no question text
-  exists in the client by construction.
+  exists in the client by construction. Manual refresh (pi#113): the refresh
+  button's click spins its icon and disables the button until the status
+  fetch settles, floored at ~400 ms; further clicks in the window are ignored;
+  failure returns to idle with no button-specific error state (the panel's
+  error text is the only error signal). The busy state is written only by the
+  click path — background polls never spin or disable the button.
 - `components/AppShell.tsx`: the button renders iff pf is present,
   independent of chat visibility; opening the Polyforge panel closes bg-tasks
   and vice versa (mutually exclusive dock slot: 340 px right dock / 62 %
   mobile sheet) — enforced on every path that opens either panel, including
   the bg-task terminal notification's jump: its onClick closes the Polyforge
   panel before showing bg-tasks, so the jump never lands on a covered dock.
+  Desktop dock dismissal (pi#113): while the dock is open, a `pointerdown`
+  anywhere outside its own DOM (`data-pf-dock`) closes it — the press is
+  never eaten (no `preventDefault`/`stopPropagation`; the dock is an overlay,
+  so nothing under it unmounts mid-click), so the same click still performs
+  its normal action on its target. The topbar toggle (`data-pf-toggle`) is
+  exempt: its own click already ends closed, and a pointerdown dismissal
+  there would close-then-reopen. The listener exists only while the desktop
+  dock is open; the mobile sheet keeps its backdrop tap and the bg-tasks dock
+  gets no outside-click close.
 - **Event tail display modes (pi#112):** panel-local state with a global
   localStorage key `pi-web:polyforge-event-mode` (`"simple"|"verbose"`;
   absent/invalid reads as simple). Simple mode (the default) collapses each

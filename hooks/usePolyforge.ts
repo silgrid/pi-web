@@ -41,9 +41,13 @@ export function usePolyforge(panelOpen: boolean) {
   const statusSeq = useRef(0);
   const watchSeq = useRef(0);
 
+  // Returns the settle promise so a manual refresh caller (the panel's
+  // refresh button, pi#113) can show in-flight state; the interval and mount
+  // callers ignore it. Background polls and the manual click share this one
+  // function — in-flight indication lives with the click, not the fetch.
   const refreshStatus = useCallback(() => {
     const seq = ++statusSeq.current;
-    fetch("/api/polyforge/status")
+    return fetch("/api/polyforge/status")
       .then(async (response) => {
         const body = await response.json() as StatusResponse;
         if (seq !== statusSeq.current) return;

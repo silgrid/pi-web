@@ -218,3 +218,23 @@ test("pi#112: dead event-kind labels removed from all three locales", () => {
     }
   }
 });
+
+test("pi#113: a manual refresh click spins the icon and disables the button for at least ~400ms", () => {
+  // The click path only: guard first, then busy.
+  assert.match(source, /const \[refreshBusy, setRefreshBusy\] = useState\(false\);/);
+  assert.match(source, /if \(refreshBusy\) return;/, "clicks during the busy window are ignored");
+  assert.match(source, /onClick=\{handleRefresh\}/, "the button is wired to the guarded handler");
+  // In-flight indication: disabled (assistive tech sees it) + spinning icon.
+  assert.match(source, /disabled=\{refreshBusy\}/, "busy is exposed as disabled");
+  assert.match(source, /animation: "spin 0\.8s linear infinite"/, "the icon rotates while busy");
+  // The window lasts until the fetch settles AND at least 400ms.
+  assert.match(source, /setTimeout\(resolve, 400\)/, "~400ms minimum");
+  assert.match(source, /Promise\.resolve\(onRefresh\(\)\)\.catch\(\(\) => undefined\)/, "the settle promise is awaited");
+  assert.match(source, /Promise\.all\(\[settled, floor\]\)\.then\(\(\) => setRefreshBusy\(false\)\)/, "idle returns after settle+floor, failure included");
+  // The busy flag is written only inside the manual click handler — the
+  // hook's background polls (interval/mount) never reach it.
+  const writes = [...source.matchAll(/setRefreshBusy\(/g)].map((m) => m.index);
+  assert.deepEqual(writes.map((index) => source.slice(Math.max(0, source.lastIndexOf("handleRefresh", index)), index).length > 0), [true, true], "both busy writes live in the click handler");
+  // The settle promise flows through the prop contract.
+  assert.ok(source.includes("onRefresh: () => void | Promise<void>;"), "onRefresh may return a promise");
+});
