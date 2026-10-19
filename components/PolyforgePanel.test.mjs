@@ -49,7 +49,7 @@ test("job rows show slug, status label, spawn number, candidate, ages, and the q
   assert.doesNotMatch(source, /owner/i);
 });
 
-test("the detail shows the flow graph, verbose-only chips, event tail, and status-only blocked rendering", () => {
+test("the detail shows the flow graph, event tail, and status-only blocked rendering, with no step-chip block", () => {
   // Graph nodes: the node row maps buildStepGraph(...).nodes; each node is a
   // display-only listitem carrying title+aria-label with full name + status.
   assert.match(source, /const graph = watchStatus\s*\?\s*buildStepGraph\(watchStatus\.steps, watchStatus\.declared_steps, watchStatus\.events\)/, "graph derived from the sanitized snapshot");
@@ -60,8 +60,9 @@ test("the detail shows the flow graph, verbose-only chips, event tail, and statu
   assert.match(source, /className=\{node\.status === "in_progress" \? "pf-step-node-pulse" : undefined\}/, "only in_progress pulses");
   // Sequence connectors between consecutive nodes; dashed rewind chips below.
   assert.match(source, /graph\.rewindEdges\.map\(\(\[gate, target\]\) =>/, "rewind chips render from the model");
-  // Step chips return only in Verbose mode (R9), gated on eventMode.
-  assert.match(source, /eventMode === "verbose" && \([\s\S]{0,200}watchStatus\.steps\.map\(\(step\) =>/, "chips render only in verbose mode");
+  // pi#116: the pre-graph per-step name+status chip block is gone — the
+  // graph nodes are the only step display in every event mode.
+  assert.doesNotMatch(source, /watchStatus\.steps\.map\(\(step\) =>/, "the raw steps must not render a chip row");
   assert.match(source, /watchStatus\.events\.map\(\(event, index\) =>/);
   assert.match(source, /eventKindLabel\(event\.kind\)/);
   assert.match(source, /workflowStatusLabel\(watchStatus\.workflowStatus\)/, "a blocked WI shows its status");
