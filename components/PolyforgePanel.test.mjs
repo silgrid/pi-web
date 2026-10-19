@@ -49,9 +49,19 @@ test("job rows show slug, status label, spawn number, candidate, ages, and the q
   assert.doesNotMatch(source, /owner/i);
 });
 
-test("the detail shows the ordered step chips, event tail, and status-only blocked rendering", () => {
-  assert.match(source, /watchStatus\.steps\.map\(\(step\) =>/);
-  assert.match(source, /stepStatusLabel\(step\.status\)/);
+test("the detail shows the flow graph, verbose-only chips, event tail, and status-only blocked rendering", () => {
+  // Graph nodes: the node row maps buildStepGraph(...).nodes; each node is a
+  // display-only listitem carrying title+aria-label with full name + status.
+  assert.match(source, /const graph = watchStatus\s*\?\s*buildStepGraph\(watchStatus\.steps, watchStatus\.declared_steps, watchStatus\.events\)/, "graph derived from the sanitized snapshot");
+  assert.match(source, /graph\.nodes\.map\(\(node, index\) =>/, "node row maps the graph model");
+  assert.match(source, /role="listitem"/, "nodes are display-only list items");
+  assert.match(source, /aria-label=\{\`\$\{node\.id\} · \$\{stepStatusLabel\(node\.status\)\}\`\}/, "accessible label carries full name + status");
+  assert.match(source, /\{shortenCandidate\(node\.id\)\}/, "visible node text is the 24-char cut");
+  assert.match(source, /className=\{node\.status === "in_progress" \? "pf-step-node-pulse" : undefined\}/, "only in_progress pulses");
+  // Sequence connectors between consecutive nodes; dashed rewind chips below.
+  assert.match(source, /graph\.rewindEdges\.map\(\(\[gate, target\]\) =>/, "rewind chips render from the model");
+  // Step chips return only in Verbose mode (R9), gated on eventMode.
+  assert.match(source, /eventMode === "verbose" && \([\s\S]{0,200}watchStatus\.steps\.map\(\(step\) =>/, "chips render only in verbose mode");
   assert.match(source, /watchStatus\.events\.map\(\(event, index\) =>/);
   assert.match(source, /eventKindLabel\(event\.kind\)/);
   assert.match(source, /workflowStatusLabel\(watchStatus\.workflowStatus\)/, "a blocked WI shows its status");

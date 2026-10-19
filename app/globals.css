@@ -2176,3 +2176,15 @@ span.token.table {
     padding-bottom: 6px !important;
   }
 }
+
+/* Polyforge step flow graph (pi#114): only the in_progress node's status dot
+   pulses; everything is static under prefers-reduced-motion. */
+.pf-step-node-pulse {
+  animation: pulse 1.6s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pf-step-node-pulse {
+    animation: none;
+  }
+}

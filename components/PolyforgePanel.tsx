@@ -302,6 +302,12 @@ export function PolyforgePanel({
     );
   }, [eventMode, formatEventTime, eventKindLabel]);
 
+  // Step flow graph (pi#114): derived from the sanitized watch snapshot.
+  // Null exactly when watchStatus is null (the detail section's loading state).
+  const graph = watchStatus
+    ? buildStepGraph(watchStatus.steps, watchStatus.declared_steps, watchStatus.events)
+    : null;
+
   const jobs = opsStatus?.jobs ?? [];
 
   return (
@@ -420,16 +426,65 @@ export function PolyforgePanel({
                     </div>
                     {watchStatus ? (
                       <>
-                        {/* Steps in execution order */}
-                        <div style={{ padding: "6px 12px", display: "flex", flexWrap: "wrap", gap: 4, borderBottom: "1px solid var(--border)", flexShrink: 0 }}>
-                          {watchStatus.steps.map((step) => (
-                            <span key={step.name} title={stepStatusLabel(step.status)} style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "2px 6px", borderRadius: 6, border: "1px solid var(--border)", fontSize: 11, color: "var(--text)", fontFamily: "var(--font-mono, monospace)" }}>
-                              <span aria-hidden="true" style={{ width: 7, height: 7, borderRadius: 4, flexShrink: 0, background: STEP_STATUS_COLORS[step.status] ?? "var(--text-dim)" }} />
-                              {step.name}
-                              <span style={{ color: "var(--text-dim)", fontSize: 10 }}>{stepStatusLabel(step.status)}</span>
-                            </span>
-                          ))}
+                        {/* Step flow graph (pi#114): display-only nodes with
+                            status dots, solid sequence connectors between
+                            consecutive nodes, dashed rewind chips below.
+                            Nodes wrap; the container never scrolls. */}
+                        {graph && (
+                        <div style={{ padding: "6px 12px", borderBottom: "1px solid var(--border)", flexShrink: 0, overflow: "hidden" }}>
+                          <div role="list" style={{ display: "flex", flexWrap: "wrap", alignItems: "center", rowGap: 6 }}>
+                            {graph.nodes.map((node, index) => (
+                              <span key={`${node.id}-${index}`} style={{ display: "inline-flex", alignItems: "center" }}>
+                                {index > 0 && (
+                                  <span aria-hidden="true" style={{ color: "var(--text-dim)", fontSize: 10, padding: "0 3px", flexShrink: 0 }}>
+                                    →
+                                  </span>
+                                )}
+                                <span
+                                  role="listitem"
+                                  title={`${node.id} · ${stepStatusLabel(node.status)}`}
+                                  aria-label={`${node.id} · ${stepStatusLabel(node.status)}`}
+                                  style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "2px 6px", borderRadius: 6, border: "1px solid var(--border)", fontSize: 11, color: "var(--text)", fontFamily: "var(--font-mono, monospace)" }}
+                                >
+                                  <span
+                                    aria-hidden="true"
+                                    className={node.status === "in_progress" ? "pf-step-node-pulse" : undefined}
+                                    style={{ width: 7, height: 7, borderRadius: 4, flexShrink: 0, background: stepNodeColor(node.status) }}
+                                  />
+                                  {shortenCandidate(node.id)}
+                                </span>
+                              </span>
+                            ))}
+                          </div>
+                          {graph.rewindEdges.length > 0 && (
+                            <div style={{ display: "flex", flexWrap: "wrap", gap: 4, paddingTop: 4 }}>
+                              {graph.rewindEdges.map(([gate, target]) => (
+                                <span
+                                  key={`${gate}->${target}`}
+                                  title={`${eventKindLabel("rewind")}: ${gate} → ${target}`}
+                                  aria-label={`${eventKindLabel("rewind")}: ${gate} → ${target}`}
+                                  style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "1px 6px", borderRadius: 6, border: "1px dashed var(--border)", fontSize: 10, color: "var(--text-dim)", fontFamily: "var(--font-mono, monospace)" }}
+                                >
+                                  <span aria-hidden="true">⇢</span>
+                                  {`${shortenCandidate(gate)} → ${shortenCandidate(target)}`}
+                                </span>
+                              ))}
+                            </div>
+                          )}
+                          {/* Verbose-only: the pre-graph name+status chips. */}
+                          {eventMode === "verbose" && (
+                            <div style={{ display: "flex", flexWrap: "wrap", gap: 4, paddingTop: 4 }}>
+                              {watchStatus.steps.map((step) => (
+                                <span key={step.name} title={stepStatusLabel(step.status)} style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "2px 6px", borderRadius: 6, border: "1px solid var(--border)", fontSize: 11, color: "var(--text)", fontFamily: "var(--font-mono, monospace)" }}>
+                                  <span aria-hidden="true" style={{ width: 7, height: 7, borderRadius: 4, flexShrink: 0, background: stepNodeColor(step.status) }} />
+                                  {step.name}
+                                  <span style={{ color: "var(--text-dim)", fontSize: 10 }}>{stepStatusLabel(step.status)}</span>
+                                </span>
+                              ))}
+                            </div>
+                          )}
                         </div>
+                        )}
                         {/* Event tail (newest last) */}
                         <div style={{ flexShrink: 0, display: "flex", justifyContent: "flex-end", padding: "2px 12px 0" }}>
                           <button
