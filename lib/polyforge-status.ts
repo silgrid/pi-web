@@ -86,6 +86,13 @@ export interface PolyforgeStep {
   status: string;
 }
 
+/** Sanitized workflow declaration entry (pi#114): id only — `on_fail` and
+ *  every other declared field are dropped server-side and never reach a
+ *  response. */
+export interface PolyforgeDeclaredStep {
+  id: string;
+}
+
 export interface PolyforgeEvent {
   at: string;
   kind: string;
@@ -106,6 +113,7 @@ export interface PolyforgeWatchStatus {
   currentStep?: string;
   updatedAt?: string;
   steps: PolyforgeStep[];
+  declared_steps: PolyforgeDeclaredStep[] | null;
   events: PolyforgeEvent[];
 }
 
@@ -190,6 +198,25 @@ export function orderPolyforgeSteps(
     .filter((entry) => !entry.startedAt)
     .sort((a, b) => a.name.localeCompare(b.name));
   return [...started, ...unstarted].map(({ name, status }) => ({ name, status }));
+}
+
+/**
+ * Sanitize `execution.declared_steps` (pi#114). Keeps each entry's trimmed
+ * non-empty `id`, in declaration order; `on_fail` and every other field are
+ * dropped server-side (raw shape is proposed to companion WI #213). Absent,
+ * null, non-array, empty, or any entry without a valid id → null — the
+ * client then falls back to started-at ordering. Pure, never throws, so the
+ * route's 2xx degradation contract is untouched.
+ */
+export function sanitizeDeclaredSteps(value: unknown): PolyforgeDeclaredStep[] | null {
+  if (!Array.isArray(value) || value.length === 0) return null;
+  const steps: PolyforgeDeclaredStep[] = [];
+  for (const entry of value) {
+    const id = entry && typeof entry === "object" ? toTrimmedString((entry as { id?: unknown }).id) : "";
+    if (!id) return null;
+    steps.push({ id });
+  }
+  return steps;
 }
 
 /** Owner-approved per-kind event body whitelist (pi#112). Every kind not
@@ -298,6 +325,7 @@ export function sanitizeWatch(machine: unknown): PolyforgeWatchStatus | null {
     current_step?: unknown;
     updated_at?: unknown;
     steps?: unknown;
+    declared_steps?: unknown;
   };
   if (!ex.steps || typeof ex.steps !== "object") return null;
   const wi = toTrimmedString(m.work_item);
@@ -310,6 +338,7 @@ export function sanitizeWatch(machine: unknown): PolyforgeWatchStatus | null {
     currentStep: toOptionalTrimmedString(ex.current_step),
     updatedAt: toOptionalTrimmedString(ex.updated_at),
     steps: orderPolyforgeSteps(ex.steps as Record<string, { status?: unknown; started_at?: unknown }>),
+    declared_steps: sanitizeDeclaredSteps(ex.declared_steps),
     events: tailPolyforgeEvents(Array.isArray(m.events) ? m.events : [], EVENT_TAIL),
   };
 }
