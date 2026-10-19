@@ -41,7 +41,7 @@ import { EDIT_MAX_BYTES, saveTextFileSafely } from "@/lib/file-edit";
 // every other name lib/file-tree-visibility's getFileTreeVisibility excludes
 // (it is the shared git-aware source of truth now; see that module), but
 // dist/build can be surfaced on demand via ?showBuildOutputs=1|true so users
-// can reach build artifacts (e.g. a Capacitor debug APK under
+// can reach build artifacts (e.g. a debug APK under
 // build/outputs/apk/debug/) through the explorer. The exemption applies to
 // exactly these two names and only in the type=list branch; read/download/
 // meta/preview/watch are never gated on visibility to begin with.

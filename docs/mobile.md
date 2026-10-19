@@ -1,102 +1,86 @@
-# Mobile strategy: Android TWA, iOS PWA (pi#40)
+# Clients: Chrome app mode and PWAs (pi#115)
 
-Pi Web is a self-hosted web app, so the mobile story is deliberately thin:
+Pi Web is a self-hosted web app, so the client story is deliberately thin:
 **no bundled server, no custom native UI, no proxying, no script injection**.
-Both platforms wrap the same deployed HTTPS origin you already run.
+Every client opens the same deployed origin you already run — the browser's
+own renderer does all the work, exactly as it does in a desktop tab. (The
+former native clients — an Android hybrid app, a fullscreen Android
+launcher and a desktop wrapper — were removed in pi#40 and pi#115; nothing
+of them survives in this repo.)
 
-| Platform | Primary form | Install path | Zero-install fallback |
-|---|---|---|---|
-| Android | **TWA APK** (`mobile-twa/`) — fullscreen, no address bar, zero Google dependency | Side-load the APK from the file browser | PWA (Chrome → Install app) |
-| iOS | **PWA** — Safari Add-to-Home-Screen is the native standalone form | Safari → Share → Add to Home Screen | — (same thing) |
+| Platform | Standalone form | Install path |
+|---|---|---|
+| macOS | **Chrome app mode** — a standalone window via the `piweb` alias | alias in the shell rc file (below) |
+| Windows | **Chrome app mode** — a standalone window via the `piweb` function | function in the PowerShell profile (below) |
+| iPhone | **PWA** — Safari Add-to-Home-Screen is the native standalone form | Safari → Share → Add to Home Screen |
+| Android | **PWA** (Chrome → Install app) — for now | Chrome → ⋮ → Install app |
 
-The previous hybrid native shells (removed in pi#40) wrapped the site in a
-WebView whose remote-content proxy caused the entire 7-fix failure chain of
-PRs #34–42. The TWA shell contains ~100 lines with no WebView code of ours —
-the page renders in the browser's own renderer, exactly as it does in a
-desktop tab.
+## macOS: Chrome app-mode alias
 
-## Android: build and side-load the TWA APK
-
-The Trusted Web Activity shell lives in [`mobile-twa/`](../mobile-twa/). A TWA
-is just a launcher: it opens your origin through androidx.browser Custom Tabs.
-Because the site serves a matching `/.well-known/assetlinks.json`, the browser
-verifies the Digital Asset Link and opens **fullscreen with no address bar**.
-Verification needs no Google account and no Google Play Services — the
-assetlinks file comes from *our own server*.
-
-Build (JDK 17+, Android SDK 34):
+Chrome's `--app` flag opens an origin as a standalone window: no address
+bar, no tabs, a window of its own. Put the alias in `~/.bashrc` (or
+`~/.zshrc`):
 
 ```bash
-cd mobile-twa
-./gradlew assembleRelease        # APK: app/build/outputs/apk/release/app-release.apk
+alias piweb='open -na "Google Chrome" --args --app=http://<ip:port>'
 ```
 
-- **Launch URL**: driven by the `PIWEB_TWA_LAUNCH_URL` gradle property
-  (default `https://gcp-dev.stevenforai.top`). Retarget per build with
-  `-PPIWEB_TWA_LAUNCH_URL=https://your-origin` — no code change.
-- **Signing**: the release keystore is committed under `mobile-twa/keystore/`
-  (private repo, side-loaded app). To regenerate it per machine, see
-  `mobile-twa/keystore/README.md`.
-- **After any re-sign**: regenerate the served statement so the fingerprint
-  matches the APK:
+`<ip:port>` is your deployment's host and port — the LAN `http://` address
+works as-is (app mode has no HTTPS requirement), and so does any HTTPS
+origin you expose (`https://piweb.example.com`, for example).
 
-  ```bash
-  mobile-twa/scripts/assetlinks.sh app/build/outputs/apk/release/app-release.apk
-  git add public/.well-known/assetlinks.json   # commit the new fingerprint
-  ```
+## Windows: Chrome app-mode function
 
-**Side-load** (works on GMS-free devices, e.g. Redmi/HyperOS): copy the APK to
-the phone, open it from the file browser, allow "install unknown apps" for
-that one tap, install. The home icon launches the verified fullscreen TWA.
+The same idea as a PowerShell function in your `$PROFILE`:
 
-**If the address bar shows**, the served assetlinks statement does not match
-the installed APK — rerun `scripts/assetlinks.sh` against the APK you actually
-installed, redeploy the site, and relaunch.
+```powershell
+function piweb { Start-Process chrome '--app=http://<ip:port>' }
+```
 
-### Why assetlinks is served without the password gate
+## iPhone: Add to Home Screen (the PWA is the native form)
 
-The browser's TWA verification fetches `/.well-known/assetlinks.json`
-unauthenticated. The web-password middleware (`proxy.ts`) matches only
-`["/", "/login", "/api/:path*"]`, so the well-known path is already exempt —
-no matcher change is needed, and `next.config.ts` adds
-`Cache-Control: public, max-age=0, must-revalidate` so Chrome re-verifies
-right after an APK re-sign.
-
-## iOS: Add to Home Screen (the PWA is the native form)
-
-iOS has no TWA; Safari's Add-to-Home-Screen *is* the standalone native form.
-The required metadata is in place and verified in the app code:
+Safari's Add-to-Home-Screen *is* the standalone native form on iOS. The
+required metadata is in place and verified in the app code:
 
 - `app/manifest.ts`: `display: "standalone"`, 192/512 PNG icons
 - `app/layout.tsx`: `apple-touch-icon` and `appleWebApp { capable: true, title,
   statusBarStyle: "black-translucent" }`
 
-Install: open the site in **Safari** (not Chrome — only Safari can install),
-tap **Share → Add to Home Screen**. The icon launches fullscreen, standalone,
-with safe-area-correct layout. Web Push works on iOS 16.4+ once you grant the
-notification permission (see below).
+Install: open the site (e.g. `https://piweb.example.com`) in **Safari**
+(not Chrome — only Safari can install), tap **Share → Add to Home Screen**.
+The icon launches fullscreen, standalone, with safe-area-correct layout.
+Web Push works on iOS 16.4+ once you grant the notification permission
+(see below).
+
+## Android: Chrome PWA (for now)
+
+Open the origin in Chrome and tap **⋮ → Install app** (or the install
+prompt): Chrome installs the PWA — fullscreen, no address bar, its own
+home-screen icon. "For now": Chrome mints the installed app through
+Google Play Services, and the Google-free fullscreen client this repo used
+to ship was removed in pi#115; if Android needs a Google-free client
+again, that is a separate work item.
 
 ## China reachability — honest notes
 
-- **TWA needs no VPN.** Launch, fullscreen display, and assetlinks
-  verification all talk to *your own server*; no Google endpoint is involved.
 - **iOS Web Push needs no VPN.** Push rides Apple's APNs, which is reachable
   from mainland China.
-- **Android closed-app Web Push needs FCM — and in mainland China FCM needs a
-  VPN.** Chrome on Android delivers Web Push only through Google's FCM
-  endpoints. There is no China-reachable push relay in this repo; that would
-  be a separate work item.
+- **Android PWA install and closed-app Web Push need Google.** The installed
+  app is minted through Play Services, and closed-app Web Push is delivered
+  only through Google's FCM endpoints; in mainland China both need a VPN.
+  There is no China-reachable push relay and no Google-free install path in
+  this repo; that would be a separate work item.
 
 ## Notification capability matrix
 
-| Capability | Android (browser/PWA) | Android TWA | iOS PWA (16.4+) |
-|---|---|---|---|
-| In-page notifications (page focused) | ✅ | ✅ | ✅ |
-| Service-worker notifications while the app is alive in the background | ✅ | ✅ | ✅ |
-| Closed-app **Web Push** (agent finishes while no tab/window is open) | ✅ via FCM — **VPN required in mainland China** | ✅ via FCM — **VPN required in mainland China** | ✅ via APNs — works in China, no VPN |
-| Background Android push **without** VPN | ❌ not promised | ❌ not promised | n/a |
+| Capability | Android (browser/PWA) | iOS PWA (16.4+) |
+|---|---|---|
+| In-page notifications (page focused) | ✅ | ✅ |
+| Service-worker notifications while the app is alive in the background | ✅ | ✅ |
+| Closed-app **Web Push** (agent finishes while no tab/window is open) | ✅ via FCM — **VPN required in mainland China** | ✅ via APNs — works in China, no VPN |
+| Background Android push **without** VPN | ❌ not promised | n/a |
 
-What this means practically: keep the Pi Web tab (or an installed PWA/TWA
+What this means practically: keep the Pi Web tab (or an installed PWA
 window) alive and notifications arrive everywhere, no VPN anywhere. If you
 close the app entirely, iOS still delivers through APNs, but Android needs
 FCM reachability, i.e. a VPN in mainland China.
