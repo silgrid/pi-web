@@ -170,7 +170,7 @@ const T = {
   AC2: "AC2: Badge polls every 3s open / 30s closed, only with pf, no badge when daemon down",
   AC3: "AC3: Unavailable answers 200 {status:null}, malformed ?wi= answers 400, no 5xx or console errors",
   AC4: "AC4: Job list shows every job on the machine with its fields and the queue badge",
-  AC5: "AC5: Selected WI shows header, ordered step chips and the last 40 events",
+  AC5: "AC5: Selected WI shows header, ordered steps and the last 40 events",
   AC6: "AC6: Selected WI stays selected after it leaves the job list",
   AC7: "AC7: Blocked WI shows its status only, never the pending-question text",
   AC8: "AC8: Routes validate refs before argv, time out to unavailable and leak no env values or hidden fields",
@@ -466,10 +466,13 @@ try {
     const panel = await openPanel(page);
     await panel.getByText("pi#108", { exact: true }).first().click();
     await panel.getByText("zulu-grill").first().waitFor();
+    // pi#114: in simple mode the step names render only as flow-graph nodes (chips
+    // return in Verbose), so this order check now guards the graph; the strict
+    // node-order/edge contract lives in e2e/polyforge-graph.mjs.
     const text = await panel.innerText();
     const idx = STEP_ORDER.map((s) => text.indexOf(s));
-    assert.ok(idx.every((i) => i >= 0), `step chips missing: ${JSON.stringify(idx)}`);
-    assert.ok(idx[0] < idx[1] && idx[1] < idx[2], "step chips not in execution order");
+    assert.ok(idx.every((i) => i >= 0), `steps missing: ${JSON.stringify(idx)}`);
+    assert.ok(idx[0] < idx[1] && idx[1] < idx[2], "steps not in execution order");
   });
 
   // AC6 — selection persists
@@ -665,8 +668,10 @@ try {
     assert.equal(await panel.locator('[title*="terminal"]').count(), 3, "terminal events collapsed (meaningful events must never collapse)");
     assert.equal(await panel.locator('[title*="step_started"]').count(), 2, "step_started events collapsed (meaningful events must never collapse)");
     assert.equal(await panel.locator('[title*="job_started"]').count(), 1, "job_started event collapsed (meaningful events must never collapse)");
+    // pi#114: the old "zulu-grill" anchor matched a step chip (now a status-coloured
+    // graph node), not an event row; compare like with like (row label vs row label).
     const syncContrast = await textContrast(panel, "sync");
-    const anchorContrast = await textContrast(panel, "zulu-grill");
+    const anchorContrast = await textContrast(panel, enKindLabel("gate_verdict"));
     assert.ok(syncContrast !== null && anchorContrast !== null && syncContrast < anchorContrast,
       `the sync row is not de-emphasized (gray) against a meaningful row (sync ${syncContrast}, anchor ${anchorContrast})`);
   });
