@@ -145,7 +145,9 @@ export function PolyforgePanel({
   selectedWi: string | null;
   onSelect: (wi: string | null) => void;
   onClose: () => void;
-  onRefresh: () => void;
+  // May return the status fetch's settle promise (usePolyforge.refreshStatus
+  // does); the manual-refresh feedback (pi#113) awaits it.
+  onRefresh: () => void | Promise<void>;
 }) {
   const { t, locale } = useI18n();
 
@@ -170,6 +172,21 @@ export function PolyforgePanel({
       // best effort persistence
     }
   }, [eventMode]);
+
+  // Manual-refresh in-flight feedback (pi#113): the icon spins and the button
+  // disables until the status fetch settles, floored at ~400 ms so a fast
+  // response still reads as feedback (an explicit UX floor, not
+  // synchronization). Failure settles the same way — the panel's existing
+  // error text is the only error signal. Background polls call the hook's
+  // refreshStatus directly and never touch this state.
+  const [refreshBusy, setRefreshBusy] = useState(false);
+  const handleRefresh = useCallback(() => {
+    if (refreshBusy) return;
+    setRefreshBusy(true);
+    const settled = Promise.resolve(onRefresh()).catch(() => undefined);
+    const floor = new Promise<void>((resolve) => { setTimeout(resolve, 400); });
+    void Promise.all([settled, floor]).then(() => setRefreshBusy(false));
+  }, [refreshBusy, onRefresh]);
 
   const jobStatusLabel = useCallback((status: string) => (
     JOB_STATUS_KEYS.has(status) ? t(`polyforge.jobStatus.${status}`) : status
@@ -225,12 +242,13 @@ export function PolyforgePanel({
         <span style={{ fontSize: 12, fontWeight: 600, color: "var(--text)", flex: 1 }}>{t("polyforge.title")}</span>
         <button
           type="button"
-          onClick={onRefresh}
+          onClick={handleRefresh}
+          disabled={refreshBusy}
           title={t("polyforge.refresh")}
           aria-label={t("polyforge.refresh")}
-          style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 26, height: 26, background: "none", border: "none", color: "var(--text-muted)", cursor: "pointer", fontSize: 14 }}
+          style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 26, height: 26, background: "none", border: "none", color: "var(--text-muted)", cursor: refreshBusy ? "default" : "pointer", fontSize: 14 }}
         >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={refreshBusy ? { animation: "spin 0.8s linear infinite" } : undefined}>
             <path d="M21 12a9 9 0 1 1-2.64-6.36" /><path d="M21 3v6h-6" />
           </svg>
         </button>

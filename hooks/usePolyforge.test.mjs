@@ -60,3 +60,13 @@ test("selecting replaces the snapshot; the running count is null while unknown",
   assert.match(source, /setWatchStatus\(null\);/);
   assert.match(source, /const runningCount = opsStatus \? opsStatus\.queue\.running : null;/, "no badge while the daemon is down");
 });
+
+test("pi#113: refreshStatus returns its settle promise for the manual-refresh feedback", () => {
+  assert.match(source, /return fetch\("\/api\/polyforge\/status"\)/, "the fetch chain is returned");
+  // The promise resolves on both success and failure paths (the .catch arm).
+  const start = source.indexOf("const refreshStatus = useCallback");
+  const end = source.indexOf("}, []);", start);
+  const body = source.slice(start, end);
+  assert.match(body, /\.catch\(\(\) => \{/);
+  assert.match(body, /return fetch\("\/api\/polyforge\/status"\)/);
+});

@@ -64,7 +64,9 @@ ties by name.
   status keeps the previous snapshot, so the selection survives the job
   leaving the job list until the user deselects. Stale responses are dropped
   by sequence counters (effect cleanups advance them, never reset to an
-  observation + 1).
+  observation + 1). `refreshStatus` returns its settle promise (pi#113) so a
+  manual caller can show in-flight state; the mount probe and the interval
+  polls ignore it.
 - `components/PolyforgePanel.tsx`: all jobs on the machine (no owner filter);
   the candidate is shortened client-side to 24 chars + `…`; unknown status
   values pass through raw (known ones use `polyforge.*` keys present in en,
@@ -72,7 +74,12 @@ ties by name.
   split and carries a back button (`polyforge.deselect`) calling
   `onSelect(null)` — the deselect gesture survives the job leaving the list
   and the snapshot still loading. A blocked WI shows its status only — no question text
-  exists in the client by construction.
+  exists in the client by construction. Manual refresh (pi#113): the refresh
+  button's click spins its icon and disables the button until the status
+  fetch settles, floored at ~400 ms; further clicks in the window are ignored;
+  failure returns to idle with no button-specific error state (the panel's
+  error text is the only error signal). The busy state is written only by the
+  click path — background polls never spin or disable the button.
 - `components/AppShell.tsx`: the button renders iff pf is present,
   independent of chat visibility; opening the Polyforge panel closes bg-tasks
   and vice versa (mutually exclusive dock slot: 340 px right dock / 62 %
