@@ -84,11 +84,16 @@ ties by name.
   absent/invalid reads as simple). Simple mode (the default) collapses each
   consecutive run of noise events (`published`, `transcript_missing`,
   `exec_init`) into one gray `sync ×N` row (×1 included); verbose mode renders
-  every event on its own row with the raw kind shown inline and noise grayed
-  individually. Every row puts the raw kind and full whitelisted field values
-  in its hover `title`, and renders whitelisted values as mono spans
-  (`step · model`, `from → to`, `step · cause`, `gate → target`, terminal
-  status, or lone step), ellipsized at 24 chars like the job candidate.
+  every event on its own row with the raw kind shown inline and noise kinds
+  de-emphasized individually (whole row in `var(--text-dim)`, the same
+  treatment as the sync row), while meaningful neutral rows keep their values
+  in `var(--text)` for clear contrast against grayed noise. Every row puts
+  the raw kind and full whitelisted field values in its hover `title`, and
+  renders whitelisted values as mono spans (`step · model`,
+  `step · from → to`, `step · cause`, `gate → target`, terminal status, or
+  lone step), ellipsized at 24 chars like the job candidate. The mode toggle
+  uses the action-label model: its label names the mode it switches to
+  (`Simple`/`Verbose`) and it carries no `aria-pressed` state.
   Severity emphasis: `needs_input` amber (#d97706); `step_failed`,
   `step_dead`, `push_failed`, `envelope_rejected`, `needs_recovery` and
   `terminal` failed red (#dc2626); `terminal` completed green (#16a34a);

@@ -58,11 +58,13 @@ export type PolyforgeTailRow =
   | { noise: true; count: number }
   | { noise: false; event: PolyforgeEvent };
 
+const EVENT_NOISE_KINDS = new Set(["published", "transcript_missing", "exec_init"]);
+
 /** Collapse each consecutive run of noise events into a single
  *  `{ noise: true, count }` marker (N≥1 uniform). Meaningful events are
  *  never collapsed. Pure helper, no I/O. */
 export function collapseNoiseRuns(events: PolyforgeEvent[]): PolyforgeTailRow[] {
-  const noise = new Set(["published", "transcript_missing", "exec_init"]);
+  const noise = EVENT_NOISE_KINDS;
   const rows: PolyforgeTailRow[] = [];
   for (const event of events) {
     const last = rows[rows.length - 1];
@@ -103,7 +105,7 @@ export function eventValueParts(event: PolyforgeEvent): (string | undefined)[] {
     case "step_started":
       return [event.step, event.model];
     case "candidate_switched":
-      return [event.from, event.to];
+      return [event.step, event.from, event.to];
     case "step_failed":
     case "step_dead":
       return [event.step, event.cause];
@@ -114,6 +116,18 @@ export function eventValueParts(event: PolyforgeEvent): (string | undefined)[] {
     default:
       return [event.step];
   }
+}
+
+/** Row display text: whitelisted values, each ellipsized at 24 chars. Arrow
+ *  kinds pair their last two fields with `→` (`from → to`, `gate → target`);
+ *  any leading field (`candidate_switched`'s step) joins with `·`, e.g.
+ *  `alpha-plan · pi:old → claude:new`. */
+export function formatEventValues(event: PolyforgeEvent): string {
+  const shown = eventValueParts(event).filter((v): v is string => !!v).map(shortenCandidate);
+  if (!EVENT_ARROW_KINDS.has(event.kind)) return shown.join(" · ");
+  const head = shown.slice(0, -2).join(" · ");
+  const tail = shown.slice(-2).join(" → ");
+  return head ? `${head} · ${tail}` : tail;
 }
 
 export function PolyforgePanel({
@@ -182,19 +196,19 @@ export function PolyforgePanel({
 
   const renderEventRow = useCallback((event: PolyforgeEvent, index: number) => {
     const severity = eventSeverity(event);
+    const noise = EVENT_NOISE_KINDS.has(event.kind);
     const parts = eventValueParts(event).filter((v): v is string => !!v);
-    const joiner = EVENT_ARROW_KINDS.has(event.kind) ? " → " : " · ";
-    const displayText = parts.map(shortenCandidate).join(joiner);
+    const displayText = formatEventValues(event);
     const titleText = [event.kind, ...parts].join(" ");
     return (
       <div
         key={`${event.at}-${event.kind}-${index}`}
         title={titleText}
-        style={{ display: "flex", gap: 8, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", color: severity ? EVENT_SEVERITY_COLORS[severity] : "var(--text-muted)" }}
+        style={{ display: "flex", gap: 8, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", color: severity ? EVENT_SEVERITY_COLORS[severity] : noise ? "var(--text-dim)" : "var(--text-muted)" }}
       >
         <span style={{ color: "var(--text-dim)", flexShrink: 0 }}>{formatEventTime(event.at)}</span>
         <span style={{ flexShrink: 0 }}>{eventKindLabel(event.kind)}</span>
-        {displayText && <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{displayText}</span>}
+        {displayText && <span style={{ overflow: "hidden", textOverflow: "ellipsis", color: !severity && !noise ? "var(--text)" : undefined }}>{displayText}</span>}
         {eventMode === "verbose" && EVENT_KIND_KEYS.has(event.kind) && (
           <span style={{ color: "var(--text-dim)", flexShrink: 0 }}>{event.kind}</span>
         )}
@@ -334,7 +348,6 @@ export function PolyforgePanel({
                           <button
                             type="button"
                             onClick={toggleEventMode}
-                            aria-pressed={eventMode === "verbose"}
                             style={{ display: "flex", alignItems: "center", background: "none", border: "1px solid var(--border)", borderRadius: 4, color: "var(--text-muted)", cursor: "pointer", fontSize: 11, padding: "2px 8px" }}
                           >
                             {t(eventMode === "simple" ? "polyforge.eventMode.verbose" : "polyforge.eventMode.simple")}

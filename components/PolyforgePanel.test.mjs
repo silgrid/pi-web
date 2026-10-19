@@ -128,6 +128,11 @@ test("pi#112: EVENT_KIND_KEYS covers exactly the 19 live kinds with raw fallback
 
 test("pi#112: collapseNoiseRuns collapses noise runs to one marker, meaningful events never collapse", () => {
   const context = vm.createContext({});
+  // The helper reads the module-level noise set; inject it from source so the
+  // test tracks the shipped definition rather than a copy.
+  const noiseSet = source.match(/const EVENT_NOISE_KINDS = new Set\(\[[\s\S]*?\]\)/);
+  assert.ok(noiseSet, "EVENT_NOISE_KINDS set literal");
+  vm.runInContext(stripTypeScriptTypes(noiseSet[0]), context);
   vm.runInContext(stripTypeScriptTypes(extractPureFunction("collapseNoiseRuns").replace(/export /g, "")), context);
   const ev = (kind, i) => ({ at: `2026-01-01T00:00:${String(i).padStart(2, "0")}Z`, kind });
   // JSON round-trip normalizes cross-realm object prototypes from the vm.
@@ -146,6 +151,27 @@ test("pi#112: collapseNoiseRuns collapses noise runs to one marker, meaningful e
     { noise: false, event: ev("terminal", 8) },
   ]);
   assert.deepEqual(JSON.parse(JSON.stringify(context.collapseNoiseRuns([]))), [], "empty tail yields no rows");
+});
+
+test("pi#112: formatEventValues renders step · from → to for candidate_switched", () => {
+  const context = vm.createContext({});
+  const arrowSet = source.match(/const EVENT_ARROW_KINDS = new Set\(\[[\s\S]*?\]\)/);
+  assert.ok(arrowSet, "EVENT_ARROW_KINDS set literal");
+  vm.runInContext("const CANDIDATE_MAX = 24;\n" + stripTypeScriptTypes(arrowSet[0]), context);
+  vm.runInContext(stripTypeScriptTypes(extractPureFunction("shortenCandidate").replace(/export /g, "")), context);
+  vm.runInContext(stripTypeScriptTypes(extractPureFunction("eventValueParts").replace(/export /g, "")), context);
+  vm.runInContext(stripTypeScriptTypes(extractPureFunction("formatEventValues").replace(/export /g, "")), context);
+  const ev = { at: "2026-01-01T00:00:00Z", kind: "candidate_switched", step: "alpha-plan", from: "pi:old", to: "claude:new" };
+  assert.equal(context.formatEventValues(ev), "alpha-plan · pi:old → claude:new", "step must be rendered before from → to");
+  const longStep = { at: "2026-01-01T00:00:00Z", kind: "candidate_switched", step: "s".repeat(30), from: "pi:old", to: "claude:new" };
+  const rendered = context.formatEventValues(longStep);
+  assert.ok(rendered.includes("…"), "long step is ellipsized");
+  assert.ok(rendered.includes(" → "), "arrow pair preserved");
+  // Other kinds keep the plain dot join.
+  assert.equal(context.formatEventValues({ at: "2026-01-01T00:00:00Z", kind: "step_started", step: "zulu-grill", model: "m" }), "zulu-grill · m");
+  assert.equal(context.formatEventValues({ at: "2026-01-01T00:00:00Z", kind: "rewind", gate: "spec-review", target: "kilo-author" }), "spec-review → kilo-author");
+  // Absent optional fields never produce stray separators.
+  assert.equal(context.formatEventValues({ at: "2026-01-01T00:00:00Z", kind: "candidate_switched", from: "pi:old", to: "claude:new" }), "pi:old → claude:new");
 });
 
 test("pi#112: eventSeverity map is amber/red/green/neutral including terminal statuses", () => {
