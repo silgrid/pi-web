@@ -59,8 +59,7 @@ ties by name.
 `execution.declared_steps` (pi#114, raw shape proposed to companion WI
 #213) is sanitized by `sanitizeDeclaredSteps` to the client shape
 `declared_steps: [{id}] | null`: each entry contributes only its trimmed
-non-empty `id`, in declaration order — `on_fail` and every other declared
-field (e.g. `path`) are dropped server-side and never reach a response.
+non-empty `id`, in declaration order — field `on_fail` (and every other declared field, e.g. `path`) is dropped server-side, never reaching a response.
 Absent, null, non-array, empty, or any entry without a valid id degrades
 the whole field to `null` (pure, never throws, so the 2xx no-error-surface
 contract holds); `steps`/`events` are unaffected either way.
