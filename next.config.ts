@@ -19,16 +19,17 @@ const gfmAutolinkEmailLoader = join(configDir, "lib/gfm-autolink-email-loader.cj
 const nextConfig: NextConfig = {
   outputFileTracingRoot: configDir,
   // Compress HTML and static responses with Next's built-in gzip. Direct
-  // clients that bypass the edge reverse proxy — the Electron desktop shell
-  // currently targets the raw IP:port — would otherwise pull several MB of
-  // uncompressed JS chunks on a slow link (measured 2026-09-27: a 1.1 MB
-  // static chunk serves as ~380 KB gzipped, -67%). Clients reaching the
-  // server through Caddy are unaffected: Caddy passes through responses that
-  // already carry content-encoding, so its own `encode zstd gzip` layer
-  // keeps serving domain clients and nothing is double-compressed.
-  // (Compress was disabled in pi#40 to work around a since-removed mobile
-  // shell's HTML proxy and kept off as an unneeded behavior change; the
-  // direct-IP gap was measured on 2026-09-27 and it is re-enabled here.)
+  // clients that bypass the edge reverse proxy — e.g. a Chrome app-mode
+  // window (`piweb` alias) pointed at the raw IP:port — would otherwise
+  // pull several MB of uncompressed JS chunks on a slow link (measured
+  // 2026-09-27: a 1.1 MB static chunk serves as ~380 KB gzipped, -67%).
+  // Clients reaching the server through Caddy are unaffected: Caddy passes
+  // through responses that already carry content-encoding, so its own
+  // `encode zstd gzip` layer keeps serving domain clients and nothing is
+  // double-compressed. (Compress was disabled in pi#40 to work around a
+  // since-removed client's HTML proxy and kept off as an unneeded behavior
+  // change; the direct-IP gap was measured on 2026-09-27 and it is
+  // re-enabled here.)
   compress: true,
   experimental: {
     // proxy.ts matches /api/:path*, and Next buffers the request body whenever
