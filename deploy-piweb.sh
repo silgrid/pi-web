@@ -216,8 +216,9 @@ prepare_mode() {
       esac
       echo "==> PIWEB_EXPOSE=lan: pi-web binds ${HOST}:${LOCAL_PORT}; open"
       echo "    http://${lan_ip:-<host-LAN-IP>}:${LOCAL_PORT} from a device on the same network."
-      echo "    Cleartext caveats: the TWA shell needs a cleartext (http) build, and PWA"
-      echo "    install degrades over HTTP (browsers may not offer 'Install app')."
+      echo "    Cleartext caveat: PWA install degrades over HTTP (browsers may not offer"
+      echo "    'Install app'). Chrome app-mode windows (the piweb launcher) open http://"
+      echo "    origins fine."
       ;;
     tailscale)
       install_tailscale
@@ -474,7 +475,8 @@ case "${EXPOSE}" in
       echo "==> Quick tunnel up: https://${CF_HOST} (hostname appended to PI_WEB_ALLOWED_HOSTS)"
       echo "    WARNING: quick-tunnel URLs are DEMO-ONLY. Reusing a healthy tunnel keeps the"
       echo "    URL stable across redeploys, but the connector restarting (or dying) still"
-      echo "    mints a new one; never bake a trycloudflare.com URL into a PWA/TWA client."
+      echo "    mints a new one; never bake a trycloudflare.com URL into a PWA or app-mode"
+      echo "    client."
       echo "    Use PIWEB_TUNNEL=named (or PIWEB_EXPOSE=tailscale) for a stable origin."
       recycle_piweb_window
     else

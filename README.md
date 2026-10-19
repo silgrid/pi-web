@@ -162,22 +162,21 @@ Any other `PIWEB_EXPOSE` value fails fast, before the script uninstalls, install
 
 ### LAN mode
 
-Zero extra tooling: pi-web stays reachable at `http://<host-LAN-IP>:<port>` on the local network, and nothing is appended to `PI_WEB_ALLOWED_HOSTS`. Two cleartext caveats to know (the script states them, it cannot fix them):
+Zero extra tooling: pi-web stays reachable at `http://<host-LAN-IP>:<port>` on the local network, and nothing is appended to `PI_WEB_ALLOWED_HOSTS`. One cleartext caveat to know (the script states it, it cannot fix it):
 
-- The TWA shell needs a cleartext (http) build to open an http origin.
-- PWA install degrades over HTTP — Chrome may not offer “Install app”.
+- PWA install degrades over HTTP — Chrome may not offer “Install app”. (Chrome app-mode windows — the mac/Windows `piweb` launcher — open `http://` origins fine.)
 
 ### Tailscale mode (recommended)
 
 Installs Tailscale when absent (macOS via Homebrew, Linux via the upstream install script), runs `tailscale up` (SSO login), and mounts pi-web at `https://<machine>.<tailnet>.ts.net` through `tailscale serve` with an auto-provisioned Let's Encrypt cert — no domain, no ports, no Caddy.
 
-The ts.net HTTPS origin satisfies **both** mobile clients on one origin: the Chrome PWA install criteria and the TWA `assetlinks.json` verification. `tailscale serve` runs as a tmux window of the deploy session, so killing the session stops it; redeploys keep a serve mapping that already forwards to the current port, and replace the serve holder window otherwise (a healthy serve survives a redeploy).
+The ts.net HTTPS origin satisfies **both** mobile clients on one origin: the Chrome PWA install criteria on Android and Safari Add-to-Home-Screen on iOS. `tailscale serve` runs as a tmux window of the deploy session, so killing the session stops it; redeploys keep a serve mapping that already forwards to the current port, and replace the serve holder window otherwise (a healthy serve survives a redeploy).
 
 Node sharing (share this machine with family/colleagues' tailnet accounts) covers the "people I trust" case; public sharing needs Cloudflare mode or Tailscale Funnel (not automated by this script).
 
 ### Cloudflare mode
 
-`cloudflared` runs outbound-only — no inbound ports. `PIWEB_TUNNEL=quick` (default) starts a quick tunnel and prints its `*.trycloudflare.com` URL, captured and wired into `PI_WEB_ALLOWED_HOSTS` automatically. **Quick-tunnel URLs are demo-only**: reusing a healthy connector keeps the URL stable across redeploys, but the connector restarting (or dying) still mints a fresh one — never bake one into a PWA/TWA client.
+`cloudflared` runs outbound-only — no inbound ports. `PIWEB_TUNNEL=quick` (default) starts a quick tunnel and prints its `*.trycloudflare.com` URL, captured and wired into `PI_WEB_ALLOWED_HOSTS` automatically. **Quick-tunnel URLs are demo-only**: reusing a healthy connector keeps the URL stable across redeploys, but the connector restarting (or dying) still mints a fresh one — never bake one into a PWA or app-mode client.
 
 `PIWEB_TUNNEL=named` is for public distribution at scale. It requires a Cloudflare account with your domain on Cloudflare DNS and two operator-supplied settings:
 
@@ -190,7 +189,7 @@ The cloudflared process runs as a tmux window of the deploy session; a redeploy 
 
 - In `tailscale`/`cloudflare` modes the served/tunnel hostname is appended to `PI_WEB_ALLOWED_HOSTS` before pi-web starts (operator entries are preserved and come first) — otherwise request-security rejects the unknown `Host` header. `lan` mode and the unset path append nothing.
 - Serve/tunnel lifecycle is tied to the `${PIWEB_TMUX_SESSION:-piweb}` tmux session: killing it stops the tunnel. Re-running the script is tunnel-idempotent — only the pi-web loop window(s) are recycled (unnamed loop windows left by older deploys or the autostart recipe included); a serve/tunnel window that is alive and forwarding to the current port survives with its process (and the quick URL, recovered from `~/.piweb/<session>-quick-tunnel.log`), and a stale or dead one is replaced, window included.
-- Phone client: install the PWA over the HTTPS origin (Chrome → Install app) or point the TWA shell APK from [`mobile-twa/`](./mobile-twa/) at the same origin.
+- Phone client: install the PWA over the HTTPS origin — Android: Chrome → Install app; iPhone: Safari → Share → Add to Home Screen.
 
 ### China notes
 
@@ -199,15 +198,18 @@ The cloudflared process runs as a tmux window of the deploy session; a redeploy 
 - **Android**: Chrome WebAPK minting and closed-app Web Push go through Google/FCM and need a VPN on mainland networks.
 - **iOS**: PWA Web Push uses APNs and works in mainland China without a VPN.
 
-## Mobile
+## Clients
 
-Both platforms wrap the same self-hosted origin — no bundled server, no proxying, no script injection:
+Every platform opens the same self-hosted origin — no bundled server, no proxying, no script injection:
 
-- **Android**: side-load the Trusted Web Activity APK from [`mobile-twa/`](./mobile-twa/) — fullscreen, no address bar, works GMS-free and without a VPN (assetlinks verification only talks to your own server).
-- **iOS**: Safari **Share → Add to Home Screen** installs the PWA, which is the native standalone form on iOS; Web Push rides APNs and works in mainland China without a VPN.
-- **Fallback everywhere**: the zero-install PWA (Chrome → Install app).
+| Platform | Standalone form | Install path |
+|---|---|---|
+| macOS | Chrome app mode — `piweb` alias | shell rc file (see [`docs/mobile.md`](./docs/mobile.md)) |
+| Windows | Chrome app mode — `piweb` function | PowerShell profile (see [`docs/mobile.md`](./docs/mobile.md)) |
+| iPhone | Safari PWA — the native standalone form on iOS | Safari → Share → Add to Home Screen |
+| Android | Chrome PWA — for now | Chrome → ⋮ → Install app |
 
-Closed-app Web Push on Android goes through FCM, which needs a VPN in mainland China — see the full capability matrix and step-by-step device flows in [`docs/mobile.md`](./docs/mobile.md).
+Closed-app Web Push on Android goes through FCM, which needs a VPN in mainland China — see the launcher snippets, the China reachability notes and the full notification capability matrix in [`docs/mobile.md`](./docs/mobile.md).
 
 ## Notes
 
