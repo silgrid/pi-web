@@ -435,7 +435,13 @@ export function PolyforgePanel({
                           <div role="list" style={{ display: "flex", flexWrap: "wrap", alignItems: "center", rowGap: 6 }}>
                             {graph.nodes.map((node, index) => (
                               <span key={`${node.id}-${index}`} style={{ display: "inline-flex", alignItems: "center" }}>
-                                {index > 0 && (
+                                {/* Connector only for pairs the model actually
+                                    edges: started-only in fallback (G5), and
+                                    declared-consecutive pairs only (G6). */}
+                                {index > 0 &&
+                                  graph.sequenceEdges.some(
+                                    ([from, to]) => from === graph.nodes[index - 1].id && to === node.id,
+                                  ) && (
                                   <span aria-hidden="true" style={{ color: "var(--text-dim)", fontSize: 10, padding: "0 3px", flexShrink: 0 }}>
                                     →
                                   </span>
