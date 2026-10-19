@@ -86,15 +86,21 @@ chip row (`buildStepGraph` in `components/PolyforgePanel.tsx`, pure):
   connectors (`→`, aria-hidden) join consecutive declared nodes only —
   never the last declared node to an appended extra, and never two
   extras. Without usable `declared_steps` (absent/malformed → `null`),
-  the graph falls back to the started-at order and edges only consecutive
-  started steps, so unstarted steps trail unedged. `on_fail` targets are
+  the graph falls back to the started-at order and edges every consecutive
+  pair within the prefix up to and including the last non-pending step, so
+  never-started steps trail unedged. This prefix rule matters after a pf
+  rewind: `applyRewindRangeLocked` resets rewound steps to `pending` while
+  keeping `step_started_at`, so pending steps can sit inside the started
+  segment and must stay connected (pf stamps `started_at` only on claim, so a
+  step that never started is always pending). `on_fail` targets are
   not part of the node model, so they are never drawn. The node row is a
   `flex-wrap` container with `overflow: hidden` — rows wrap in the 340 px
   dock and the mobile sheet with no horizontal scroll; a connector that
   lands at a line end simply ends that line.
-- **Rewind edges** — each taken `rewind` event in the sanitized 40-event
-  tail whose gate AND target are both nodes renders as one dashed chip on
-  its own line under the node row, `title`/`aria-label`
+- **Rewind edges** — the tail's `rewind` events are deduplicated by
+  gate→target pair: each distinct pair whose gate AND target are both nodes
+  renders as one dashed chip on its own line under the node row,
+  `title`/`aria-label`
   `${polyforge.eventKind.rewind}: gate → target` (existing keys, no new
   i18n labels). Rewinds outside the tail window or with an unknown
   endpoint are not drawn, and no dashed element exists in the panel
