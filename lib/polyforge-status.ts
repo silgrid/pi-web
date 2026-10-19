@@ -89,7 +89,14 @@ export interface PolyforgeStep {
 export interface PolyforgeEvent {
   at: string;
   kind: string;
-  summary?: string;
+  step?: string;
+  model?: string;
+  from?: string;
+  to?: string;
+  cause?: string;
+  gate?: string;
+  target?: string;
+  status?: string;
 }
 
 export interface PolyforgeWatchStatus {
@@ -185,6 +192,19 @@ export function orderPolyforgeSteps(
   return [...started, ...unstarted].map(({ name, status }) => ({ name, status }));
 }
 
+/** Owner-approved per-kind event body whitelist (pi#112). Every kind not
+ *  listed here passes through only `body.step` (when present); all other
+ *  body keys — question, detail, evidence, error, answered_by, files,
+ *  reason, from_model/to_model, spawn_n, … — never reach a response. */
+const EVENT_BODY_FIELDS: Record<string, readonly string[]> = {
+  step_started: ["step", "model"],
+  candidate_switched: ["step", "from", "to"],
+  step_failed: ["step", "cause"],
+  step_dead: ["step", "cause"],
+  rewind: ["gate", "target"],
+  terminal: ["status"],
+};
+
 /** Clamp to the newest `maxEvents`, order preserved (newest last). */
 export function tailPolyforgeEvents(events: unknown[], maxEvents: number = EVENT_TAIL): PolyforgeEvent[] {
   if (!Array.isArray(events)) return [];
@@ -195,18 +215,17 @@ export function tailPolyforgeEvents(events: unknown[], maxEvents: number = EVENT
     const at = toTrimmedString(e.at);
     if (!at || !kind) return null;
     const mapped: PolyforgeEvent = { at, kind };
-    // Summary whitelist: `body.step` for the three step kinds, else
-    // `body.spawn_n`. Everything else in `body` (detail, question text,
-    // model names) is dropped before it can reach a response.
+    // Per-kind body whitelist (pi#112): only the owner-approved fields for
+    // each kind pass through; every other body key is dropped before it can
+    // reach a response. Unknown kinds pass through at most `body.step`.
     if (e.body && typeof e.body === "object") {
-      const body = e.body as { step?: unknown; spawn_n?: unknown };
-      if (
-        (kind === "step_started" || kind === "step_done" || kind === "step_failed")
-        && typeof body.step === "string" && body.step.trim()
-      ) {
-        mapped.summary = body.step.trim();
-      } else if (typeof body.spawn_n === "number" && Number.isFinite(body.spawn_n)) {
-        mapped.summary = `spawn ${body.spawn_n}`;
+      const body = e.body as Record<string, unknown>;
+      const fields = EVENT_BODY_FIELDS[kind] ?? ["step"];
+      for (const field of fields) {
+        const value = toOptionalTrimmedString(body[field]);
+        if (value !== undefined) {
+          (mapped as unknown as Record<string, string | undefined>)[field] = value;
+        }
       }
     }
     return mapped;

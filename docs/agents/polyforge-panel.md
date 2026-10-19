@@ -41,11 +41,19 @@ the `polyforge.*` wiring in `components/AppShell.tsx`.
 `sanitizeOpsStatus` keeps only queue running/max and per-job
 wi/slug/status/stepAgeSec/idleAgeSec/candidate/spawnN — `env_names`,
 `workspaces`, `workflows_dir`, `machine_id`, `origin`, `session_fingerprint`
-are dropped. `sanitizeWatch` maps events to `{at,kind,summary?}` where
-`summary` derives only from `body.step` (step_started/done/failed) or
-`body.spawn_n`; `needs_input` carries kind only, never the question text.
-`progress`, raw event bodies and `job` are dropped. Step order is execution
-order: started steps by `started_at` ascending, unstarted last, ties by name.
+are dropped. `sanitizeWatch` maps events to
+`{at,kind,step?,model?,from?,to?,cause?,gate?,target?,status?}` using a
+per-kind body whitelist (pi#112): `step_started` → step+model;
+`candidate_switched` → step+from+to; `step_failed`/`step_dead` → step+cause;
+`rewind` → gate+target; `terminal` → status; every other kind (including
+unknown kinds) → step only. Never leaves the sanitizer: question,
+question_id, detail, evidence, error, answered_by, local_commit/commits,
+files, reason, disposition, effort, resume, failure_count, from_model/
+to_model, archived, version, commit_ms/push_ms/pushed, spawn_n — in
+particular `needs_input` carries kind and step only, never the question
+text. `progress`, raw event bodies and `job` are dropped. Step order is
+execution order: started steps by `started_at` ascending, unstarted last,
+ties by name.
 
 ## Client behavior
 

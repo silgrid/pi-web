@@ -216,7 +216,7 @@ export function PolyforgePanel({
                             <div key={`${event.at}-${event.kind}-${index}`} style={{ display: "flex", gap: 8, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                               <span style={{ color: "var(--text-dim)", flexShrink: 0 }}>{formatEventTime(event.at)}</span>
                               <span style={{ color: "var(--text-muted)", flexShrink: 0 }}>{eventKindLabel(event.kind)}</span>
-                              {event.summary && <span style={{ color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis" }}>{event.summary}</span>}
+                              {event.step && <span style={{ color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis" }}>{event.step}</span>}
                             </div>
                           ))}
                         </div>
