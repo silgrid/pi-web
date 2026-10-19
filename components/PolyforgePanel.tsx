@@ -154,9 +154,15 @@ export interface StepGraph {
  *    the declaration are appended in started-at fallback order (the order
  *    `steps` already carries) with no sequence edges.
  *  - `declaredSteps` null (absent/malformed/empty): nodes follow the
- *    started-at fallback order of `steps`; sequence edges join consecutive
- *    started (non-pending) steps only, so the last started node is not edged
- *    to the first unstarted one.
+ *    started-at fallback order of `steps`; the started segment is the prefix of
+ *    steps up to and including the LAST node whose status is not 'pending',
+ *    and sequence edges join every consecutive pair inside that prefix, so
+ *    never-started (always pending) steps trail unedged.
+ *    Basis: pf stamps `step_started_at` on claim (transition.go ~293-309), so a
+ *    step that never started is always pending; but a rewind
+ *    (applyRewindRangeLocked) resets [target, gate) to 'pending' while keeping
+ *    `step_started_at`, so pending steps can sit inside the started segment —
+ *    testing pairs individually would wrongly break the chain around them.
  *  - Rewind edges: only tail `rewind` events whose gate AND target are both
  *    nodes, one edge per distinct gate→target pair. `on_fail` targets are
  *    not nodes in this model, so they can never be drawn. */
@@ -179,10 +185,16 @@ export function buildStepGraph(
     }
   } else {
     nodes = steps.map((step) => ({ id: step.name, status: step.status }));
-    for (let i = 1; i < nodes.length; i++) {
-      if (nodes[i - 1].status !== "pending" && nodes[i].status !== "pending") {
-        sequenceEdges.push([nodes[i - 1].id, nodes[i].id]);
-      }
+    // Started segment = prefix up to and including the LAST non-pending node.
+    // pf rewinds reset [target, gate) to 'pending' while keeping started_at, so
+    // pending steps can sit inside the started segment; edge the whole prefix
+    // and leave the trailing never-started steps unedged.
+    let lastStarted = -1;
+    for (let i = 0; i < nodes.length; i++) {
+      if (nodes[i].status !== "pending") lastStarted = i;
+    }
+    for (let i = 1; i <= lastStarted; i++) {
+      sequenceEdges.push([nodes[i - 1].id, nodes[i].id]);
     }
   }
   const nodeIds = new Set(nodes.map((node) => node.id));

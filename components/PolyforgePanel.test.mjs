@@ -376,6 +376,33 @@ test("pi#114 buildStepGraph: rewind edges need the tail, both endpoints, and ded
   assert.deepEqual(tail.rewindEdges, [["code", "plan"], ["grill-review", "spec"]], "only tail rewinds with both endpoints as nodes, deduplicated");
 });
 
+test("pi#114 buildStepGraph: fallback edges the whole prefix up to the last non-pending step (post-rewind shape)", () => {
+  const context = vm.createContext({});
+  vm.runInContext(stripTypeScriptTypes(extractPureFunction("buildStepGraph").replace(/export /g, "")), context);
+  // After a pf rewind, [target, gate) is reset to 'pending' while started_at is
+  // kept, so pending steps sit inside the started segment. The started segment
+  // is the prefix up to and including the LAST non-pending node; edges span
+  // that prefix, trailing never-started steps stay unedged.
+  const graph = JSON.parse(JSON.stringify(context.buildStepGraph(
+    [
+      { name: "grill", status: "done" },
+      { name: "grill-review", status: "done" },
+      { name: "spec", status: "pending" },
+      { name: "code", status: "in_progress" },
+      { name: "review", status: "in_progress" },
+      { name: "verification", status: "pending" },
+    ],
+    null,
+    [],
+  )));
+  assert.deepEqual(graph.sequenceEdges, [
+    ["grill", "grill-review"],
+    ["grill-review", "spec"],
+    ["spec", "code"],
+    ["code", "review"],
+  ], "edges span the first five nodes only; the trailing pending step is unedged");
+});
+
 test("pi#114 stepNodeColor: explicit gray for pending/cancelled, unknown statuses fall back gray", () => {
   const context = vm.createContext({});
   const colorMap = source.match(/const STEP_STATUS_COLORS: Record<string, string> = \{[\s\S]*?\n\};/);
