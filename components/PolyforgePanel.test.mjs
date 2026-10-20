@@ -507,3 +507,40 @@ test("pi#117: new detail labels are translated in all three locales", () => {
     }
   }
 });
+
+test("pi#119: the detail renders a summary block — line, age, cap marker, error line; absent → nothing", () => {
+  const blockStart = source.indexOf("{/* pi#119 summary block");
+  const blockEnd = source.indexOf("{/* pi#117 detail rows", blockStart);
+  assert.ok(blockStart >= 0 && blockEnd > blockStart, "summary block boundaries");
+  const block = source.slice(blockStart, blockEnd);
+  // The block is gated on the sanitized snapshot: when all four fields are
+  // absent the block renders nothing at all — no heading, placeholder or
+  // loading text.
+  assert.match(source, /const summaryVisible = Boolean\(summary \|\| summaryError \|\| summaryCapped\)/, "visibility derives from the four sanitized fields");
+  assert.match(source, /\{summaryVisible && \(/, "the summary block renders only when at least one field is present");
+  // The line + its age, formatted the same way as command_age_sec
+  // (`Command · 2h 2m` → `Summary · 2h 2m`).
+  assert.match(block, /\{t\("polyforge\.summary"\)\}\{summaryAgeSec != null \? ` · \$\{formatAge\(summaryAgeSec\)\}` : ""\}/, "the summary age renders like command_age_sec");
+  assert.match(block, />\{summary\}</, "the summary line renders verbatim");
+  assert.ok(block.includes('wordBreak: "break-word"'), "the summary line wraps (no ellipsis)");
+  // A cap-reached marker when summary_capped is true (amber, its own line).
+  assert.match(block, /\{summaryCapped && \(/, "the cap marker renders only when capped");
+  assert.match(block, /color: "#d97706"/, "the cap marker is amber");
+  assert.match(block, /\{t\("polyforge\.summaryCapped"\)\}/, "the cap marker label is translated");
+  // summary_error on its own error-styled line; it may show together with
+  // an older summary (the rows are independent: no cross-gating).
+  assert.match(block, /\{summaryError && \(/, "the error line renders only when present");
+  assert.match(block, /color: "#dc2626"/, "the error line is error-styled (red)");
+  assert.match(block, /fontFamily: "var\(--font-mono, monospace\)"/, "the error line is mono");
+  assert.match(block, />\{summaryError\}</, "the raw error text renders");
+  // Nothing in the block is clickable or issues a request.
+  assert.doesNotMatch(block, /onClick|fetch|href/, "the summary block must stay display-only");
+});
+
+test("pi#119: the summary labels are translated in all three locales", () => {
+  for (const [name, localeSource] of [["en", enSource], ["zh-CN", zhCNSource], ["zh-TW", zhTWSource]]) {
+    for (const key of ["polyforge.summary", "polyforge.summaryCapped"]) {
+      assert.match(localeSource, new RegExp(`"${key.replace(/\./g, "\\.")}": "\\S`), `${name} must translate ${key}`);
+    }
+  }
+});

@@ -375,6 +375,16 @@ export function PolyforgePanel({
   // display-only, each absent piece renders nothing (no placeholder).
   const progress = watchStatus?.progress;
   const origin = watchStatus?.origin;
+  // pi#119 summary block: the summarize lane's narration. Every field is
+  // already absent when missing or malformed server-side (the sanitizer
+  // guarantees it), so the block renders only when at least one is present;
+  // the 3s watch poll refreshes the age like command_age_sec — no
+  // client-side ticking between polls (a non-goal).
+  const summary = watchStatus?.summary;
+  const summaryAgeSec = watchStatus?.summary_age_sec;
+  const summaryError = watchStatus?.summary_error;
+  const summaryCapped = watchStatus?.summary_capped;
+  const summaryVisible = Boolean(summary || summaryError || summaryCapped);
   // The in_progress live age is computed at render from `now`; the watch
   // poll re-renders every 3s while the panel is open with a selection, so the
   // age stays live without a dedicated timer.
@@ -554,6 +564,31 @@ export function PolyforgePanel({
                                 </span>
                               ))}
                             </div>
+                          )}
+                        </div>
+                        )}
+                        {/* pi#119 summary block: the summarize lane's
+                            narration — the line, its age (formatted like
+                            command_age_sec), a cap-reached marker and the
+                            raw error line, which may show together with an
+                            older summary. The whole block is absent when
+                            the snapshot carries none of the four fields:
+                            no heading, placeholder or loading text. */}
+                        {summaryVisible && (
+                        <div style={{ padding: "6px 12px", borderBottom: "1px solid var(--border)", flexShrink: 0, display: "flex", flexDirection: "column", gap: 2, fontSize: 11 }}>
+                          {summary && (
+                            <>
+                              <span style={{ color: "var(--text-dim)" }}>
+                                {t("polyforge.summary")}{summaryAgeSec != null ? ` · ${formatAge(summaryAgeSec)}` : ""}
+                              </span>
+                              <span style={{ color: "var(--text)", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{summary}</span>
+                            </>
+                          )}
+                          {summaryCapped && (
+                            <span style={{ color: "#d97706" }}>{t("polyforge.summaryCapped")}</span>
+                          )}
+                          {summaryError && (
+                            <span style={{ color: "#dc2626", fontFamily: "var(--font-mono, monospace)", whiteSpace: "pre-wrap", wordBreak: "break-all" }}>{summaryError}</span>
                           )}
                         </div>
                         )}
