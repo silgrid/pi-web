@@ -98,7 +98,7 @@ const T = {
   G9: "G9: Under prefers-reduced-motion no node animates",
   G10: "G10: Node shows the 24-char-cut name; title and aria label carry full name and status",
   G11: "G11: Clicking a node does nothing",
-  G12: "G12: Nine nodes wrap onto rows without horizontal scroll in the 340px dock and the mobile sheet",
+  G12: "G12: Nine nodes wrap onto rows without horizontal scroll in the 460px dock and the mobile sheet",
   G13: "G13: No step name+status chips in any event mode (verbose, simple, invalid)",
   G14: "G14: Watch route sanitizes declared_steps to ordered ids only",
   G15: "G15: Docs describe the graph contract and polyforge labels stay in all three locales",
@@ -269,7 +269,7 @@ try {
       assert.deepEqual(g.dashed, [], `dashed edges drawn without any rewind: ${JSON.stringify(g.dashed)}`);
       for (const [from, to] of Object.entries(ON_FAIL)) assert.ok(edge(g, from, to) === undefined, `an edge joins ${from} → ${to}`);
     });
-    await check(T.G12, "340px dock", async () => assertWraps(g));
+    await check(T.G12, "460px dock", async () => assertWraps(g));
   });
   await onPage([T.G12], { viewport: { width: 600, height: 900 } }, "pi#201", async (page, panel, g) => {
     await check(T.G12, "mobile sheet", async () => assertWraps(g));

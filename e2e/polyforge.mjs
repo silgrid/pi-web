@@ -174,7 +174,7 @@ const T = {
   AC6: "AC6: Selected WI stays selected after it leaves the job list",
   AC7: "AC7: Blocked WI shows its status only, never the pending-question text",
   AC8: "AC8: Routes validate refs before argv, time out to unavailable and leak no env values or hidden fields",
-  AC9: "AC9: Panel docks 340px right on desktop / 62% bottom sheet on mobile, sharing the bg-tasks slot",
+  AC9: "AC9: Panel docks 460px (resizable) right on desktop / 62% bottom sheet on mobile, sharing the bg-tasks slot",
   AC10: "AC10: Panel strings are localized in zh-CN and zh-TW",
   // pi#112 (wi_5qd5PgbQT1Gw) — readable event tail, authored pre-code against
   // artifacts/spec.md. One scenario per new-behaviour acceptance criterion.
@@ -548,9 +548,12 @@ try {
   setState({});
 
   // AC9 — dock slot
+  // pi#117: the desktop dock opens at 460 by default (resizable via its
+  // left-edge handle; the e2e asserts the default width only — the clamp,
+  // persistence and dismissal-exemption contracts are pinned by unit tests).
   await withPage(T.AC9, "desktop dock + mutual exclusion", {}, async (page) => {
     const box = await (await openPanel(page)).boundingBox();
-    assert.ok(Math.abs(box.width - 340) <= 2, `desktop dock is ${box.width}px wide`);
+    assert.ok(Math.abs(box.width - 460) <= 2, `desktop dock is ${box.width}px wide`);
     await page.getByRole("button", { name: "Background tasks", exact: true }).first().click();
     await bgPanel(page).first().waitFor();
     assert.equal(await pfPanel(page).count(), 0, "opening bg-tasks must close the Polyforge panel");

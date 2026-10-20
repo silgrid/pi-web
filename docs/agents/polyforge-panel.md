@@ -4,7 +4,9 @@ A read-only Polyforge panel in the shared dock slot (the bg-tasks slot): a topba
 button + right dock (desktop) / bottom sheet (mobile), a job list, and a selected
 work item's steps and event tail. Files: `lib/polyforge-status.ts`,
 `app/api/polyforge/**`, `hooks/usePolyforge.ts`, `components/PolyforgePanel.tsx`,
-the `polyforge.*` wiring in `components/AppShell.tsx`.
+the `polyforge.*` wiring in `components/AppShell.tsx`, the dock width
+constants in `lib/panel-layout.ts` and the `.pf-dock-resize-handle` styles
+in `app/globals.css`.
 
 ## Route contracts (degradation-first)
 
@@ -116,7 +118,7 @@ chip row (`buildStepGraph` in `components/PolyforgePanel.tsx`, pure):
   segment and must stay connected (pf stamps `started_at` only on claim, so a
   step that never started is always pending). `on_fail` targets are
   not part of the node model, so they are never drawn. The node row is a
-  `flex-wrap` container with `overflow: hidden` — rows wrap in the 340 px
+  `flex-wrap` container with `overflow: hidden` — rows wrap in the 460 px
   dock and the mobile sheet with no horizontal scroll; a connector that
   lands at a line end simply ends that line.
 - **Rewind edges** — the tail's `rewind` events are deduplicated by
@@ -193,10 +195,22 @@ issues a request.
   click path — background polls never spin or disable the button.
 - `components/AppShell.tsx`: the button renders iff pf is present,
   independent of chat visibility; opening the Polyforge panel closes bg-tasks
-  and vice versa (mutually exclusive dock slot: 340 px right dock / 62 %
-  mobile sheet) — enforced on every path that opens either panel, including
+  and vice versa (mutually exclusive dock slot: 62 % mobile sheet both) —
+  enforced on every path that opens either panel, including
   the bg-task terminal notification's jump: its onClick closes the Polyforge
   panel before showing bg-tasks, so the jump never lands on a covered dock.
+  **Desktop dock width (pi#117):** the Polyforge dock opens at 460 px and
+  resizes through the shared `useResizablePanel` hook via a left-edge
+  drag handle (`.pf-dock-resize-handle`, keyboard + double-click reset
+  included), clamped to [340 px, 90 vw] (`lib/panel-layout.ts`:
+  `POLYFORGE_DOCK_*`), persisted globally under the localStorage key
+  `pi-web:polyforge-dock-width` (absent/invalid reads as 460; the same
+  convention as `pi-web:polyforge-event-mode`). The handle is a DOM child
+  of the dock (it straddles the dock's left edge), so the pi#113 outside-
+  pointerdown dismissal counts it as part of the dock — dragging never
+  closes the dock. The bg-tasks dock in the same slot stays fixed at
+  340 px, uncoupled from the Polyforge width; the mobile 62 % sheet is
+  unchanged (the resizer serves the desktop dock only).
   Desktop dock dismissal (pi#113): while the dock is open, a `pointerdown`
   anywhere outside its own DOM (`data-pf-dock`) closes it — the press is
   never eaten (no `preventDefault`/`stopPropagation`; the dock is an overlay,

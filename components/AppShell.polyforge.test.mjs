@@ -51,18 +51,78 @@ test("every path that opens bg-tasks closes the Polyforge panel (notification ju
   }
 });
 
-test("the panel mounts in the shared dock slot: 340px desktop right dock, 62% mobile sheet", () => {
+test("the panel mounts in the shared dock slot: resizable desktop right dock, 62% mobile sheet; bg-tasks keeps 340", () => {
   const pfDockStart = source.indexOf("{pfPanelOpen && (");
   const bgDockStart = source.indexOf("{bgPanelOpen && (");
   assert.ok(pfDockStart > bgDockStart, "the pf panel mounts in the same container as bg-tasks");
-  const pfDock = source.slice(pfDockStart, source.indexOf(")", source.indexOf("width: 340", pfDockStart)));
-  assert.match(pfDock, /role="dialog"/);
-  assert.match(pfDock, /height: "62%"/);
-  assert.match(pfDock, /aria-label=\{translate\("polyforge\.title"\)\}/);
-  assert.match(pfDock, /width: 340/);
-  assert.match(pfDock, /role="complementary"/);
-  assert.match(pfDock, /<PolyforgePanel/);
-  assert.match(pfDock, /onClose=\{\(\) => setPfPanelOpen\(false\)\}/);
+  const pfBlockEnd = source.indexOf("\n        </div>", pfDockStart);
+  assert.ok(pfBlockEnd > pfDockStart, "pf dock block end");
+  const pfBlock = source.slice(pfDockStart, pfBlockEnd);
+  assert.match(pfBlock, /role="dialog"/);
+  assert.match(pfBlock, /height: "62%"/, "the mobile sheet keeps its 62% height (unchanged, pi#117)");
+  assert.match(pfBlock, /aria-label=\{translate\("polyforge\.title"\)\}/);
+  assert.match(pfBlock, /role="complementary"/);
+  assert.match(pfBlock, /<PolyforgePanel/);
+  assert.match(pfBlock, /onClose=\{\(\) => setPfPanelOpen\(false\)\}/);
+  assert.doesNotMatch(pfBlock, /width: 340/, "the pf dock is no longer fixed at 340 (pi#117: 460 default, resizable)");
+  // The bg-tasks dock in the same slot stays fixed at 340, not coupled to the
+  // Polyforge width.
+  const bgBlock = source.slice(bgDockStart, pfDockStart);
+  assert.match(bgBlock, /width: 340/, "the bg-tasks dock keeps its fixed 340px width");
+  assert.doesNotMatch(bgBlock, /pf-dock|pfDockResizer/, "the bg dock is not coupled to the Polyforge width");
+  // The resize handle renders in the desktop branch only (after the mobile
+  // sheet in the source), so the mobile sheet never grows a resize handle.
+  const handleIndex = source.indexOf('data-resize-handle="polyforge-dock"');
+  const mobileSheetIndex = source.indexOf('height: "62%"', pfDockStart);
+  assert.ok(handleIndex > mobileSheetIndex, "the handle renders in the desktop branch only");
+});
+
+test("pi#117: the desktop dock opens at 460 and resizes via a left-edge handle clamped to [340, 90vw]", () => {
+  // Reuse, no new mechanism: the dock resizes through the shared
+  // useResizablePanel hook (sidebar / right panel pattern).
+  const resizerStart = source.indexOf("const pfDockResizer = useResizablePanel({");
+  assert.ok(resizerStart >= 0, "the dock has a resizer");
+  const resizer = source.slice(resizerStart, source.indexOf("});", resizerStart));
+  for (const wiring of [
+    /ariaLabel: translate\("polyforge\.resizeDock"\)/,
+    /cssVariable: "--pf-dock-width"/,
+    /defaultWidth: POLYFORGE_DOCK_DEFAULT_WIDTH/,
+    /getMaxWidth: getResponsivePfDockMaxWidth/,
+    /growthDirection: "left"/,
+    /maxWidth: POLYFORGE_DOCK_MAX_WIDTH/,
+    /minWidth: POLYFORGE_DOCK_MIN_WIDTH/,
+    /storageKey: "pi-web:polyforge-dock-width"/,
+    /widthRef: pfDockWidthRef/,
+  ]) {
+    assert.match(resizer, wiring, `missing resizer wiring: ${wiring}`);
+  }
+  // The live max is 90vw (absent/invalid storage reads as the 460 default via
+  // the hook's restore).
+  assert.match(
+    source,
+    /getResponsivePfDockMaxWidth = useCallback\(\s*\(\) => typeof window === "undefined"\s*\? POLYFORGE_DOCK_MAX_WIDTH\s*: getPolyforgeDockMaxWidth\(window\.innerWidth\),\s*\[\],\s*\);/,
+    "the max derives from the viewport (90vw)",
+  );
+  // The dock div renders the resizer state as its css variable (the hook
+  // writes the variable directly during the drag, state on commit).
+  assert.match(source, /width: "var\(--pf-dock-width\)"/, "the dock width reads the css variable");
+  assert.match(source, /"--pf-dock-width": `\$\{pfDockResizer\.width\}px`/, "the variable is the resizer state");
+  assert.match(source, /ref=\{pfDockResizer\.panelRef\}/, "the resizer's panelRef is the dock");
+});
+
+test("pi#117: dragging the resize handle never dismisses the dock (the handle counts as part of the dock)", () => {
+  const dockAttr = source.indexOf("data-pf-dock");
+  const handleAttr = source.indexOf('data-resize-handle="polyforge-dock"');
+  const panelStart = source.indexOf("<PolyforgePanel", dockAttr);
+  const dockEnd = source.indexOf("\n              </div>", panelStart);
+  assert.ok(dockAttr >= 0 && handleAttr > dockAttr, "the handle exists after the dock attribute");
+  assert.ok(handleAttr < dockEnd, "the handle is a DOM child of the dock element");
+  // The pi#113 dismissal exempts whatever is inside [data-pf-dock] via the
+  // same closest() check the existing test pins — a handle inside the dock
+  // can never trigger the outside-pointerdown dismissal.
+  assert.match(source, /target\.closest\("\[data-pf-dock\], \[data-pf-toggle\]"\)/, "the dismissal exempts the dock subtree");
+  assert.match(source, /\{\.\.\.pfDockResizer\.separatorProps\}/, "the handle carries the separator props");
+  assert.match(source, /className=\{`pf-dock-resize-handle\$\{pfDockResizer\.isResizing \? " is-resizing" : ""\}`\}/);
 });
 
 test("the shell wires the hook's full state into the panel", () => {

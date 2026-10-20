@@ -9,6 +9,18 @@ export const RIGHT_PANEL_FALLBACK_WIDTH = 560;
 export const RIGHT_PANEL_MIN_WIDTH = 300;
 export const RIGHT_PANEL_MAX_WIDTH = 1200;
 
+// Polyforge dock (pi#117): default 460, resizable within [340, 90vw]. The
+// static cap only bounds aria-valuemax before mount — the live max is 90vw
+// (getPolyforgeDockMaxWidth); 6912 is 90vw at 8K (7680px), so it never binds
+// tighter than 90vw on any narrower viewport.
+export const POLYFORGE_DOCK_DEFAULT_WIDTH = 460;
+export const POLYFORGE_DOCK_MIN_WIDTH = 340;
+export const POLYFORGE_DOCK_MAX_WIDTH = 6912;
+
+export function getPolyforgeDockMaxWidth(viewportWidth: number): number {
+  return Math.round(viewportWidth * 0.9);
+}
+
 const COMPACT_CHAT_MIN_WIDTH = 320;
 const DESKTOP_CHAT_MIN_WIDTH = 420;
 
