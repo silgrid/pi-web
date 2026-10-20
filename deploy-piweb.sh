@@ -389,12 +389,17 @@ quick_tunnel_url_from_log() {
 # 'tmux: server'), so a bare pgrep -f keeps matching the server after the
 # connector died and a redeploy would "reuse" a dead tunnel — stale URL,
 # no connector, no tunnel window (pi#118). A PID that dies between pgrep
-# and ps fails the comm read and counts as dead.
+# and ps fails the comm read and counts as dead. The comm is compared by
+# basename, not exactly: Linux ps prints the bare executable name, but BSD
+# ps (macOS, a supported install target) prints the invoked executable's
+# full path there (e.g. /opt/homebrew/bin/cloudflared) — an exact compare
+# would judge every healthy connector dead on macOS and replace it on each
+# redeploy, breaking the healthy-tunnel reuse guarantee (pi#107).
 cloudflared_alive() {
   local pattern="$1" pid comm
   for pid in $(pgrep -f "${pattern}" 2>/dev/null); do
     comm="$(ps -p "${pid}" -o comm= 2>/dev/null || true)"
-    if [ "${comm}" = "cloudflared" ]; then
+    if [ "${comm##*/}" = "cloudflared" ]; then
       return 0
     fi
   done
