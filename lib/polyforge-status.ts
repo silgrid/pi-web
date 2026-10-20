@@ -11,10 +11,12 @@ import { execFileAsync } from "./exec-file";
  * - ops: `pf --json ops status` → machine `{ env_names, workspaces,
  *   workflows_dir, machine_id, jobs[], queue: { pending, running,
  *   max_concurrent }, … }`
- * - watch: `pf --json watch <ref> --once --events 40` → machine `{ known,
+ * - watch: `pf --json watch <ref> --once --demand --events 40` → machine `{ known,
  *   slug, execution: { steps: Record<name, { status, started_at }> }, …,
  *   events[] }` — `--once` is mandatory (the resident watcher would stream
- *   forever and outlive the 10s timeout).
+ *   forever and outlive the 10s timeout); `--demand` (pi#119) arms the
+ *   summarize lane on every read (the open panel's 3s poll is this route's
+ *   only in-app caller, so every read is a human-side read).
  *
  * The sanitizers are the only passport off this file: machine passthrough
  * never reaches a response (env names, workspace paths, raw event bodies,
@@ -22,7 +24,10 @@ import { execFileAsync } from "./exec-file";
  * owner-approved additions (pi#117) still leave only through them:
  * `progress.command` masked + truncated server-side, `command_age_sec`,
  * `tool_calls`, `recent_files`, per-step `startedAt`, and chat-origin
- * `chat_id`/`owner`.
+ * `chat_id`/`owner`. The summarize-lane fields (pi#119) — `summary`,
+ * `summary_age_sec`, `summary_error`, `summary_capped` — leave only through
+ * the same passport: flat on the wire, flat on the response, each absent
+ * when missing or malformed.
  */
 
 const PRESENCE_PROBE_TIMEOUT_MS = 3000;
@@ -35,6 +40,12 @@ const STDERR_CAP = 512;
 /** Cap on the command text that can leave the server (pi#117): the value is
  *  the program+args shape, ~120 chars, never a full raw command line. */
 const COMMAND_MAX = 120;
+
+/** Cap on the summary error text that can leave the server (pi#119): pf's
+ *  own raw wording for a failed summarize call, verbatim but bounded (the
+ *  same bound as the pf-stderr cap; a separate fact, so a separate
+ *  constant). */
+const SUMMARY_ERROR_MAX = 512;
 
 /** Credential-shaped substrings masked server-side before a command can
  *  reach a response (pi#117, owner-approved): token prefixes (`sk-`,
@@ -167,7 +178,24 @@ export interface PolyforgeOrigin {
   owner?: string;
 }
 
-export interface PolyforgeWatchStatus {
+/** The summarize-lane fields of a watch snapshot (pi#119), flat like on
+ *  the wire: each is absent when missing or malformed — the client renders
+ *  nothing for an absent field. */
+export interface PolyforgeSummary {
+  /** The last finished summarize line — narration, passed verbatim (the
+   *  lane's own bound is 200 chars; no server-side cap, no masking). */
+  summary?: string;
+  /** Present only together with `summary`. */
+  summary_age_sec?: number;
+  /** Raw error text of the latest failed summarize call, verbatim (no
+   *  masking — the dispatch design carries no credential in the summarize
+   *  argv, logs or artifacts), capped server-side at 512 chars. */
+  summary_error?: string;
+  /** Present and true only at the lane's 20-calls-per-attempt cap. */
+  summary_capped?: true;
+}
+
+export interface PolyforgeWatchStatus extends PolyforgeSummary {
   wi: string;
   slug: string;
   workflowStatus: string;
@@ -220,7 +248,12 @@ export async function getPolyforgeWatch(wiRef: string): Promise<PolyforgeWatchSt
   if (!isPolyforgeWiRef(wiRef)) {
     throw new PolyforgeError("wi must be a slug (pi#107) or id (wi_…)");
   }
-  const machine = await runPfJson(["--json", "watch", wiRef, "--once", "--events", String(EVENT_TAIL)]);
+  // `--demand` (pi#119) arms the summarize lane on EVERY read: the open
+  // panel's 3s poll is this route's only in-app caller, so every read is a
+  // human-side read. Always passed, no client parameter, no fallback — a
+  // pf older than v2.18.1 (no --demand) fails the read and the route
+  // degrades through the existing unavailable path.
+  const machine = await runPfJson(["--json", "watch", wiRef, "--once", "--demand", "--events", String(EVENT_TAIL)]);
   return sanitizeWatch(machine);
 }
 
@@ -417,6 +450,38 @@ function sanitizeOrigin(job: unknown): PolyforgeOrigin | undefined {
 }
 
 /**
+ * Sanitize the flat summarize-lane wire fields (pi#119): `summary` (a
+ *  trimmed non-empty string, verbatim — the lane's own bound is 200 chars,
+ *  no server-side cap), `summary_age_sec` (a finite number, kept only
+ *  together with `summary`), `summary_error` (a trimmed non-empty string,
+ *  verbatim and capped at SUMMARY_ERROR_MAX — no masking: the dispatch
+ *  design carries no credential in the summarize argv, logs or artifacts,
+ *  so raw-never-faked holds literally) and `summary_capped` (kept only
+ *  when the wire value is exactly `true`). Each field is absent when
+ *  missing or malformed on the wire, never an error, and no other machine
+ *  field leaks. Pure, never throws.
+ */
+function sanitizeSummaryFields(machine: {
+  summary?: unknown;
+  summary_age_sec?: unknown;
+  summary_error?: unknown;
+  summary_capped?: unknown;
+}): PolyforgeSummary {
+  const summary = toOptionalTrimmedString(machine.summary);
+  const summaryError = toOptionalTrimmedString(machine.summary_error);
+  const fields: PolyforgeSummary = {};
+  if (summary) {
+    fields.summary = summary;
+    if (typeof machine.summary_age_sec === "number" && Number.isFinite(machine.summary_age_sec)) {
+      fields.summary_age_sec = machine.summary_age_sec;
+    }
+  }
+  if (summaryError) fields.summary_error = summaryError.slice(0, SUMMARY_ERROR_MAX);
+  if (machine.summary_capped === true) fields.summary_capped = true;
+  return fields;
+}
+
+/**
  * Machine watch → response snapshot, or null when the ref is unknown to the
  * daemon (`known:false` shape) or the machine shape is unusable. Null keeps
  * the client's last snapshot (selection persistence, daemon blips).
@@ -431,6 +496,10 @@ export function sanitizeWatch(machine: unknown): PolyforgeWatchStatus | null {
     execution?: unknown;
     events?: unknown;
     progress?: unknown;
+    summary?: unknown;
+    summary_age_sec?: unknown;
+    summary_error?: unknown;
+    summary_capped?: unknown;
   };
   if (m.known !== true) return null;
   const execution = m.execution;
@@ -457,5 +526,6 @@ export function sanitizeWatch(machine: unknown): PolyforgeWatchStatus | null {
     events: tailPolyforgeEvents(Array.isArray(m.events) ? m.events : [], EVENT_TAIL),
     progress: sanitizeProgress(m.progress),
     origin: sanitizeOrigin(m.job),
+    ...sanitizeSummaryFields(m),
   };
 }
