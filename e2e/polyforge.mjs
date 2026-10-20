@@ -75,7 +75,7 @@ const WATCH_108 = { work_item: "wi_E2Eaaaa0001", slug: "pi#108", known: true, jo
     "alpha-plan": { status: "done", started_at: "2026-10-18T08:10:00Z" }, "bravo-code": { status: "pending" },
     "kilo-author": { status: "in_progress", started_at: "2026-10-18T08:15:00Z" },
     "mike-spec": { status: "done", started_at: "2026-10-18T08:05:00Z" }, "zulu-grill": { status: "done", started_at: "2026-10-18T08:00:00Z" } } },
-  progress: { command: "E2E-SECRET-WORKER-COMMAND --flag", tool_calls: 9 },
+  progress: { command: "worker run --token=E2E-SECRET-WORKER-COMMAND-0123456789 --flag", tool_calls: 9 },
   events: Array.from({ length: 60 }, (_, i) => ({ at: at(i + 1), kind: i % 2 ? "published" : "step_started", work_item: "wi_E2Eaaaa0001",
     body: { step: "kilo-author", spawn_n: 3, detail: `E2E-SECRET-EVENT-BODY-${i + 1}` }, seq: i + 1 })), last_seq: 60 };
 const WATCH_109 = { work_item: "wi_E2Ecccc0003", slug: "pi#109", known: true, job: { status: "needs_input" },
@@ -124,7 +124,7 @@ const WATCH_112 = { work_item: WI112, slug: SLUG112, known: true, job: { status:
       "alpha-plan": { status: "done", started_at: "2026-10-18T09:20:00Z" },
       "kilo-author": { status: "in_progress", started_at: "2026-10-18T09:30:00Z" },
       "bravo-code": { status: "pending" } } },
-  progress: { command: "E2E-SECRET-WORKER-COMMAND-112 --flag", tool_calls: 3 },
+  progress: { command: "worker run --token=E2E-SECRET-WORKER-COMMAND-112-0123456789 --flag", tool_calls: 3 },
   events: EVENTS_112, last_seq: 125 };
 const stubDir = join(work, "stub-bin");
 mkdirSync(stubDir);

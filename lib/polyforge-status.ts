@@ -18,7 +18,11 @@ import { execFileAsync } from "./exec-file";
  *
  * The sanitizers are the only passport off this file: machine passthrough
  * never reaches a response (env names, workspace paths, raw event bodies,
- * pending-question text, `progress.command`, session fingerprints, origins).
+ * pending-question text, session fingerprints, non-chat origins). The
+ * owner-approved additions (pi#117) still leave only through them:
+ * `progress.command` masked + truncated server-side, `command_age_sec`,
+ * `tool_calls`, `recent_files`, per-step `startedAt`, and chat-origin
+ * `chat_id`/`owner`.
  */
 
 const PRESENCE_PROBE_TIMEOUT_MS = 3000;
@@ -27,6 +31,37 @@ const PRESENCE_TTL_MS = 60000;
 const EVENT_TAIL = 40;
 /** pf's own stderr passes through under this cap; nothing else is echoed. */
 const STDERR_CAP = 512;
+
+/** Cap on the command text that can leave the server (pi#117): the value is
+ *  the program+args shape, ~120 chars, never a full raw command line. */
+const COMMAND_MAX = 120;
+
+/** Credential-shaped substrings masked server-side before a command can
+ *  reach a response (pi#117, owner-approved): token prefixes (`sk-`,
+ *  `ghp_`, `npm_`), env assignments whose name ends in `API_KEY`,
+ *  `token=`/`password=`/`passwd=` assignments (the `=` forms, `--flag=`
+ *  included), and the `--password <value>` flag form. Over-masking only
+ *  costs display fidelity; under-masking leaks, so the value patterns are
+ *  greedy `\S+`. No RegExp lookbehind (repo rule). */
+const COMMAND_REDACTIONS: Array<[RegExp, string]> = [
+  [/\bsk-[A-Za-z0-9_-]+/g, "sk-***"],
+  [/\bghp_[A-Za-z0-9]+/g, "ghp_***"],
+  [/\bnpm_[A-Za-z0-9]+/g, "npm_***"],
+  [/\b([A-Za-z0-9_]*API_KEY=)\S+/gi, "$1***"],
+  [/\b(token=|password=|passwd=)\S+/gi, "$1***"],
+  [/(--password\s)\S+/gi, "$1***"],
+];
+
+/** Mask credential-shaped substrings, then truncate to COMMAND_MAX — the
+ *  only shape in which `progress.command` may leave the server. The raw
+ *  machine value never reaches a response. Pure, never throws. */
+export function redactPolyforgeCommand(command: string): string {
+  let redacted = command;
+  for (const [pattern, replacement] of COMMAND_REDACTIONS) {
+    redacted = redacted.replace(pattern, replacement);
+  }
+  return redacted.slice(0, COMMAND_MAX);
+}
 
 export class PolyforgeError extends Error {
   constructor(message: string) {
@@ -84,6 +119,9 @@ export interface PolyforgeOpsStatus {
 export interface PolyforgeStep {
   name: string;
   status: string;
+  /** Machine `started_at` (pi#117): present only on started steps, so the
+   *  client can show start times and compute durations. */
+  startedAt?: string;
 }
 
 /** Sanitized workflow declaration entry (pi#114): id only — `on_fail` and
@@ -106,6 +144,27 @@ export interface PolyforgeEvent {
   status?: string;
 }
 
+/** Sanitized live progress (pi#117): every field is absent when missing or
+ *  malformed on the wire — the client renders nothing for an absent field. */
+export interface PolyforgeProgress {
+  /** Masked credential-shaped substrings + ~120-char truncation, both
+   *  server-side (redactPolyforgeCommand): the program+args shape, never
+   *  secrets. */
+  command?: string;
+  command_age_sec?: number;
+  tool_calls?: number;
+  recent_files?: string[];
+}
+
+/** Sanitized origin (pi#117): exposed only for chat origins — every other
+ *  origin field is dropped, and any other kind degrades the whole origin to
+ *  absent. */
+export interface PolyforgeOrigin {
+  kind: "chat";
+  chat_id?: string;
+  owner?: string;
+}
+
 export interface PolyforgeWatchStatus {
   wi: string;
   slug: string;
@@ -115,6 +174,8 @@ export interface PolyforgeWatchStatus {
   steps: PolyforgeStep[];
   declared_steps: PolyforgeDeclaredStep[] | null;
   events: PolyforgeEvent[];
+  progress?: PolyforgeProgress;
+  origin?: PolyforgeOrigin;
 }
 
 // ---- transport ----
@@ -180,7 +241,8 @@ function toOptionalTrimmedString(value: unknown): string | undefined {
  * Execution order: started steps by `started_at` ascending, then steps that
  * never started, ties broken by step name. `pf watch` exposes only each
  * step's `started_at` (no workflow declaration), so this ordering is the
- * plan's definition of "execution order".
+ * plan's definition of "execution order". Started steps keep their
+ * `startedAt` (pi#117); unstarted steps carry none.
  */
 export function orderPolyforgeSteps(
   machineSteps: Record<string, { status?: unknown; started_at?: unknown }> | undefined,
@@ -197,7 +259,8 @@ export function orderPolyforgeSteps(
   const unstarted = entries
     .filter((entry) => !entry.startedAt)
     .sort((a, b) => a.name.localeCompare(b.name));
-  return [...started, ...unstarted].map(({ name, status }) => ({ name, status }));
+  return [...started, ...unstarted].map(({ name, status, startedAt }) =>
+    startedAt ? { name, status, startedAt } : { name, status });
 }
 
 /**
@@ -304,6 +367,54 @@ export function sanitizeOpsStatus(machine: unknown): PolyforgeOpsStatus | null {
 }
 
 /**
+ * Sanitize machine `progress` (pi#117): only `command` (masked + truncated
+ *  server-side via redactPolyforgeCommand), `command_age_sec`, `tool_calls`
+ *  and `recent_files` pass; every other machine field is dropped. Each
+ *  field is absent when missing or malformed; a progress object with no
+ *  valid field degrades the whole field to absent. Pure, never throws.
+ */
+function sanitizeProgress(value: unknown): PolyforgeProgress | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const p = value as { command?: unknown; command_age_sec?: unknown; tool_calls?: unknown; recent_files?: unknown };
+  const sanitized: PolyforgeProgress = {};
+  const command = toOptionalTrimmedString(p.command);
+  if (command) sanitized.command = redactPolyforgeCommand(command);
+  if (typeof p.command_age_sec === "number" && Number.isFinite(p.command_age_sec)) {
+    sanitized.command_age_sec = p.command_age_sec;
+  }
+  if (typeof p.tool_calls === "number" && Number.isFinite(p.tool_calls)) {
+    sanitized.tool_calls = p.tool_calls;
+  }
+  // recent_files passes the whitelist as path strings; anything that is not
+  // an array of strings degrades to absent — never an error (the field's
+  // exact pf wire shape is unobserved, owner-stated).
+  if (Array.isArray(p.recent_files) && p.recent_files.every((file) => typeof file === "string")) {
+    sanitized.recent_files = p.recent_files as string[];
+  }
+  return Object.keys(sanitized).length > 0 ? sanitized : undefined;
+}
+
+/**
+ * Sanitize the machine job origin (pi#117): `kind`, `chat_id` and `owner`
+ * are exposed only when `kind === "chat"` — every other origin field is
+ *  dropped, and any other kind (or a malformed job/origin) degrades the
+ * whole origin to absent. Pure, never throws.
+ */
+function sanitizeOrigin(job: unknown): PolyforgeOrigin | undefined {
+  if (!job || typeof job !== "object") return undefined;
+  const origin = (job as { origin?: unknown }).origin;
+  if (!origin || typeof origin !== "object") return undefined;
+  const o = origin as { kind?: unknown; chat_id?: unknown; owner?: unknown };
+  if (toTrimmedString(o.kind) !== "chat") return undefined;
+  const sanitized: PolyforgeOrigin = { kind: "chat" };
+  const chatId = toOptionalTrimmedString(o.chat_id);
+  const owner = toOptionalTrimmedString(o.owner);
+  if (chatId) sanitized.chat_id = chatId;
+  if (owner) sanitized.owner = owner;
+  return sanitized;
+}
+
+/**
  * Machine watch → response snapshot, or null when the ref is unknown to the
  * daemon (`known:false` shape) or the machine shape is unusable. Null keeps
  * the client's last snapshot (selection persistence, daemon blips).
@@ -314,8 +425,10 @@ export function sanitizeWatch(machine: unknown): PolyforgeWatchStatus | null {
     known?: unknown;
     work_item?: unknown;
     slug?: unknown;
+    job?: unknown;
     execution?: unknown;
     events?: unknown;
+    progress?: unknown;
   };
   if (m.known !== true) return null;
   const execution = m.execution;
@@ -340,5 +453,7 @@ export function sanitizeWatch(machine: unknown): PolyforgeWatchStatus | null {
     steps: orderPolyforgeSteps(ex.steps as Record<string, { status?: unknown; started_at?: unknown }>),
     declared_steps: sanitizeDeclaredSteps(ex.declared_steps),
     events: tailPolyforgeEvents(Array.isArray(m.events) ? m.events : [], EVENT_TAIL),
+    progress: sanitizeProgress(m.progress),
+    origin: sanitizeOrigin(m.job),
   };
 }

@@ -13,9 +13,13 @@ the `polyforge.*` wiring in `components/AppShell.tsx`.
   Pf absent answers `{pfPresent:false,status:null}` (no error, the client stops
   polling); daemon down / auth failure / hang answer `{pfPresent:true,status:null,error}`.
 - `GET /api/polyforge/watch?wi=<slug|wi_id>` → 200 `{status:{wi,slug,workflowStatus,
-  currentStep,updatedAt,steps:[{name,status}],declared_steps:[{id}]|null,
-  events:[{at,kind,summary?}]} | null, error?}`.
-  A malformed `wi` answers 400 and never spawns pf.
+  currentStep,updatedAt,steps:[{name,status,startedAt?}],declared_steps:[{id}]|null,
+  events:[{at,kind,summary?}],progress?:{command,command_age_sec,tool_calls,
+  recent_files},origin?:{kind:"chat",chat_id,owner}} | null, error?}`.
+  A malformed `wi` answers 400 and never spawns pf. The pi#117 additions
+  (`progress`, per-step `startedAt`, chat `origin`) are sanitized, additive
+  fields: each is absent when missing or malformed on the wire, and every
+  existing field is unchanged.
 - There is no 5xx path on either route, and every failure answers decodable
   JSON: the e2e suite treats any 5xx as a browser error. Both routes re-check
   `isApiRequestAllowed` in-route (`lib/request-security.ts`) and answer 403 JSON
@@ -52,9 +56,27 @@ question_id, detail, evidence, error, answered_by, local_commit/commits,
 files, reason, disposition, effort, resume, failure_count, from_model/
 to_model, archived, version, commit_ms/push_ms/pushed, spawn_n — in
 particular `needs_input` carries kind and step only, never the question
-text. `progress`, raw event bodies and `job` are dropped. Step order is
+text. Raw event bodies are dropped. `progress` and `job` leave only through
+the pi#117 whitelists: progress passes `command` (masked + truncated
+server-side, below), `command_age_sec`, `tool_calls` and `recent_files`
+(an array of path strings; anything that is not an array of strings
+degrades to absent, never an error); `job` passes only a chat `origin` —
+`kind:"chat"` plus `chat_id`/`owner`, every other origin field dropped,
+and any other kind degrades the whole origin to absent. Step order is
 execution order: started steps by `started_at` ascending, unstarted last,
-ties by name.
+ties by name; started steps carry their `startedAt` (pi#117) for the
+client-side timing display, unstarted steps carry none.
+
+**Command redaction (pi#117).** `progress.command` leaves the server only
+after `redactPolyforgeCommand` (`lib/polyforge-status.ts`, pure, exported
+for tests) masks credential-shaped substrings — token prefixes (`sk-`,
+`ghp_`, `npm_`), assignments whose name ends in `API_KEY`,
+`token=`/`password=`/`passwd=` values (the `=` forms, flags included), and
+the `--password <value>` flag form — and then truncates to ~120 chars.
+Over-masking only costs display fidelity; under-masking leaks, so the
+value patterns are greedy `\S+`. The raw machine command never reaches a
+response. Masking is server-side only; the regexes carry no lookbehind
+(repo rule).
 
 `execution.declared_steps` (pi#114, raw shape proposed to companion WI
 #213) is sanitized by `sanitizeDeclaredSteps` to the client shape
