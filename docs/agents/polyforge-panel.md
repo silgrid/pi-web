@@ -135,6 +135,37 @@ chip row (`buildStepGraph` in `components/PolyforgePanel.tsx`, pure):
   unaffected. The mode toggle behavior is unchanged and stays
   client-side.
 
+## Detail rows (pi#117)
+
+The selected detail renders the sanitized `progress`, per-step timing and
+chat-origin data as display-only rows between the step flow graph and the
+event tail. The whole block is absent when the snapshot carries none of it
+(absent → no row, no placeholder); nothing in it is clickable and no row
+issues a request.
+
+- **Command** — `progress.command` (already masked + truncated
+  server-side) in mono, with its age from `command_age_sec` beside the
+  label (`Command · 2h 2m`); the full value rides the row's `title`.
+  Shown only when `command` is present.
+- **Tool calls** — the `tool_calls` count, when present (0 renders).
+- **Recent files** — one ellipsized mono row per `recent_files` entry, the
+  full path on `title`; anything that is not an array of strings degrades
+  to absent server-side (never an error).
+- **Per-step timing** — `buildStepTimings` (pure, exported): every started
+  step shows its `started_at` (HH:MM:SS like the event tail); a done step's
+  duration is its started_at → the NEXT started step's started_at (the
+  steps array is execution-ordered, so the next entry, when started, is
+  it); the in_progress step shows a live age since its started_at,
+  computed at render from `Date.now()` — the 3 s watch poll re-renders, so
+  the age stays live without a dedicated timer. Failed/blocked/cancelled
+  started steps show started_at only; never-started steps show no row;
+  an unparseable started_at degrades that step to no timing. The rows
+  carry no status labels — the graph nodes stay the only step status
+  display (pi#116).
+- **Origin** — only for chat origins with something to show: `chat_id`
+  (24-char cut, full value on `title`) and `owner` as plain text; the
+  whole row is absent otherwise (the wire only carries chat origins).
+
 ## Client behavior
 
 - `hooks/usePolyforge.ts`: one status fetch at mount decides presence; a
