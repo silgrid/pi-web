@@ -53,8 +53,10 @@ const COMMAND_REDACTIONS: Array<[RegExp, string]> = [
 ];
 
 /** Mask credential-shaped substrings, then truncate to COMMAND_MAX — the
- *  only shape in which `progress.command` may leave the server. The raw
- *  machine value never reaches a response. Pure, never throws. */
+ *  only shape in which `progress.command` may leave the server. A clean
+ *  command passes verbatim (the program+args shape is the point); one
+ *  carrying credential-shaped substrings never leaves unmasked. Pure,
+ *  never throws. */
 export function redactPolyforgeCommand(command: string): string {
   let redacted = command;
   for (const [pattern, replacement] of COMMAND_REDACTIONS) {
