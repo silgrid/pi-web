@@ -961,6 +961,8 @@ export const zhCNLocale: LocalePlugin = {
     "polyforge.recentFiles": "最近文件",
     "polyforge.stepTiming": "步骤耗时",
     "polyforge.origin": "来源",
+    "polyforge.summary": "摘要",
+    "polyforge.summaryCapped": "摘要已达调用上限",
     "polyforge.resizeDock": "调整 Polyforge 面板宽度",
     "polyforge.jobStatus.running": "运行中",
     "polyforge.jobStatus.needs_input": "等待输入",

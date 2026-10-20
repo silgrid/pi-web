@@ -461,6 +461,9 @@ try {
     assert.ok(times.includes(at(60)) && times.includes(at(21)) && !times.includes(at(20)), "tail is not the newest 40");
     const call = argvCalls().findLast((a) => a.includes("watch"));
     assert.ok(call && call[call.indexOf("--events") + 1] === "40", `pf watch argv ${JSON.stringify(call)} does not ask for 40 events`);
+    // pi#119: every watch read arms the summarize lane — --demand is always
+    // on the argv (the stub pf ignores it; the route never omits it).
+    assert.ok(call?.includes("--demand"), `pf watch argv ${JSON.stringify(call)} does not arm the summarize lane (--demand)`);
   });
   await withPage(T.AC5, "detail panel", {}, async (page) => {
     const panel = await openPanel(page);

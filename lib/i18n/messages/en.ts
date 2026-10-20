@@ -961,6 +961,8 @@ export const enLocale: LocalePlugin = {
     "polyforge.recentFiles": "Recent files",
     "polyforge.stepTiming": "Step timing",
     "polyforge.origin": "Origin",
+    "polyforge.summary": "Summary",
+    "polyforge.summaryCapped": "Summary cap reached",
     "polyforge.resizeDock": "Resize Polyforge panel",
     "polyforge.jobStatus.running": "Running",
     "polyforge.jobStatus.needs_input": "Needs input",
