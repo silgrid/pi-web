@@ -17,11 +17,13 @@ in `app/globals.css`.
 - `GET /api/polyforge/watch?wi=<slug|wi_id>` → 200 `{status:{wi,slug,workflowStatus,
   currentStep,updatedAt,steps:[{name,status,startedAt?}],declared_steps:[{id}]|null,
   events:[{at,kind,summary?}],progress?:{command,command_age_sec,tool_calls,
-  recent_files},origin?:{kind:"chat",chat_id,owner}} | null, error?}`.
+  recent_files},origin?:{kind:"chat",chat_id,owner},summary?,summary_age_sec?,
+  summary_error?,summary_capped?} | null, error?}`.
   A malformed `wi` answers 400 and never spawns pf. The pi#117 additions
-  (`progress`, per-step `startedAt`, chat `origin`) are sanitized, additive
-  fields: each is absent when missing or malformed on the wire, and every
-  existing field is unchanged.
+  (`progress`, per-step `startedAt`, chat `origin`) and the pi#119 additions
+  (the four summarize-lane fields) are sanitized, additive fields: each is
+  absent when missing or malformed on the wire, and every existing field is
+  unchanged.
 - There is no 5xx path on either route, and every failure answers decodable
   JSON: the e2e suite treats any 5xx as a browser error. Both routes re-check
   `isApiRequestAllowed` in-route (`lib/request-security.ts`) and answer 403 JSON
@@ -37,8 +39,16 @@ in `app/globals.css`.
   expires). The UI affordance is gated on presence, never on daemon
   reachability.
 - Ops: `pf --json ops status`, 10 s timeout. Watch: `pf --json watch <ref>
-  --once --events 40`, 10 s timeout. **`--once` is mandatory** — without it
-  `pf watch` is the resident watcher and streams forever.
+  --once --demand --events 40`, 10 s timeout. **`--once` is mandatory** —
+  without it `pf watch` is the resident watcher and streams forever.
+  **`--demand` (pi#119) arms the summarize lane on every watch read**: the
+  route passes it always, on every call, with no client parameter — the
+  open panel's 3 s poll is the route's only in-app caller, so every read is
+  a human-side read (a direct API GET is one too). No fallback, no
+  retry-without-the-flag: a pf older than v2.18.1 (no `--demand`) fails the
+  watch read and the route answers through the existing degradation path
+  (`200 {status:null,error}`, no 5xx). **Minimum pf: v2.18.1** — the first
+  release carrying the demand-gated summarize lane (polyforge#224).
 - Failure text is pf's own stderr, capped at 512 chars. Error strings are
   never built from `process.env`: a stale `POLYFORGE_V1_API_KEY` inherited by
   the child must leak nothing (values, not names, are the secret).
@@ -68,6 +78,17 @@ and any other kind degrades the whole origin to absent. Step order is
 execution order: started steps by `started_at` ascending, unstarted last,
 ties by name; started steps carry their `startedAt` (pi#117) for the
 client-side timing display, unstarted steps carry none.
+
+**Summarize lane (pi#119).** The four flat wire fields leave only through
+their own whitelist: `summary` (a trimmed non-empty string, verbatim — the
+lane's own bound is 200 chars, no server-side cap), `summary_age_sec` (a
+finite number, kept only together with `summary`), `summary_error` (a
+trimmed non-empty string, verbatim, capped at 512 chars like the pf-stderr
+cap — **no masking**: the dispatch design carries no credential in the
+summarize argv, logs or artifacts, so raw-never-faked holds literally) and
+`summary_capped` (kept only when the wire value is exactly `true`). Each
+field is absent when missing or malformed on the wire, never an error, and
+no other machine field leaks.
 
 **Command redaction (pi#117).** `progress.command` leaves the server only
 after `redactPolyforgeCommand` (`lib/polyforge-status.ts`, pure, exported
@@ -167,6 +188,20 @@ issues a request.
 - **Origin** — only for chat origins with something to show: `chat_id`
   (24-char cut, full value on `title`) and `owner` as plain text; the
   whole row is absent otherwise (the wire only carries chat origins).
+
+## Summary block (pi#119)
+
+The selected detail renders the summarize lane's narration as one
+display-only block between the step flow graph and the pi#117 detail
+rows: the summary line (verbatim, wrapping — no ellipsis), its age from
+`summary_age_sec` formatted like `command_age_sec` (`Summary · 2h 2m`),
+an amber cap-reached marker when `summary_capped` is true, and
+`summary_error` on its own error-styled (red, mono) line — the error may
+show together with an older summary. The whole block is absent when all
+four fields are absent: no heading, placeholder or loading text, and
+nothing in it is clickable or issues a request. The 3 s watch poll
+refreshes the age (as it does `command_age_sec`); no client-side
+ticking between polls. The job-list rows show none of it.
 
 ## Client behavior
 
