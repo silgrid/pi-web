@@ -382,20 +382,46 @@ quick_tunnel_url_from_log() {
     | head -n 1 | sed 's|^https://||' || true
 }
 
-# Is a quick-tunnel connector for THIS local port already alive? Identity:
-# a live process whose command line targets http://127.0.0.1:${LOCAL_PORT}
-# (the [^0-9] anchor keeps :8142 from matching :81421). A connector started
-# by any means is found via its command line. A connector forwarding to a
-# different port (PIWEB_PORT changed) misses and is replaced.
-quick_tunnel_alive() {
-  pgrep -f "cloudflared tunnel --url http://127\.0\.0\.1:${LOCAL_PORT}([^0-9]|$)" >/dev/null 2>&1
+# Is a cloudflared process matching <ERE> alive? A pgrep -f match counts
+# only when the matched process itself IS cloudflared (comm check): the
+# tmux server forked by this script's tunnel-window creation keeps the
+# client's argv for its whole life (tmux renames only its comm, to
+# 'tmux: server'), so a bare pgrep -f keeps matching the server after the
+# connector died and a redeploy would "reuse" a dead tunnel — stale URL,
+# no connector, no tunnel window (pi#118). A PID that dies between pgrep
+# and ps fails the comm read and counts as dead. The comm is compared by
+# basename, not exactly: Linux ps prints the bare executable name, but BSD
+# ps (macOS, a supported install target) prints the invoked executable's
+# full path there (e.g. /opt/homebrew/bin/cloudflared) — an exact compare
+# would judge every healthy connector dead on macOS and replace it on each
+# redeploy, breaking the healthy-tunnel reuse guarantee (pi#107).
+cloudflared_alive() {
+  local pattern="$1" pid comm
+  for pid in $(pgrep -f "${pattern}" 2>/dev/null); do
+    comm="$(ps -p "${pid}" -o comm= 2>/dev/null || true)"
+    if [ "${comm##*/}" = "cloudflared" ]; then
+      return 0
+    fi
+  done
+  return 1
 }
 
-# Named tunnel: identity is a live connector for this exact config, plus the
-# config's ingress service port must equal the port pi-web binds now (a
-# PIWEB_PORT change means the running tunnel forwards to a stale port).
+# Is a quick-tunnel connector for THIS local port already alive? Identity:
+# a live cloudflared process whose command line targets
+# http://127.0.0.1:${LOCAL_PORT} (the [^0-9] anchor keeps :8142 from matching
+# :81421). A connector started by any means is found via its command line. A
+# connector forwarding to a different port (PIWEB_PORT changed) misses and
+# is replaced.
+quick_tunnel_alive() {
+  cloudflared_alive "cloudflared tunnel --url http://127\.0\.0\.1:${LOCAL_PORT}([^0-9]|$)"
+}
+
+# Named tunnel: identity is a live cloudflared connector for this exact
+# config, plus the config's ingress service port must equal the port pi-web
+# binds now (a PIWEB_PORT change means the running tunnel forwards to a
+# stale port).
 named_tunnel_alive() {
-  pgrep -f "cloudflared tunnel --config ${PIWEB_CF_CONFIG}" >/dev/null 2>&1 || return 1
+  cloudflared_alive "cloudflared tunnel --config ${PIWEB_CF_CONFIG}" || return 1
   local cfg_port
   cfg_port="$(grep -oE 'http://(127\.0\.0\.1|localhost):[0-9]+' "${PIWEB_CF_CONFIG}" 2>/dev/null | head -n 1 | grep -oE '[0-9]+$' || true)"
   [ "${cfg_port}" = "${LOCAL_PORT}" ]
