@@ -211,6 +211,57 @@ export function buildStepGraph(
   return { nodes, sequenceEdges, rewindEdges };
 }
 
+/** Per-step timing model (pi#117). `durationSec` is null when the step
+ *  shows no duration: a done step's duration is its started_at → the NEXT
+ *  started step's started_at (null when nothing started after it), the
+ *  in_progress step's is the live age since its started_at, and every other
+ *  started status (failed, blocked, …) shows started_at only. Never-started
+ *  steps carry no entry at all. Pure: no I/O, no throw — an unparseable
+ *  started_at degrades that step to no timing. */
+export interface StepTiming {
+  startedAt: string;
+  durationSec: number | null;
+}
+
+export function buildStepTimings(
+  steps: { name: string; status: string; startedAt?: string }[],
+  now: number,
+): Map<string, StepTiming> {
+  const timings = new Map<string, StepTiming>();
+  for (let i = 0; i < steps.length; i++) {
+    const step = steps[i];
+    if (!step.startedAt) continue;
+    const ownMs = Date.parse(step.startedAt);
+    if (!Number.isFinite(ownMs)) continue;
+    let durationSec: number | null = null;
+    if (step.status === "in_progress") {
+      durationSec = Math.max(0, Math.round((now - ownMs) / 1000));
+    } else if (step.status === "done") {
+      // steps arrive in execution order (started by started_at ascending),
+      // so the next array entry, when started, is the next started step.
+      const next = steps[i + 1];
+      if (next?.startedAt) {
+        const nextMs = Date.parse(next.startedAt);
+        if (Number.isFinite(nextMs)) {
+          const diffSec = Math.round((nextMs - ownMs) / 1000);
+          if (diffSec >= 0) durationSec = diffSec;
+        }
+      }
+    }
+    timings.set(step.name, { startedAt: step.startedAt, durationSec });
+  }
+  return timings;
+}
+
+/** Live per-step timing for the current snapshot (pi#117): the
+ *  in_progress age reads the clock at render — the module-level helper
+ *  follows BackgroundTasksPanel.formatDuration's clock-at-render pattern —
+ *  and the 3 s watch poll re-renders the panel, so the age stays live
+ *  without a dedicated timer. */
+function liveStepTimings(steps: { name: string; status: string; startedAt?: string }[]): Map<string, StepTiming> {
+  return buildStepTimings(steps, Date.now());
+}
+
 export function PolyforgePanel({
   opsStatus,
   opsError,
@@ -319,6 +370,21 @@ export function PolyforgePanel({
   const graph = watchStatus
     ? buildStepGraph(watchStatus.steps, watchStatus.declared_steps, watchStatus.events)
     : null;
+
+  // pi#117 detail rows: live progress, per-step timing and the chat origin —
+  // display-only, each absent piece renders nothing (no placeholder).
+  const progress = watchStatus?.progress;
+  const origin = watchStatus?.origin;
+  // The in_progress live age is computed at render from `now`; the watch
+  // poll re-renders every 3s while the panel is open with a selection, so the
+  // age stays live without a dedicated timer.
+  const stepTimings = watchStatus ? liveStepTimings(watchStatus.steps) : null;
+  const originHasText = Boolean(origin?.chat_id || origin?.owner);
+  const detailInfoVisible = Boolean(progress?.command)
+    || progress?.tool_calls != null
+    || Boolean(progress?.recent_files)
+    || (stepTimings?.size ?? 0) > 0
+    || originHasText;
 
   const jobs = opsStatus?.jobs ?? [];
 
@@ -487,6 +553,87 @@ export function PolyforgePanel({
                                   {`${shortenCandidate(gate)} → ${shortenCandidate(target)}`}
                                 </span>
                               ))}
+                            </div>
+                          )}
+                        </div>
+                        )}
+                        {/* pi#117 detail rows: command (+age), tool calls,
+                            recent files, per-step timing, chat origin.
+                            Display-only; the whole block is absent when the
+                            snapshot carries none of it. */}
+                        {detailInfoVisible && (
+                        <div style={{ padding: "6px 12px", borderBottom: "1px solid var(--border)", flexShrink: 0, display: "flex", flexDirection: "column", gap: 4, fontSize: 11 }}>
+                          {progress?.command && (
+                            <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                              <span style={{ color: "var(--text-dim)" }}>
+                                {t("polyforge.command")}{progress.command_age_sec != null ? ` · ${formatAge(progress.command_age_sec)}` : ""}
+                              </span>
+                              <span
+                                title={progress.command}
+                                style={{ color: "var(--text)", fontFamily: "var(--font-mono, monospace)", whiteSpace: "pre-wrap", wordBreak: "break-all" }}
+                              >
+                                {progress.command}
+                              </span>
+                            </div>
+                          )}
+                          {progress?.tool_calls != null && (
+                            <div style={{ display: "flex", gap: 6 }}>
+                              <span style={{ color: "var(--text-dim)" }}>{t("polyforge.toolCalls")}</span>
+                              <span style={{ color: "var(--text)" }}>{progress.tool_calls}</span>
+                            </div>
+                          )}
+                          {progress?.recent_files && (
+                            <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                              <span style={{ color: "var(--text-dim)" }}>{t("polyforge.recentFiles")}</span>
+                              {progress.recent_files.map((file) => (
+                                <span
+                                  key={file}
+                                  title={file}
+                                  style={{ color: "var(--text-dim)", fontFamily: "var(--font-mono, monospace)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                                >
+                                  {file}
+                                </span>
+                              ))}
+                            </div>
+                          )}
+                          {stepTimings && stepTimings.size > 0 && (
+                            <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                              <span style={{ color: "var(--text-dim)" }}>{t("polyforge.stepTiming")}</span>
+                              {watchStatus.steps.map((step) => {
+                                // Never-started steps show no timing row.
+                                const timing = stepTimings.get(step.name);
+                                if (!timing) return null;
+                                return (
+                                  <div
+                                    key={step.name}
+                                    title={`${step.name} · ${timing.startedAt}`}
+                                    style={{ display: "flex", gap: 6 }}
+                                  >
+                                    <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: "var(--font-mono, monospace)", color: "var(--text-dim)" }}>
+                                      {shortenCandidate(step.name)}
+                                    </span>
+                                    <span style={{ flexShrink: 0, fontFamily: "var(--font-mono, monospace)", color: "var(--text-dim)" }}>
+                                      {formatEventTime(timing.startedAt)}
+                                    </span>
+                                    {timing.durationSec != null && (
+                                      <span style={{ flexShrink: 0, fontFamily: "var(--font-mono, monospace)", color: "var(--text-dim)" }}>
+                                        +{formatAge(timing.durationSec)}
+                                      </span>
+                                    )}
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          )}
+                          {originHasText && origin && (
+                            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                              <span style={{ color: "var(--text-dim)" }}>{t("polyforge.origin")}</span>
+                              {origin.chat_id && (
+                                <span title={origin.chat_id} style={{ color: "var(--text)", fontFamily: "var(--font-mono, monospace)" }}>
+                                  {shortenCandidate(origin.chat_id)}
+                                </span>
+                              )}
+                              {origin.owner && <span style={{ color: "var(--text)" }}>{origin.owner}</span>}
                             </div>
                           )}
                         </div>

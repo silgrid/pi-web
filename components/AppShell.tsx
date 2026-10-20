@@ -70,8 +70,12 @@ import {
 } from "@/lib/workspace-memory";
 import {
   getDefaultRightPanelWidth,
+  getPolyforgeDockMaxWidth,
   getRightPanelMaxWidth,
   getSidebarMaxWidth,
+  POLYFORGE_DOCK_DEFAULT_WIDTH,
+  POLYFORGE_DOCK_MAX_WIDTH,
+  POLYFORGE_DOCK_MIN_WIDTH,
   RIGHT_PANEL_FALLBACK_WIDTH,
   RIGHT_PANEL_MAX_WIDTH,
   RIGHT_PANEL_MIN_WIDTH,
@@ -468,6 +472,30 @@ export function AppShell() {
     minWidth: RIGHT_PANEL_MIN_WIDTH,
     storageKey: "pi-right-panel-width",
     widthRef: rightPanelWidthRef,
+  });
+  // pi#117: the desktop Polyforge dock opens at 460px and resizes via its
+  // left-edge handle, clamped to [340, 90vw], persisted globally under one
+  // localStorage key (absent/invalid reads as 460). The bg-tasks dock in the
+  // same slot stays fixed at 340 — the two widths are not coupled — and the
+  // mobile 62% sheet is unchanged (the resizer only serves the desktop
+  // dock; its ref attaches to nothing while the mobile branch renders).
+  const pfDockWidthRef = useRef(POLYFORGE_DOCK_DEFAULT_WIDTH);
+  const getResponsivePfDockMaxWidth = useCallback(
+    () => typeof window === "undefined"
+      ? POLYFORGE_DOCK_MAX_WIDTH
+      : getPolyforgeDockMaxWidth(window.innerWidth),
+    [],
+  );
+  const pfDockResizer = useResizablePanel({
+    ariaLabel: translate("polyforge.resizeDock"),
+    cssVariable: "--pf-dock-width",
+    defaultWidth: POLYFORGE_DOCK_DEFAULT_WIDTH,
+    getMaxWidth: getResponsivePfDockMaxWidth,
+    growthDirection: "left",
+    maxWidth: POLYFORGE_DOCK_MAX_WIDTH,
+    minWidth: POLYFORGE_DOCK_MIN_WIDTH,
+    storageKey: "pi-web:polyforge-dock-width",
+    widthRef: pfDockWidthRef,
   });
   const reclampSidebarWidth = sidebarResizer.reclampWidth;
   const reclampRightPanelWidth = rightPanelResizer.reclampWidth;
@@ -3316,15 +3344,30 @@ export function AppShell() {
               </>
             ) : (
               <div
+                ref={pfDockResizer.panelRef}
                 role="complementary"
                 data-pf-dock
+                id="polyforge-dock"
                 aria-label={translate("polyforge.title")}
                 style={{
-                  position: "absolute", top: 0, right: 0, bottom: 0, width: 340,
+                  position: "absolute", top: 0, right: 0, bottom: 0,
+                  width: "var(--pf-dock-width)",
                   zIndex: 25, background: "var(--bg-panel)", borderLeft: "1px solid var(--border)",
                   boxShadow: "-8px 0 24px rgba(0,0,0,0.10)",
-                }}
+                  "--pf-dock-width": `${pfDockResizer.width}px`,
+                } as React.CSSProperties}
               >
+                {/* pi#117: the resize handle straddles the dock's left edge
+                    but stays a DOM child of it, so the pi#113 outside-
+                    pointerdown dismissal counts it as part of the dock —
+                    dragging never closes the dock. */}
+                <div
+                  {...pfDockResizer.separatorProps}
+                  aria-controls="polyforge-dock"
+                  className={`pf-dock-resize-handle${pfDockResizer.isResizing ? " is-resizing" : ""}`}
+                  data-resize-handle="polyforge-dock"
+                  title={`${translate("polyforge.resizeDock")}: ${translate("layout.resizeHint")}`}
+                />
                 <PolyforgePanel
                   opsStatus={pfOpsStatus}
                   opsError={pfOpsError}

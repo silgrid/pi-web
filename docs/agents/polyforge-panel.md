@@ -4,7 +4,9 @@ A read-only Polyforge panel in the shared dock slot (the bg-tasks slot): a topba
 button + right dock (desktop) / bottom sheet (mobile), a job list, and a selected
 work item's steps and event tail. Files: `lib/polyforge-status.ts`,
 `app/api/polyforge/**`, `hooks/usePolyforge.ts`, `components/PolyforgePanel.tsx`,
-the `polyforge.*` wiring in `components/AppShell.tsx`.
+the `polyforge.*` wiring in `components/AppShell.tsx`, the dock width
+constants in `lib/panel-layout.ts` and the `.pf-dock-resize-handle` styles
+in `app/globals.css`.
 
 ## Route contracts (degradation-first)
 
@@ -13,9 +15,13 @@ the `polyforge.*` wiring in `components/AppShell.tsx`.
   Pf absent answers `{pfPresent:false,status:null}` (no error, the client stops
   polling); daemon down / auth failure / hang answer `{pfPresent:true,status:null,error}`.
 - `GET /api/polyforge/watch?wi=<slug|wi_id>` → 200 `{status:{wi,slug,workflowStatus,
-  currentStep,updatedAt,steps:[{name,status}],declared_steps:[{id}]|null,
-  events:[{at,kind,summary?}]} | null, error?}`.
-  A malformed `wi` answers 400 and never spawns pf.
+  currentStep,updatedAt,steps:[{name,status,startedAt?}],declared_steps:[{id}]|null,
+  events:[{at,kind,summary?}],progress?:{command,command_age_sec,tool_calls,
+  recent_files},origin?:{kind:"chat",chat_id,owner}} | null, error?}`.
+  A malformed `wi` answers 400 and never spawns pf. The pi#117 additions
+  (`progress`, per-step `startedAt`, chat `origin`) are sanitized, additive
+  fields: each is absent when missing or malformed on the wire, and every
+  existing field is unchanged.
 - There is no 5xx path on either route, and every failure answers decodable
   JSON: the e2e suite treats any 5xx as a browser error. Both routes re-check
   `isApiRequestAllowed` in-route (`lib/request-security.ts`) and answer 403 JSON
@@ -52,9 +58,27 @@ question_id, detail, evidence, error, answered_by, local_commit/commits,
 files, reason, disposition, effort, resume, failure_count, from_model/
 to_model, archived, version, commit_ms/push_ms/pushed, spawn_n — in
 particular `needs_input` carries kind and step only, never the question
-text. `progress`, raw event bodies and `job` are dropped. Step order is
+text. Raw event bodies are dropped. `progress` and `job` leave only through
+the pi#117 whitelists: progress passes `command` (masked + truncated
+server-side, below), `command_age_sec`, `tool_calls` and `recent_files`
+(an array of path strings; anything that is not an array of strings
+degrades to absent, never an error); `job` passes only a chat `origin` —
+`kind:"chat"` plus `chat_id`/`owner`, every other origin field dropped,
+and any other kind degrades the whole origin to absent. Step order is
 execution order: started steps by `started_at` ascending, unstarted last,
-ties by name.
+ties by name; started steps carry their `startedAt` (pi#117) for the
+client-side timing display, unstarted steps carry none.
+
+**Command redaction (pi#117).** `progress.command` leaves the server only
+after `redactPolyforgeCommand` (`lib/polyforge-status.ts`, pure, exported
+for tests) masks credential-shaped substrings — token prefixes (`sk-`,
+`ghp_`, `npm_`), assignments whose name ends in `API_KEY`,
+`token=`/`password=`/`passwd=` values (the `=` forms, flags included), and
+the `--password <value>` flag form — and then truncates to ~120 chars.
+Over-masking only costs display fidelity; under-masking leaks, so the
+value patterns are greedy `\S+`. The raw machine command never reaches a
+response. Masking is server-side only; the regexes carry no lookbehind
+(repo rule).
 
 `execution.declared_steps` (pi#114, raw shape proposed to companion WI
 #213) is sanitized by `sanitizeDeclaredSteps` to the client shape
@@ -94,7 +118,7 @@ chip row (`buildStepGraph` in `components/PolyforgePanel.tsx`, pure):
   segment and must stay connected (pf stamps `started_at` only on claim, so a
   step that never started is always pending). `on_fail` targets are
   not part of the node model, so they are never drawn. The node row is a
-  `flex-wrap` container with `overflow: hidden` — rows wrap in the 340 px
+  `flex-wrap` container with `overflow: hidden` — rows wrap in the 460 px
   dock and the mobile sheet with no horizontal scroll; a connector that
   lands at a line end simply ends that line.
 - **Rewind edges** — the tail's `rewind` events are deduplicated by
@@ -112,6 +136,37 @@ chip row (`buildStepGraph` in `components/PolyforgePanel.tsx`, pure):
   removed in pi#116; the dashed rewind chips under the node row are
   unaffected. The mode toggle behavior is unchanged and stays
   client-side.
+
+## Detail rows (pi#117)
+
+The selected detail renders the sanitized `progress`, per-step timing and
+chat-origin data as display-only rows between the step flow graph and the
+event tail. The whole block is absent when the snapshot carries none of it
+(absent → no row, no placeholder); nothing in it is clickable and no row
+issues a request.
+
+- **Command** — `progress.command` (already masked + truncated
+  server-side) in mono, with its age from `command_age_sec` beside the
+  label (`Command · 2h 2m`); the full value rides the row's `title`.
+  Shown only when `command` is present.
+- **Tool calls** — the `tool_calls` count, when present (0 renders).
+- **Recent files** — one ellipsized mono row per `recent_files` entry, the
+  full path on `title`; anything that is not an array of strings degrades
+  to absent server-side (never an error).
+- **Per-step timing** — `buildStepTimings` (pure, exported): every started
+  step shows its `started_at` (HH:MM:SS like the event tail); a done step's
+  duration is its started_at → the NEXT started step's started_at (the
+  steps array is execution-ordered, so the next entry, when started, is
+  it); the in_progress step shows a live age since its started_at,
+  computed at render from `Date.now()` — the 3 s watch poll re-renders, so
+  the age stays live without a dedicated timer. Failed/blocked/cancelled
+  started steps show started_at only; never-started steps show no row;
+  an unparseable started_at degrades that step to no timing. The rows
+  carry no status labels — the graph nodes stay the only step status
+  display (pi#116).
+- **Origin** — only for chat origins with something to show: `chat_id`
+  (24-char cut, full value on `title`) and `owner` as plain text; the
+  whole row is absent otherwise (the wire only carries chat origins).
 
 ## Client behavior
 
@@ -140,10 +195,22 @@ chip row (`buildStepGraph` in `components/PolyforgePanel.tsx`, pure):
   click path — background polls never spin or disable the button.
 - `components/AppShell.tsx`: the button renders iff pf is present,
   independent of chat visibility; opening the Polyforge panel closes bg-tasks
-  and vice versa (mutually exclusive dock slot: 340 px right dock / 62 %
-  mobile sheet) — enforced on every path that opens either panel, including
+  and vice versa (mutually exclusive dock slot: 62 % mobile sheet both) —
+  enforced on every path that opens either panel, including
   the bg-task terminal notification's jump: its onClick closes the Polyforge
   panel before showing bg-tasks, so the jump never lands on a covered dock.
+  **Desktop dock width (pi#117):** the Polyforge dock opens at 460 px and
+  resizes through the shared `useResizablePanel` hook via a left-edge
+  drag handle (`.pf-dock-resize-handle`, keyboard + double-click reset
+  included), clamped to [340 px, 90 vw] (`lib/panel-layout.ts`:
+  `POLYFORGE_DOCK_*`), persisted globally under the localStorage key
+  `pi-web:polyforge-dock-width` (absent/invalid reads as 460; the same
+  convention as `pi-web:polyforge-event-mode`). The handle is a DOM child
+  of the dock (it straddles the dock's left edge), so the pi#113 outside-
+  pointerdown dismissal counts it as part of the dock — dragging never
+  closes the dock. The bg-tasks dock in the same slot stays fixed at
+  340 px, uncoupled from the Polyforge width; the mobile 62 % sheet is
+  unchanged (the resizer serves the desktop dock only).
   Desktop dock dismissal (pi#113): while the dock is open, a `pointerdown`
   anywhere outside its own DOM (`data-pf-dock`) closes it — the press is
   never eaten (no `preventDefault`/`stopPropagation`; the dock is an overlay,

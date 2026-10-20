@@ -75,7 +75,7 @@ const WATCH_108 = { work_item: "wi_E2Eaaaa0001", slug: "pi#108", known: true, jo
     "alpha-plan": { status: "done", started_at: "2026-10-18T08:10:00Z" }, "bravo-code": { status: "pending" },
     "kilo-author": { status: "in_progress", started_at: "2026-10-18T08:15:00Z" },
     "mike-spec": { status: "done", started_at: "2026-10-18T08:05:00Z" }, "zulu-grill": { status: "done", started_at: "2026-10-18T08:00:00Z" } } },
-  progress: { command: "E2E-SECRET-WORKER-COMMAND --flag", tool_calls: 9 },
+  progress: { command: "worker run --token=E2E-SECRET-WORKER-COMMAND-0123456789 --flag", tool_calls: 9 },
   events: Array.from({ length: 60 }, (_, i) => ({ at: at(i + 1), kind: i % 2 ? "published" : "step_started", work_item: "wi_E2Eaaaa0001",
     body: { step: "kilo-author", spawn_n: 3, detail: `E2E-SECRET-EVENT-BODY-${i + 1}` }, seq: i + 1 })), last_seq: 60 };
 const WATCH_109 = { work_item: "wi_E2Ecccc0003", slug: "pi#109", known: true, job: { status: "needs_input" },
@@ -124,7 +124,7 @@ const WATCH_112 = { work_item: WI112, slug: SLUG112, known: true, job: { status:
       "alpha-plan": { status: "done", started_at: "2026-10-18T09:20:00Z" },
       "kilo-author": { status: "in_progress", started_at: "2026-10-18T09:30:00Z" },
       "bravo-code": { status: "pending" } } },
-  progress: { command: "E2E-SECRET-WORKER-COMMAND-112 --flag", tool_calls: 3 },
+  progress: { command: "worker run --token=E2E-SECRET-WORKER-COMMAND-112-0123456789 --flag", tool_calls: 3 },
   events: EVENTS_112, last_seq: 125 };
 const stubDir = join(work, "stub-bin");
 mkdirSync(stubDir);
@@ -174,7 +174,7 @@ const T = {
   AC6: "AC6: Selected WI stays selected after it leaves the job list",
   AC7: "AC7: Blocked WI shows its status only, never the pending-question text",
   AC8: "AC8: Routes validate refs before argv, time out to unavailable and leak no env values or hidden fields",
-  AC9: "AC9: Panel docks 340px right on desktop / 62% bottom sheet on mobile, sharing the bg-tasks slot",
+  AC9: "AC9: Panel docks 460px (resizable) right on desktop / 62% bottom sheet on mobile, sharing the bg-tasks slot",
   AC10: "AC10: Panel strings are localized in zh-CN and zh-TW",
   // pi#112 (wi_5qd5PgbQT1Gw) — readable event tail, authored pre-code against
   // artifacts/spec.md. One scenario per new-behaviour acceptance criterion.
@@ -548,9 +548,12 @@ try {
   setState({});
 
   // AC9 — dock slot
+  // pi#117: the desktop dock opens at 460 by default (resizable via its
+  // left-edge handle; the e2e asserts the default width only — the clamp,
+  // persistence and dismissal-exemption contracts are pinned by unit tests).
   await withPage(T.AC9, "desktop dock + mutual exclusion", {}, async (page) => {
     const box = await (await openPanel(page)).boundingBox();
-    assert.ok(Math.abs(box.width - 340) <= 2, `desktop dock is ${box.width}px wide`);
+    assert.ok(Math.abs(box.width - 460) <= 2, `desktop dock is ${box.width}px wide`);
     await page.getByRole("button", { name: "Background tasks", exact: true }).first().click();
     await bgPanel(page).first().waitFor();
     assert.equal(await pfPanel(page).count(), 0, "opening bg-tasks must close the Polyforge panel");

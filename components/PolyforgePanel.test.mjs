@@ -45,8 +45,16 @@ test("job rows show slug, status label, spawn number, candidate, ages, and the q
   assert.match(source, /formatAge\(job\.stepAgeSec\)/);
   assert.match(source, /formatAge\(job\.idleAgeSec\)/);
   assert.match(source, /\{opsStatus\.queue\.running\} \/ \{opsStatus\.queue\.max\}/, "queue running/max as 2/4");
-  // All jobs, no owner filter: the sanitizer output is rendered wholesale.
-  assert.doesNotMatch(source, /owner/i);
+  // All jobs, no owner filter: the job list renders the sanitized jobs
+  // wholesale. (pi#117: the DETAIL now shows the sanitized chat origin —
+  // `owner` exists in the panel — so the no-filter guarantee is pinned on
+  // the job-list block, not the whole file.)
+  const jobListStart = source.indexOf("{/* Queue line + job list */}");
+  const jobListEnd = source.indexOf("{/* Detail for the selected work item */}");
+  assert.ok(jobListStart >= 0 && jobListEnd > jobListStart, "job list block boundaries");
+  const jobList = source.slice(jobListStart, jobListEnd);
+  assert.doesNotMatch(jobList, /owner/, "the job list must not filter by owner");
+  assert.match(jobList, /jobs\.map\(\(job: PolyforgeJob\) =>/, "the list renders every job");
 });
 
 test("the detail shows the flow graph, event tail, and status-only blocked rendering, with no step-chip block", () => {
@@ -61,8 +69,13 @@ test("the detail shows the flow graph, event tail, and status-only blocked rende
   // Sequence connectors between consecutive nodes; dashed rewind chips below.
   assert.match(source, /graph\.rewindEdges\.map\(\(\[gate, target\]\) =>/, "rewind chips render from the model");
   // pi#116: the pre-graph per-step name+status chip block is gone — the
-  // graph nodes are the only step display in every event mode.
-  assert.doesNotMatch(source, /watchStatus\.steps\.map\(\(step\) =>/, "the raw steps must not render a chip row");
+  // graph nodes are the only step STATUS display in every event mode.
+  // (pi#117 adds per-step TIMING rows: name + started_at + duration, never
+  // a status label — see the buildStepTimings test below.)
+  const timingStart = source.indexOf("watchStatus.steps.map((step) =>");
+  assert.ok(timingStart >= 0, "the per-step timing rows exist (pi#117)");
+  const timingBlock = source.slice(timingStart, source.indexOf("\n                              })}\n", timingStart));
+  assert.doesNotMatch(timingBlock, /stepStatusLabel|STEP_STATUS_KEYS|role="listitem"/, "timing rows must not render step status labels or nodes");
   assert.match(source, /watchStatus\.events\.map\(\(event, index\) =>/);
   assert.match(source, /eventKindLabel\(event\.kind\)/);
   assert.match(source, /workflowStatusLabel\(watchStatus\.workflowStatus\)/, "a blocked WI shows its status");
@@ -418,4 +431,79 @@ test("pi#114 stepNodeColor: explicit gray for pending/cancelled, unknown statuse
   assert.equal(gray, "var(--text-dim)", "pending is explicit gray");
   assert.equal(context.stepNodeColor("cancelled"), gray, "cancelled is the same gray as pending");
   assert.equal(context.stepNodeColor("paused"), gray, "unknown status falls back to the same gray");
+});
+
+test("pi#117 buildStepTimings: done = start → next start, in_progress = live age, others = started_at only", () => {
+  const context = vm.createContext({});
+  vm.runInContext(stripTypeScriptTypes(extractPureFunction("buildStepTimings").replace(/export /g, "")), context);
+  const now = Date.parse("2026-10-19T08:13:30Z");
+  const steps = [
+    { name: "grill", status: "done", startedAt: "2026-10-19T08:00:00Z" },
+    { name: "spec", status: "done", startedAt: "2026-10-19T08:05:00Z" },
+    { name: "plan", status: "in_progress", startedAt: "2026-10-19T08:10:00Z" },
+    { name: "code", status: "pending" },
+  ];
+  const timings = context.buildStepTimings(steps, now);
+  assert.equal(timings.get("grill").durationSec, 300, "done: own start → the next started step's start");
+  assert.equal(timings.get("spec").durationSec, 300);
+  assert.equal(timings.get("plan").durationSec, 210, "in_progress: live age since start");
+  assert.equal(timings.get("grill").startedAt, "2026-10-19T08:00:00Z", "started_at carried for display");
+  assert.equal(timings.has("code"), false, "never-started steps carry no timing");
+  // The last done step with nothing started after it shows started_at only.
+  const last = context.buildStepTimings([
+    { name: "grill", status: "done", startedAt: "2026-10-19T08:00:00Z" },
+    { name: "code", status: "pending" },
+  ], now);
+  assert.equal(last.get("grill").durationSec, null, "no next started step → no duration");
+  // Failed/blocked started steps: started_at only (no duration rule for them).
+  const failed = context.buildStepTimings([
+    { name: "review", status: "failed", startedAt: "2026-10-19T08:00:00Z" },
+    { name: "code", status: "done", startedAt: "2026-10-19T08:02:00Z" },
+  ], now);
+  assert.equal(failed.get("review").durationSec, null, "failed started steps show started_at only");
+  assert.equal(failed.get("code").durationSec, null, "the trailing done step has no next start");
+  // An unparseable started_at degrades that step to no timing, never throws.
+  assert.equal(context.buildStepTimings([{ name: "grill", status: "done", startedAt: "not-a-date" }], now).size, 0);
+  assert.equal(context.buildStepTimings([], now).size, 0);
+});
+
+test("pi#117: detail rows render command+age, tool calls, recent files, timing and chat origin; absent → nothing", () => {
+  // The whole block is gated: absent data renders no section, no placeholder.
+  assert.match(source, /const detailInfoVisible = Boolean\(progress\?\.command\)/, "visibility derives from the sanitized snapshot");
+  assert.match(source, /\{detailInfoVisible && \(/, "the detail-info block renders only when something is present");
+  // Command row: label + age from command_age_sec, mono value, title carries it.
+  assert.match(source, /\{progress\?\.command && \(/, "command row renders only when present");
+  assert.match(source, /\{t\("polyforge\.command"\)\}\{progress\.command_age_sec != null \? ` · \$\{formatAge\(progress\.command_age_sec\)\}` : ""\}/, "command age renders from command_age_sec");
+  assert.match(source, /title=\{progress\.command\}/, "full command on hover");
+  // Tool calls count.
+  assert.match(source, /\{progress\?\.tool_calls != null && \(/, "tool calls row renders only when present");
+  assert.match(source, /\{progress\.tool_calls\}/, "the count renders");
+  // Recent files: one ellipsized mono row per file, full path on hover.
+  assert.match(source, /progress\.recent_files\.map\(\(file\) =>/, "one row per recent file");
+  assert.match(source, /title=\{file\}/, "full file path on hover");
+  // Live age at render time (the watch poll re-renders every 3s): the clock
+  // read lives in the module-level helper (the repo's clock-at-render
+  // pattern, BackgroundTasksPanel.formatDuration).
+  assert.match(source, /function liveStepTimings\(steps: \{ name: string; status: string; startedAt\?: string \}\[\]\): Map<string, StepTiming> \{\s*return buildStepTimings\(steps, Date\.now\(\)\);/, "the live age reads the clock");
+  assert.match(source, /const stepTimings = watchStatus \? liveStepTimings\(watchStatus\.steps\) : null;/, "timing derives from the snapshot at render");
+  // Origin: chat_id truncated (full value on hover) + owner as plain text;
+  // the row exists only when at least one of them is present.
+  assert.match(source, /const originHasText = Boolean\(origin\?\.chat_id \|\| origin\?\.owner\)/);
+  assert.match(source, /title=\{origin\.chat_id\}/, "chat_id full value on hover");
+  assert.match(source, /shortenCandidate\(origin\.chat_id\)/, "chat_id truncated client-side");
+  assert.match(source, /\{origin\.owner && <span style=\{\{ color: "var\(--text\)" \}\}>\{origin\.owner\}<\/span>/, "owner renders as plain text");
+  // Nothing in the block is clickable or issues a request: no onClick/fetch.
+  const blockStart = source.indexOf("{/* pi#117 detail rows");
+  const blockEnd = source.indexOf("{/* Event tail (newest last) */}", blockStart);
+  assert.ok(blockStart >= 0 && blockEnd > blockStart, "detail-rows block boundaries");
+  const block = source.slice(blockStart, blockEnd);
+  assert.doesNotMatch(block, /onClick|fetch|href/, "the detail rows must stay display-only");
+});
+
+test("pi#117: new detail labels are translated in all three locales", () => {
+  for (const [name, localeSource] of [["en", enSource], ["zh-CN", zhCNSource], ["zh-TW", zhTWSource]]) {
+    for (const key of ["polyforge.command", "polyforge.toolCalls", "polyforge.recentFiles", "polyforge.stepTiming", "polyforge.origin"]) {
+      assert.match(localeSource, new RegExp(`"${key.replace(/\./g, "\\.")}": "\\S`), `${name} must translate ${key}`);
+    }
+  }
 });

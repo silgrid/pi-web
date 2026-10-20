@@ -1744,6 +1744,38 @@ span.token.table {
 .panel-resize-handle.is-resizing::after {
   background: color-mix(in srgb, var(--text-muted) 70%, var(--border));
 }
+/* Polyforge dock resize handle (pi#117): the dock is an overlay anchored
+   right, so the handle straddles its left edge instead of sitting in the
+   flex flow — but it stays a DOM child of the dock so the pi#113 outside-
+   pointerdown dismissal counts it as part of the dock. Same idle-separator
+   language as .panel-resize-handle (the dock's own border). */
+.pf-dock-resize-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -6px;
+  width: 12px;
+  z-index: 1;
+  cursor: col-resize;
+  touch-action: none;
+  outline: none;
+}
+.pf-dock-resize-handle::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 5px;
+  width: 2px;
+  pointer-events: none;
+  background: transparent;
+  transition: background 0.12s ease;
+}
+.pf-dock-resize-handle:hover::after,
+.pf-dock-resize-handle:focus-visible::after,
+.pf-dock-resize-handle.is-resizing::after {
+  background: color-mix(in srgb, var(--text-muted) 70%, var(--border));
+}
 .sidebar-section-resize-handle {
   outline: none;
 }
