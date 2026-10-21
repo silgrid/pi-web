@@ -544,3 +544,33 @@ test("pi#119: the summary labels are translated in all three locales", () => {
     }
   }
 });
+
+test("pi#120: with a job selected, the whole detail is ONE vertical scroll region", () => {
+  // The detail container (the block after the job list) is the single
+  // scroller: header, graph, summary, detail rows, toggle and event tail
+  // scroll together, so every row is reachable at any sheet height and in
+  // the desktop dock. The old layout stacked the fixed blocks as
+  // non-shrinking children of an overflow-hidden column, so once they
+  // exceeded the leftover height the tail collapsed to zero and everything
+  // below the fold was clipped with no gesture able to reach it.
+  const detailStart = source.indexOf("{/* Detail for the selected work item");
+  assert.ok(detailStart >= 0, "detail block exists");
+  const container = source.slice(detailStart, detailStart + 1100);
+  assert.match(container, /overflowY: "auto"/, "the detail container is the one scroller");
+  // The event tail is a plain block inside that region — no nested vertical
+  // scroller remains anywhere in the detail.
+  const tailStart = source.indexOf("{/* Event tail (newest last)");
+  assert.ok(tailStart > detailStart, "event tail block exists after the detail container");
+  const tail = source.slice(tailStart, source.indexOf("renderEventRow(row.event, index)", tailStart));
+  assert.doesNotMatch(tail, /overflowY/, "the event tail must not scroll on its own");
+  assert.doesNotMatch(tail, /flex: 1, minHeight: 0/, "the tail is no longer a flex-fill scroller");
+  // The panel's top header (title / refresh / close) stays outside the
+  // scroll region and visible: the detail container starts inside the body.
+  const bodyStart = source.indexOf("{/* Body */}");
+  assert.ok(bodyStart >= 0 && bodyStart < detailStart, "the body split precedes the detail");
+  // The job list keeps its own scroller above the detail (unchanged).
+  assert.match(source, /maxHeight: "45%", overflowY: "auto"/, "the job list keeps its own scroller");
+  // Horizontal behavior is unchanged: the graph still wraps (no horizontal
+  // scroll) — the graph container keeps its overflow-hidden wrap container.
+  assert.match(source, /flexWrap: "wrap", alignItems: "center", rowGap: 6/, "the graph node row still wraps");
+});

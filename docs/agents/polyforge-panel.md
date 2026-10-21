@@ -5,8 +5,10 @@ button + right dock (desktop) / bottom sheet (mobile), a job list, and a selecte
 work item's steps and event tail. Files: `lib/polyforge-status.ts`,
 `app/api/polyforge/**`, `hooks/usePolyforge.ts`, `components/PolyforgePanel.tsx`,
 the `polyforge.*` wiring in `components/AppShell.tsx`, the dock width
-constants in `lib/panel-layout.ts` and the `.pf-dock-resize-handle` styles
-in `app/globals.css`. The session chat-id resolution (pi#121) lives in
+and sheet height constants in `lib/panel-layout.ts`, the resize handles
+`hooks/useResizablePanel.ts` / `hooks/useResizableSheet.ts` and their
+`.pf-dock-resize-handle` / `.pf-sheet-resize-handle` styles in
+`app/globals.css`. The session chat-id resolution (pi#121) lives in
 `lib/session-chat-id.ts` + `app/api/sessions/[id]/chat-id` and is documented
 here too, because it is the same pf subprocess contract.
 
@@ -258,6 +260,23 @@ nothing in it is clickable or issues a request. The 3 s watch poll
 refreshes the age (as it does `command_age_sec`); no client-side
 ticking between polls. The job-list rows show none of it.
 
+## Detail scroll region (pi#120)
+
+With a job selected, the whole detail — the header (back button, slug,
+updated/current step), the step flow graph, the summary block, the detail
+rows, the event-mode toggle and the event tail — is ONE vertical scroll
+region: the container under the job list (`flex: 1; min-height: 0;
+overflow-y: auto`). No nested vertical scroller exists inside the detail
+(the event tail is a plain block since pi#120), so every event-tail row is
+reachable by scrolling that one region at any sheet height and in the
+desktop dock — the old layout stacked the blocks as non-shrinking children
+of an `overflow: hidden` column and clipped everything below the fold once
+the fixed blocks plus the job list exceeded the available height (the tail
+collapsed to zero). The panel's top header (title / refresh / close) stays
+outside the region and visible. Horizontal behavior is unchanged: the graph
+still wraps with no horizontal scroll. The same component renders the
+mobile sheet and the desktop dock, so both get the fix.
+
 ## Client behavior
 
 - `hooks/usePolyforge.ts`: one status fetch at mount decides presence; a
@@ -285,10 +304,26 @@ ticking between polls. The job-list rows show none of it.
   click path — background polls never spin or disable the button.
 - `components/AppShell.tsx`: the button renders iff pf is present,
   independent of chat visibility; opening the Polyforge panel closes bg-tasks
-  and vice versa (mutually exclusive dock slot: 62 % mobile sheet both) —
+  and vice versa (mutually exclusive dock slot: mobile bottom sheet both) —
   enforced on every path that opens either panel, including
   the bg-task terminal notification's jump: its onClick closes the Polyforge
   panel before showing bg-tasks, so the jump never lands on a covered dock.
+  **Mobile sheet heights (pi#120):** both mobile sheets (Polyforge and
+  bg-tasks, the same dock slot) open at 62 % of their container and resize
+  by dragging a top-edge handle (`.pf-sheet-resize-handle`, one shared
+  mechanism `hooks/useResizableSheet.ts`, two consumers). The drag is
+  continuous under touch and mouse pointer events alike, clamped to
+  [30 %, 90 %] of the same container the 62 % resolves against
+  (`lib/panel-layout.ts`: `SHEET_*_HEIGHT_PCT`, `clampSheetHeightPct`,
+  `parseStoredSheetHeightPct`); dragging past either bound just clamps —
+  it never dismisses (the backdrop tap stays the only dismiss gesture; the
+  handle is a DOM child of the sheet, above the backdrop), and the handle's
+  `touch-action: none` keeps the page from scrolling or pull-to-refresh
+  while it is dragged. Each sheet persists its own dragged height under its
+  own localStorage key (`pi-web:polyforge-sheet-height`,
+  `pi-web:bg-tasks-sheet-height`, the pi#117 uncoupled-widths convention);
+  absent/invalid/out-of-range reads as the 62 % default. Keyboard resize
+  (arrows, Home/End, Enter/double-click reset) mirrors the dock handle.
   **Desktop dock width (pi#117):** the Polyforge dock opens at 460 px and
   resizes through the shared `useResizablePanel` hook via a left-edge
   drag handle (`.pf-dock-resize-handle`, keyboard + double-click reset
@@ -299,8 +334,9 @@ ticking between polls. The job-list rows show none of it.
   of the dock (it straddles the dock's left edge), so the pi#113 outside-
   pointerdown dismissal counts it as part of the dock — dragging never
   closes the dock. The bg-tasks dock in the same slot stays fixed at
-  340 px, uncoupled from the Polyforge width; the mobile 62 % sheet is
-  unchanged (the resizer serves the desktop dock only).
+  340 px, uncoupled from the Polyforge width; the desktop keeps no height
+  resize at all (the pi#120 sheet resizers serve the mobile branches only,
+  their refs attaching to nothing while the desktop renders).
   Desktop dock dismissal (pi#113): while the dock is open, a `pointerdown`
   anywhere outside its own DOM (`data-pf-dock`) closes it — the press is
   never eaten (no `preventDefault`/`stopPropagation`; the dock is an overlay,

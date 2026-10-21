@@ -1776,6 +1776,40 @@ span.token.table {
 .pf-dock-resize-handle.is-resizing::after {
   background: color-mix(in srgb, var(--text-muted) 70%, var(--border));
 }
+/* Mobile sheet resize handle (pi#120): the bottom sheets (Polyforge,
+   bg-tasks) resize vertically by their top edge. Like the dock handle it
+   straddles the edge (half outside, half inside) but stays a DOM child of
+   the sheet, so it sits above the backdrop — dragging never taps the
+   backdrop (the tap stays the only dismiss gesture). touch-action: none
+   keeps the page from scrolling or pull-to-refresh while the handle is
+   dragged (touch drags are pointer drags here, pi#31). */
+.pf-sheet-resize-handle {
+  position: absolute;
+  top: -7px;
+  left: 0;
+  right: 0;
+  height: 14px;
+  z-index: 1;
+  cursor: row-resize;
+  touch-action: none;
+  outline: none;
+}
+.pf-sheet-resize-handle::after {
+  content: "";
+  position: absolute;
+  top: 6px;
+  left: 0;
+  right: 0;
+  height: 2px;
+  pointer-events: none;
+  background: transparent;
+  transition: background 0.12s ease;
+}
+.pf-sheet-resize-handle:hover::after,
+.pf-sheet-resize-handle:focus-visible::after,
+.pf-sheet-resize-handle.is-resizing::after {
+  background: color-mix(in srgb, var(--text-muted) 70%, var(--border));
+}
 .sidebar-section-resize-handle {
   outline: none;
 }

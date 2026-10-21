@@ -28,6 +28,7 @@ import { useI18n } from "@/hooks/useI18n";
 import { useIsMobile, useIsNarrowMobile } from "@/hooks/useIsMobile";
 import { useViewportHeight } from "@/hooks/useViewportHeight";
 import { useResizablePanel } from "@/hooks/useResizablePanel";
+import { useResizableSheet } from "@/hooks/useResizableSheet";
 import { useAudio } from "@/hooks/useAudio";
 import { SplitPaneLayout } from "./SplitPaneLayout";
 import {
@@ -491,9 +492,9 @@ export function AppShell() {
   // pi#117: the desktop Polyforge dock opens at 460px and resizes via its
   // left-edge handle, clamped to [340, 90vw], persisted globally under one
   // localStorage key (absent/invalid reads as 460). The bg-tasks dock in the
-  // same slot stays fixed at 340 — the two widths are not coupled — and the
-  // mobile 62% sheet is unchanged (the resizer only serves the desktop
-  // dock; its ref attaches to nothing while the mobile branch renders).
+  // same slot stays fixed at 340 — the two widths are not coupled. pi#120
+  // ended the "mobile 62% sheet is unchanged" half of this comment: the
+  // mobile sheets now resize through their own shared mechanism below.
   const pfDockWidthRef = useRef(POLYFORGE_DOCK_DEFAULT_WIDTH);
   const getResponsivePfDockMaxWidth = useCallback(
     () => typeof window === "undefined"
@@ -511,6 +512,21 @@ export function AppShell() {
     minWidth: POLYFORGE_DOCK_MIN_WIDTH,
     storageKey: "pi-web:polyforge-dock-width",
     widthRef: pfDockWidthRef,
+  });
+  // pi#120: the mobile sheets (Polyforge + bg-tasks, same dock slot) resize
+  // by dragging their top edge — one shared mechanism, two consumers, each
+  // persisting its own height (absent/invalid/out-of-range reads as 62%,
+  // clamped to [30%, 90%], never dismisses: the backdrop tap stays the only
+  // dismiss gesture). Desktop keeps its fixed heights — these resizers
+  // serve the mobile sheets only (their refs attach to nothing while the
+  // desktop branch renders).
+  const pfSheetResizer = useResizableSheet({
+    ariaLabel: translate("polyforge.resizeSheet"),
+    storageKey: "pi-web:polyforge-sheet-height",
+  });
+  const bgSheetResizer = useResizableSheet({
+    ariaLabel: translate("bgTasks.resizeSheet"),
+    storageKey: "pi-web:bg-tasks-sheet-height",
   });
   const reclampSidebarWidth = sidebarResizer.reclampWidth;
   const reclampRightPanelWidth = rightPanelResizer.reclampWidth;
@@ -3307,15 +3323,24 @@ export function AppShell() {
                   style={{ position: "absolute", inset: 0, zIndex: 39, background: "rgba(0,0,0,0.35)" }}
                 />
                 <div
+                  ref={bgSheetResizer.sheetRef}
                   role="dialog"
                   aria-label={translate("bgTasks.title")}
                   style={{
-                    position: "absolute", left: 0, right: 0, bottom: 0, height: "62%",
+                    position: "absolute", left: 0, right: 0, bottom: 0,
+                    height: `${bgSheetResizer.heightPct}%`,
                     zIndex: 40, background: "var(--bg-panel)", borderTop: "1px solid var(--border)",
                     boxShadow: "0 -12px 40px rgba(0,0,0,0.22)",
                     paddingBottom: "var(--safe-area-bottom, 0px)",
                   }}
                 >
+                  {/* pi#120: top-edge drag handle (a DOM child of the sheet,
+                      above the backdrop — dragging resizes, never dismisses). */}
+                  <div
+                    {...bgSheetResizer.separatorProps}
+                    className={`pf-sheet-resize-handle${bgSheetResizer.isResizing ? " is-resizing" : ""}`}
+                    data-resize-handle="bg-tasks-sheet"
+                  />
                   <BackgroundTasksPanel
                     sessionId={activeBgSessionId}
                     state={bgTasksState}
@@ -3361,15 +3386,24 @@ export function AppShell() {
                   style={{ position: "absolute", inset: 0, zIndex: 39, background: "rgba(0,0,0,0.35)" }}
                 />
                 <div
+                  ref={pfSheetResizer.sheetRef}
                   role="dialog"
                   aria-label={translate("polyforge.title")}
                   style={{
-                    position: "absolute", left: 0, right: 0, bottom: 0, height: "62%",
+                    position: "absolute", left: 0, right: 0, bottom: 0,
+                    height: `${pfSheetResizer.heightPct}%`,
                     zIndex: 40, background: "var(--bg-panel)", borderTop: "1px solid var(--border)",
                     boxShadow: "0 -12px 40px rgba(0,0,0,0.22)",
                     paddingBottom: "var(--safe-area-bottom, 0px)",
                   }}
                 >
+                  {/* pi#120: top-edge drag handle (a DOM child of the sheet,
+                      above the backdrop — dragging resizes, never dismisses). */}
+                  <div
+                    {...pfSheetResizer.separatorProps}
+                    className={`pf-sheet-resize-handle${pfSheetResizer.isResizing ? " is-resizing" : ""}`}
+                    data-resize-handle="polyforge-sheet"
+                  />
                   <PolyforgePanel
                     opsStatus={pfOpsStatus}
                     opsError={pfOpsError}
