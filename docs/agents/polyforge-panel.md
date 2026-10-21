@@ -6,7 +6,9 @@ work item's steps and event tail. Files: `lib/polyforge-status.ts`,
 `app/api/polyforge/**`, `hooks/usePolyforge.ts`, `components/PolyforgePanel.tsx`,
 the `polyforge.*` wiring in `components/AppShell.tsx`, the dock width
 constants in `lib/panel-layout.ts` and the `.pf-dock-resize-handle` styles
-in `app/globals.css`.
+in `app/globals.css`. The session chat-id resolution (pi#121) lives in
+`lib/session-chat-id.ts` + `app/api/sessions/[id]/chat-id` and is documented
+here too, because it is the same pf subprocess contract.
 
 ## Route contracts (degradation-first)
 
@@ -28,6 +30,15 @@ in `app/globals.css`.
   JSON: the e2e suite treats any 5xx as a browser error. Both routes re-check
   `isApiRequestAllowed` in-route (`lib/request-security.ts`) and answer 403 JSON
   on refusal.
+- `GET /api/sessions/[id]/chat-id` (pi#121) → 200 `{chatId: string | null}`.
+  Every absent case — pf absent, daemon unreachable, a bad token shape, a
+  timeout, or a session this server never started or attached — answers
+  `200 {chatId: null}`, never 4xx/5xx and never error text: the id feeds a
+  cosmetic tab-label suffix, and any non-2xx fetch logs a browser console
+  error that fails the e2e suite. The only non-2xx path is the same in-route
+  `isApiRequestAllowed` 403. The id is shape-validated
+  (`isChatIdToken`, `lib/session-chat-id.ts`) before it can reach a response;
+  pf's stderr never does.
 
 ## Subprocess contract
 
@@ -52,6 +63,50 @@ in `app/globals.css`.
 - Failure text is pf's own stderr, capped at 512 chars. Error strings are
   never built from `process.env`: a stale `POLYFORGE_V1_API_KEY` inherited by
   the child must leak nothing (values, not names, are the secret).
+- Chat init (pi#121): `pf chat init --harness pi --harness-session <id>` —
+  NO `--json` — 10 s timeout, through the same `execFileAsync` (no shell).
+  Measured against pf v2.18.2: exit 0, stdout is exactly the chat id token
+  (`chat_` + 16 hex chars) plus a trailing newline; the trimmed stdout must
+  match `^chat_[A-Za-z0-9_]+$` or it counts as absent — the same discipline the
+  pf-chat extension (the reference consumer) applies. A live run from this
+  machine is refused by the daemon's step-agent guard (DAEMON-403: a step
+  agent must never drive the daemon), so the shape is verified from the
+  polyforge CLI source (`verbs_chat.go` prints `rec.ChatID` via `Fprintln`)
+  and its own CLI test, which pins stdout == the bare token.
+
+## Session chat ids (pi#121)
+
+The pane/session tab labels carry a display-only ` · <id>` suffix with the
+session's polyforge chat id, so a panel/watcher `chat_id` can be matched to
+its tab character for character. Resolution is server-side
+(`lib/session-chat-id.ts` + the route above):
+
+- **Live-session gate** — only a session this server has started or attached
+  resolves: a live wrapper in `lib/rpc-manager.ts` when the request arrives.
+  A session that is not live (an old history session opened in a tab after a
+  server restart, or one released while idle before it was ever resolved)
+  gets no suffix and spawns no pf — pi-web never mints a chat id for a chat
+  pf-chat did not run in. A session first resolved while live keeps its
+  cached id after it is released.
+- **Cache** — a successful id is cached per sessionId for the life of the
+  process (the daemon mapping is immutable). Failures (pf absent, daemon
+  unreachable, bad shape, timeout) never land in the cache, so a later
+  render or refresh retries.
+- **Client** — `hooks/useSessionChatIds.ts`: lazy, once per surface when it
+  first renders the id (a pane tab on desktop, the current session on
+  mobile), plus at most two bounded retries while the answer is null (the
+  first request races the tab's own SSE attach). Gated on pf presence
+  (`usePolyforge`'s mount probe): a pf-less install issues no request at
+  all. Absent answers render no suffix and raise no error.
+- **Rendering** — the suffix is display-only: `shortenCandidate` in the text
+  (exactly the panel's chat-id rendering; the full id at ~21 chars), the
+  FULL id on the hover title. Surfaces: the desktop pane headers and their
+  overflow entries (`components/SplitPaneLayout.tsx`), and the mobile
+  current-session element — the mobile toolbar's session-stats button
+  (`data-mobile-toolbar-stats`; the mobile layout has no session-name
+  header). The suffix is never persisted into `tab.label`, the session
+  name, the `.jsonl` or rename inputs; the sidebar session list and the
+  document title get none.
 
 ## Sanitization (the machine shape never leaves the server)
 

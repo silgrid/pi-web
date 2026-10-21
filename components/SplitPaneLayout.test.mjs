@@ -65,7 +65,8 @@ test("embedded headers span the pane width with no strip-era max width", () => {
   assert.ok(paneHeaderSource.includes("width: \"100%\""), "the header spans its pane column");
   assert.ok(source.includes("paneHeaderLabel"), "SplitPaneLayout labels headers via paneHeaderLabel");
   assert.ok(paneHeaderSource.includes("textOverflow: \"ellipsis\""), "long labels must truncate with an ellipsis");
-  assert.ok(paneHeaderSource.includes("title={label}"), "full label must stay available via tooltip");
+  assert.ok(paneHeaderSource.includes("title={title ?? label}"),
+    "full label must stay available via tooltip (pi#121: the title defaults to the label; the chat-id suffix puts the FULL id here)");
 });
 
 test("focus discrimination uses isPlainClick (drag-selection does not steal focus)", () => {

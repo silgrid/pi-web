@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState, forwardRef, useImperativeHandle } from "react";
 import { PaneHeader } from "./PaneHeader";
+import { shortenCandidate } from "./PolyforgePanel";
 import { useI18n } from "@/hooks/useI18n";
 import { useChatAppearance } from "@/hooks/useChatAppearance";
 import { useTabDragReorder } from "@/hooks/useTabDragReorder";
@@ -22,6 +23,11 @@ interface SplitPaneLayoutProps {
   tabs: PaneTab[];
   focusedId: string | null;
   runningSessionIds: ReadonlySet<string>;
+  /** Resolved polyforge chat ids by session id (pi#121): the display-only
+   *  ` · <id>` suffix on the pane headers, rendered exactly as the panel
+   *  renders a chat id (`shortenCandidate`, full id on the hover title).
+   *  Never persisted into the pane-tab state — `tab.label` stays without it. */
+  chatIds?: Readonly<Record<string, string>>;
   onFocusPane: (sessionId: string) => void;
   onClosePane: (sessionId: string) => void;
   renderPane: (sessionId: string, focused: boolean) => React.ReactNode;
@@ -41,6 +47,7 @@ function SplitPaneLayoutInner(
     tabs,
     focusedId,
     runningSessionIds,
+    chatIds,
     onFocusPane,
     onClosePane,
     renderPane,
@@ -59,6 +66,19 @@ function SplitPaneLayoutInner(
     [onReorderPane],
   );
   const { draggedId, dropTarget, getDragHandlers } = useTabDragReorder(handleReorderPane);
+
+  /** pi#121: the display-only ` · <id>` chat-id suffix for a pane header —
+   *  `shortenCandidate` in the text (exactly as the panel renders a chat id),
+   *  the FULL id on the hover title; absent when unresolved. `tab.label`
+   *  itself never carries the suffix (it is persisted pane state). */
+  const paneHeaderChatIdLabel = (
+    tab: PaneTab,
+    chatId: string | undefined,
+  ): { label: string; title: string | undefined } => {
+    const base = paneHeaderLabel(tab);
+    if (!chatId) return { label: base, title: undefined };
+    return { label: `${base} · ${shortenCandidate(chatId)}`, title: `${base} · ${chatId}` };
+  };
   const paneContainerRef = useRef<HTMLDivElement>(null);
   const paneRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   const overflowTriggerRef = useRef<HTMLButtonElement>(null);
@@ -186,6 +206,7 @@ function SplitPaneLayoutInner(
       >
         {tabs.map((tab) => {
           const dragHandlers = getDragHandlers(tab.sessionId);
+          const chatIdLabel = paneHeaderChatIdLabel(tab, chatIds?.[tab.sessionId]);
           const dropIndicator: "before" | "after" | null = dropTarget?.id === tab.sessionId
             ? (dropTarget.after ? "after" : "before")
             : null;
@@ -210,7 +231,8 @@ function SplitPaneLayoutInner(
           >
             <PaneHeader
               id={`pane-tab-${tab.sessionId}`}
-              label={paneHeaderLabel(tab)}
+              label={chatIdLabel.label}
+              title={chatIdLabel.title}
               running={runningSessionIds.has(tab.sessionId)}
               hasBadge={tab.hasBadge}
               focused={tab.sessionId === focusedId}
@@ -333,7 +355,10 @@ function SplitPaneLayoutInner(
                   zIndex: 60,
                 }}
               >
-                {tabs.map((tab) => (
+                {tabs.map((tab) => {
+                  const chatId = chatIds?.[tab.sessionId];
+                  const baseLabel = paneHeaderLabel(tab);
+                  return (
                   <button
                     key={tab.sessionId}
                     type="button"
@@ -363,6 +388,7 @@ function SplitPaneLayoutInner(
                       />
                     )}
                     <span
+                      title={chatId ? `${baseLabel} · ${chatId}` : undefined}
                       style={{
                         minWidth: 0,
                         flex: "1 1 auto",
@@ -370,7 +396,7 @@ function SplitPaneLayoutInner(
                         textOverflow: "ellipsis",
                       }}
                     >
-                      {paneHeaderLabel(tab)}
+                      {chatId ? `${baseLabel} · ${shortenCandidate(chatId)}` : baseLabel}
                     </span>
                     {tab.hasBadge && (
                       <span
@@ -379,7 +405,8 @@ function SplitPaneLayoutInner(
                       />
                     )}
                   </button>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>
