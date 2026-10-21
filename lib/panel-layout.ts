@@ -21,6 +21,32 @@ export function getPolyforgeDockMaxWidth(viewportWidth: number): number {
   return Math.round(viewportWidth * 0.9);
 }
 
+// Mobile sheet heights (pi#120): the bottom sheets (Polyforge, bg-tasks)
+// open at 62% of their container and resize by dragging the top edge,
+// clamped to [30%, 90%]. The dragged height persists as an integer
+// percentage; an absent, unparsable or out-of-range stored value reads as
+// the 62% default (the same convention as the pi#117 dock width).
+export const SHEET_DEFAULT_HEIGHT_PCT = 62;
+export const SHEET_MIN_HEIGHT_PCT = 30;
+export const SHEET_MAX_HEIGHT_PCT = 90;
+
+/** Clamp a sheet height percentage to [30, 90]; non-finite reads as the 62
+ *  default (an invalid drag or stored value never collapses the sheet). */
+export function clampSheetHeightPct(pct: number): number {
+  const finite = Number.isFinite(pct) ? pct : SHEET_DEFAULT_HEIGHT_PCT;
+  return Math.min(SHEET_MAX_HEIGHT_PCT, Math.max(SHEET_MIN_HEIGHT_PCT, Math.round(finite)));
+}
+
+/** Parse a stored sheet height percentage: null when absent, unparsable or
+ *  out of range — the caller then reads the 62% default. */
+export function parseStoredSheetHeightPct(stored: string | null): number | null {
+  if (stored === null) return null;
+  const parsed = Number.parseFloat(stored);
+  if (!Number.isFinite(parsed)) return null;
+  if (parsed < SHEET_MIN_HEIGHT_PCT || parsed > SHEET_MAX_HEIGHT_PCT) return null;
+  return Math.round(parsed);
+}
+
 const COMPACT_CHAT_MIN_WIDTH = 320;
 const DESKTOP_CHAT_MIN_WIDTH = 420;
 

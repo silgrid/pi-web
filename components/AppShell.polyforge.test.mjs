@@ -51,7 +51,7 @@ test("every path that opens bg-tasks closes the Polyforge panel (notification ju
   }
 });
 
-test("the panel mounts in the shared dock slot: resizable desktop right dock, 62% mobile sheet; bg-tasks keeps 340", () => {
+test("the panel mounts in the shared dock slot: resizable desktop right dock, drag-resizable mobile sheet; bg-tasks keeps 340", () => {
   const pfDockStart = source.indexOf("{pfPanelOpen && (");
   const bgDockStart = source.indexOf("{bgPanelOpen && (");
   assert.ok(pfDockStart > bgDockStart, "the pf panel mounts in the same container as bg-tasks");
@@ -59,7 +59,7 @@ test("the panel mounts in the shared dock slot: resizable desktop right dock, 62
   assert.ok(pfBlockEnd > pfDockStart, "pf dock block end");
   const pfBlock = source.slice(pfDockStart, pfBlockEnd);
   assert.match(pfBlock, /role="dialog"/);
-  assert.match(pfBlock, /height: "62%"/, "the mobile sheet keeps its 62% height (unchanged, pi#117)");
+  assert.match(pfBlock, /height: `\$\{pfSheetResizer\.heightPct\}%`/, "the mobile sheet height is the sheet resizer state (pi#120: default 62%, drag-resizable, persisted)");
   assert.match(pfBlock, /aria-label=\{translate\("polyforge\.title"\)\}/);
   assert.match(pfBlock, /role="complementary"/);
   assert.match(pfBlock, /<PolyforgePanel/);
@@ -73,8 +73,8 @@ test("the panel mounts in the shared dock slot: resizable desktop right dock, 62
   // The resize handle renders in the desktop branch only (after the mobile
   // sheet in the source), so the mobile sheet never grows a resize handle.
   const handleIndex = source.indexOf('data-resize-handle="polyforge-dock"');
-  const mobileSheetIndex = source.indexOf('height: "62%"', pfDockStart);
-  assert.ok(handleIndex > mobileSheetIndex, "the handle renders in the desktop branch only");
+  const mobileSheetIndex = source.indexOf("height: `${pfSheetResizer.heightPct}%`", pfDockStart);
+  assert.ok(handleIndex > mobileSheetIndex, "the dock handle renders in the desktop branch only");
 });
 
 test("pi#117: the desktop dock opens at 460 and resizes via a left-edge handle clamped to [340, 90vw]", () => {
@@ -163,4 +163,35 @@ test("pi#113: a pointer press outside the desktop dock dismisses it, without eat
   // The toggle keeps its functional-update semantics: press-then-click on it
   // ends closed, never a close-then-reopen.
   assert.match(source, /setPfPanelOpen\(\(open\) => \{\s*const next = !open;\s*if \(next\) setBgPanelOpen\(false\);\s*return next;\s*\}\);/);
+});
+
+test("pi#120: both mobile sheets drag-resize through one shared mechanism; each height persists independently", () => {
+  // One shared hook, two consumers, two independent storage keys — the
+  // pi#117 uncoupled dock widths mirrored for the sheet heights.
+  const resizers = [...source.matchAll(
+    /const (pfSheetResizer|bgSheetResizer) = useResizableSheet\(\{\s*ariaLabel: translate\("(polyforge|bgTasks)\.resizeSheet"\),\s*storageKey: "(pi-web:[a-z-]+-sheet-height)",\s*\}\);/g,
+  )].map((m) => [m[1], m[2], m[3]]);
+  assert.deepEqual(resizers, [
+    ["pfSheetResizer", "polyforge", "pi-web:polyforge-sheet-height"],
+    ["bgSheetResizer", "bgTasks", "pi-web:bg-tasks-sheet-height"],
+  ], "two sheet resizers with distinct keys");
+  // Both mobile sheets render the top-edge handle as a DOM child (inside the
+  // sheet, above the backdrop), so dragging resizes and never dismisses; the
+  // handle carries no dismissal of its own — the backdrop tap stays the
+  // only dismiss gesture.
+  for (const [resizer, handle, panel] of [["bgSheetResizer", "bg-tasks-sheet", "<BackgroundTasksPanel"], ["pfSheetResizer", "polyforge-sheet", "<PolyforgePanel"]]) {
+    const sheetIndex = source.indexOf(`ref={${resizer}.sheetRef}`);
+    assert.ok(sheetIndex >= 0, `${resizer} renders a mobile sheet`);
+    const handleIndex = source.indexOf(`data-resize-handle="${handle}"`);
+    assert.ok(handleIndex > sheetIndex, `the ${handle} handle renders inside its sheet`);
+    const panelIndex = source.indexOf(panel, sheetIndex);
+    assert.ok(handleIndex < panelIndex, "the handle precedes the panel content (a DOM child of the sheet)");
+    const sheetBlock = source.slice(sheetIndex, panelIndex);
+    assert.ok(sheetBlock.includes("height: `" + "${" + resizer + ".heightPct}%`"), "the sheet height is the resizer state");
+    assert.ok(sheetBlock.includes(`{...${resizer}.separatorProps}`), "the handle carries the separator props");
+    assert.doesNotMatch(sheetBlock, /onClick/, "the handle never dismisses the sheet");
+  }
+  // Exactly two sheet handles exist (the mobile branches); the desktop
+  // branches keep no height resize (the pi#117 dock resizer is width-only).
+  assert.equal((source.match(/pf-sheet-resize-handle/g) ?? []).length, 2, "only the two mobile sheets carry a sheet handle");
 });
