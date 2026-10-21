@@ -34,6 +34,9 @@ interface PaneHeaderProps {
   onSearch?: () => void;
   /** Localized aria-label/title for the search affordance. */
   searchLabel?: string;
+  /** Hover title; defaults to the label. The chat-id suffix (pi#121) puts
+   *  the FULL id here while the label shows `shortenCandidate(id)`. */
+  title?: string;
 }
 
 export function PaneHeader({
@@ -55,6 +58,7 @@ export function PaneHeader({
   reorderRoleDescription,
   onSearch,
   searchLabel,
+  title,
 }: PaneHeaderProps) {
   const dropIndicatorShadow = dropIndicator === "before"
     ? "inset 3px 0 0 0 var(--accent)"
@@ -69,7 +73,7 @@ export function PaneHeader({
       aria-selected={focused}
       aria-roledescription={reorderRoleDescription}
       onClick={onClick}
-      title={label}
+      title={title ?? label}
       draggable={draggable}
       onDragStart={onDragStart}
       onDragOver={onDragOver}

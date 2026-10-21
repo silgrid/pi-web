@@ -5,12 +5,13 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { useGlobalKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
 import { useBackgroundTasks, markTerminalNotified } from "@/hooks/useBackgroundTasks";
 import { usePolyforge } from "@/hooks/usePolyforge";
+import { useSessionChatIds } from "@/hooks/useSessionChatIds";
 import { SessionSidebar } from "./SessionSidebar";
 import { ChatWindow } from "./ChatWindow";
 import type { ChatScrollPosition } from "@/lib/chat-scroll-position";
 import { FileViewer } from "./FileViewer";
 import { BackgroundTasksPanel } from "./BackgroundTasksPanel";
-import { PolyforgePanel } from "./PolyforgePanel";
+import { PolyforgePanel, shortenCandidate } from "./PolyforgePanel";
 import { TabBar, type Tab } from "./TabBar";
 import { openFileTab, saveFileViewerState, saveParkedFileViewerState, switchFileWorkspace, type ParkedFileWorkspace } from "./file-tab-state";
 import { SettingsPanel, SettingsSectionIcon } from "./SettingsPanel";
@@ -285,6 +286,20 @@ export function AppShell() {
     select: selectPolyforgeJob,
     refreshStatus: refreshPolyforgeStatus,
   } = usePolyforge(pfPanelOpen);
+
+  // pi#121: the polyforge chat id of every session that carries the
+  // display-only ` · <id>` suffix — the pane tabs on desktop, the current
+  // session on mobile. Lazy and presence-gated: a pf-less install issues
+  // no request at all, and an absent id renders no suffix.
+  const chatIdSessionIds = useMemo(() => {
+    if (isMobile) {
+      return selectedSession && !selectedSession.transient ? [selectedSession.id] : [];
+    }
+    return paneTabs
+      .filter((tab) => !isNewSessionTab(tab.sessionId))
+      .map((tab) => tab.sessionId);
+  }, [isMobile, selectedSession, paneTabs]);
+  const sessionChatIds = useSessionChatIds(pfPresent, chatIdSessionIds);
 
   // pi#113: while the DESKTOP dock is open, a pointer press anywhere outside
   // its own DOM dismisses it — and the press still reaches its target: no
@@ -2336,6 +2351,15 @@ export function AppShell() {
   const renderSessionStatsButton = (mobile: boolean) => {
     if (!mobile && (!showChat || (!sessionStats && !contextUsage))) return null;
 
+    // pi#121: the current session's polyforge chat id, display-only. The
+    // mobile layout has no session-name header — this stats button is the
+    // mobile toolbar's current-session element — so the id suffix rides
+    // here, rendered exactly as the panel renders a chat id
+    // (shortenCandidate in the text, the FULL id on the hover title).
+    const currentChatId = mobile && selectedSession && !selectedSession.transient
+      ? sessionChatIds[selectedSession.id]
+      : undefined;
+
     const tokens = sessionStats?.tokens;
     const cost = sessionStats?.cost ?? 0;
     const formatCompact = (value: number) => value >= 1_000_000
@@ -2448,6 +2472,20 @@ export function AppShell() {
             {!hasMobileValues && showChat && (
               <span style={{ overflow: "hidden", textOverflow: "ellipsis", color: "var(--text-dim)" }}>
                 {translate("session.title")}
+              </span>
+            )}
+            {currentChatId && (
+              <span
+                title={currentChatId}
+                style={{
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  color: "var(--text-dim)",
+                  flexShrink: 0,
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {`· ${shortenCandidate(currentChatId)}`}
               </span>
             )}
           </>
@@ -3075,6 +3113,7 @@ export function AppShell() {
               tabs={paneTabs}
               focusedId={focusedPaneId}
               runningSessionIds={runningSessionIds}
+              chatIds={sessionChatIds}
               onFocusPane={(sid) => {
                 setFocusedPaneId(sid);
                 setPaneTabs((prev) => clearBadgeOnFocus(prev, sid));

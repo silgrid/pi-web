@@ -49,9 +49,16 @@ export async function checkSplitPane(page, sessions) {
   const panes = paneArea.locator("> div");
   const overflowTrigger = page.locator("[data-pane-overflow-trigger]");
   const overflowMenu = page.locator("[data-pane-overflow-menu]");
-  // The header's text is the attribution label plus the close ✕ glyph.
+  // The header's text is the attribution label plus the close ✕ glyph —
+  // plus, since pi#121, an optional display-only ` · <chat id>` suffix when
+  // the session's polyforge chat id resolves on the running machine. The
+  // attribution assertions below check the label, not the suffix's
+  // absence, so strip it before comparing.
   const headerText = async (index) =>
-    ((await tabs.nth(index).textContent()) ?? "").replace(/×\s*$/, "").trim();
+    ((await tabs.nth(index).textContent()) ?? "")
+      .replace(/×\s*$/, "")
+      .replace(/\s·\schat_[A-Za-z0-9_]+$/, "")
+      .trim();
   const assertPaneWidths = async (paneCount, denominator) => {
     const areaBox = await paneArea.boundingBox();
     const boxes = await panes.evaluateAll((nodes) => nodes.map((node) => node.getBoundingClientRect()));
