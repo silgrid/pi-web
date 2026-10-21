@@ -258,6 +258,23 @@ nothing in it is clickable or issues a request. The 3 s watch poll
 refreshes the age (as it does `command_age_sec`); no client-side
 ticking between polls. The job-list rows show none of it.
 
+## Detail scroll region (pi#120)
+
+With a job selected, the whole detail — the header (back button, slug,
+updated/current step), the step flow graph, the summary block, the detail
+rows, the event-mode toggle and the event tail — is ONE vertical scroll
+region: the container under the job list (`flex: 1; min-height: 0;
+overflow-y: auto`). No nested vertical scroller exists inside the detail
+(the event tail is a plain block since pi#120), so every event-tail row is
+reachable by scrolling that one region at any sheet height and in the
+desktop dock — the old layout stacked the blocks as non-shrinking children
+of an `overflow: hidden` column and clipped everything below the fold once
+the fixed blocks plus the job list exceeded the available height (the tail
+collapsed to zero). The panel's top header (title / refresh / close) stays
+outside the region and visible. Horizontal behavior is unchanged: the graph
+still wraps with no horizontal scroll. The same component renders the
+mobile sheet and the desktop dock, so both get the fix.
+
 ## Client behavior
 
 - `hooks/usePolyforge.ts`: one status fetch at mount decides presence; a

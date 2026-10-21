@@ -482,7 +482,16 @@ export function PolyforgePanel({
               ))}
             </div>
             {/* Detail for the selected work item */}
-            <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
+            {/* pi#120: with a job selected, the whole detail — header,
+                graph, summary, detail rows, toggle and event tail — is ONE
+                vertical scroll region (this container). No nested vertical
+                scroller exists inside it, so every row is reachable by
+                scrolling at any sheet height and in the desktop dock — the
+                old layout stacked the blocks as non-shrinking children of
+                an overflow-hidden column and clipped everything below the
+                fold once the fixed blocks exceeded the leftover height
+                (the tail collapsed to zero). */}
+            <div style={{ flex: 1, minHeight: 0, overflowY: "auto", display: "flex", flexDirection: "column" }}>
               {selectedWi ? (
                   <>
                     {/* Detail header with an explicit deselect control: the only
@@ -683,7 +692,10 @@ export function PolyforgePanel({
                             {t(eventMode === "simple" ? "polyforge.eventMode.verbose" : "polyforge.eventMode.simple")}
                           </button>
                         </div>
-                        <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "6px 12px", fontSize: 11, lineHeight: 1.45, fontFamily: "var(--font-mono, monospace)" }}>
+                        {/* Event tail (newest last): the rows are plain
+                            blocks inside the detail's scroll region (pi#120),
+                            not their own scroller. */}
+                        <div style={{ flexShrink: 0, padding: "6px 12px", fontSize: 11, lineHeight: 1.45, fontFamily: "var(--font-mono, monospace)" }}>
                           {watchStatus.events.length === 0 && (
                             <div style={{ color: "var(--text-dim)", fontFamily: "var(--font-sans, sans-serif)" }}>{t("polyforge.emptyEvents")}</div>
                           )}
