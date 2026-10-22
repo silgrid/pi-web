@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
@@ -28,8 +29,11 @@ import { getPolyforgeOpsStatus, probePolyforgeVersion } from "./polyforge-status
  *  settings section's non-blocking 「版本过低」 hint threshold. */
 export const POLYFORGE_MINIMUM_PF_VERSION = "2.18.1";
 
-/** The internal line's origin owner/repo pair (never a URL, never a path). */
-const INTERNAL_ORIGIN_OWNER_REPO = "GMISWE/ieops-polyforge";
+/** The sha256 (hex) of the internal line's origin owner/repo pair — the
+ *  only form the pair is stored in (never the plaintext pair, never a URL,
+ *  never a path). */
+const INTERNAL_ORIGIN_OWNER_REPO_SHA256 =
+  "6d6a1a5b62f974b5f5ae9fb72397a5a021d5f779cb1dcdd491885238033700d6";
 
 /** The harness package's package.json name (the one identification fact). */
 const POLYFORGE_PACKAGE_NAME = "polyforge";
@@ -107,12 +111,21 @@ export function polyforgeOriginOwnerRepo(originUrl: string): string | null {
   return pair;
 }
 
-/** Line from a git origin URL: 内部线 for `GMISWE/ieops-polyforge`, 公开线 for
- *  any other parseable origin, 未知 when undeterminable — never a guess. */
-export function polyforgeLineFromOrigin(originUrl: string): PolyforgeLine {
+function sha256Hex(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+/** Line from a git origin URL: 内部线 when the parsed owner/repo pair's
+ *  sha256 equals `digest` (the built-in internal-line digest constant by
+ *  default — the pair is never compared in plaintext), 公开线 for any other
+ *  parseable origin, 未知 when undeterminable — never a guess. */
+export function polyforgeLineFromOrigin(
+  originUrl: string,
+  digest: string = INTERNAL_ORIGIN_OWNER_REPO_SHA256,
+): PolyforgeLine {
   const pair = polyforgeOriginOwnerRepo(originUrl);
   if (pair === null) return "unknown";
-  return pair === INTERNAL_ORIGIN_OWNER_REPO ? "internal" : "public";
+  return sha256Hex(pair) === digest ? "internal" : "public";
 }
 
 /** Resolve a package source to the polyforge harness package root: an
