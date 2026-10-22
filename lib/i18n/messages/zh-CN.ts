@@ -1033,5 +1033,10 @@ export const zhCNLocale: LocalePlugin = {
     "polyforge.settings.daemonReachable": "可达",
     "polyforge.settings.daemonUnreachable": "不可达",
     "polyforge.settings.daemonNotApplicable": "不适用（未安装 Polyforge）",
+    "polyforge.settings.packageSwitch": "Polyforge 软件包（全局）",
+    "polyforge.settings.switchNeedsProject": "启用/禁用需要先选择一个项目（写入路径需要一个工作目录）。",
+    "polyforge.settings.switchResolving": "正在解析软件包条目…",
+    "polyforge.settings.switchNoPackage": "插件列表中未找到全局 Polyforge 软件包条目。",
+    "polyforge.settings.packageToggled": "软件包已更新。",
   },
 };

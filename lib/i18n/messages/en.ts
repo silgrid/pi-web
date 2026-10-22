@@ -1033,5 +1033,10 @@ export const enLocale: LocalePlugin = {
     "polyforge.settings.daemonReachable": "Reachable",
     "polyforge.settings.daemonUnreachable": "Unreachable",
     "polyforge.settings.daemonNotApplicable": "Not applicable (Polyforge not installed)",
+    "polyforge.settings.packageSwitch": "Polyforge package (global)",
+    "polyforge.settings.switchNeedsProject": "Enable/disable needs a selected project (the write path writes through a working directory).",
+    "polyforge.settings.switchResolving": "Resolving the package entry…",
+    "polyforge.settings.switchNoPackage": "The global Polyforge package entry was not found in the plugin list.",
+    "polyforge.settings.packageToggled": "Package updated.",
   },
 };

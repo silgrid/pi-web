@@ -28,19 +28,59 @@ test("the re-detect control bypasses the 60s presence cache with ?force=1", () =
   assert.match(source, /disabled=\{!detect\}/, "re-detect waits for a first detection");
 });
 
-test("no write exists at all: no cli.toml, no Claude config, no install execution", () => {
-  // The section imports no server-side module (type-only imports) and issues
-  // no non-GET request — it cannot touch cli.toml, Claude Code config or any
-  // install by itself. The install command is copyable text only.
+test("the toggle writes only through the existing /api/plugins global path", () => {
+  assert.match(
+    source,
+    /fetch\("\/api\/plugins", \{\s*\n\s*method: "POST",\s*\n\s*headers: \{ "Content-Type": "application\/json" \},\s*\n\s*body: JSON\.stringify\(\{ action: enabled \? "enable" : "disable", source: sourceState\.source, scope: "global", cwd \}\),/,
+    "the exact PluginsConfig package-switch call shape",
+  );
+  // The only non-GET request the section can issue is that one POST.
+  const posts = source.match(/method: "POST"/g) ?? [];
+  assert.equal(posts.length, 1, "exactly one POST site exists in the section");
+  // Auto re-detect after the write settles (non-force).
+  assert.match(source, /await runDetect\(false\)/, "detection re-runs automatically after the toggle");
+  // The source is resolved from the listing join, never from the detect
+  // response (which carries no paths).
+  assert.match(
+    source,
+    /pkg\.scope === "global" && pkg\.packageName === "polyforge"/,
+    "the source joins the listing on scope + packageName",
+  );
+  assert.match(source, /\/api\/plugins\?cwd=\$\{encodeURIComponent\(cwd\)\}/, "the listing is the existing GET /api/plugins");
+});
+
+test("no other write exists: no cli.toml, no Claude config, no install execution", () => {
+  // The section imports no server-side module at all (type-only imports) —
+  // it cannot touch cli.toml, Claude Code config or any install by itself;
+  // the only write it can issue is the one /api/plugins POST above.
   assert.doesNotMatch(source, /from "node:/, "no node built-in import (config files are untouchable)");
   assert.match(source, /import type \{ PolyforgeDetectStatus \} from "@\/lib\/polyforge-detect";/, "the server detection module is imported as a type only");
   assert.doesNotMatch(source, /spawn|execFile/);
-  assert.doesNotMatch(source, /method: "/, "the section issues no non-GET request at all");
+  assert.doesNotMatch(source, /method: "(PUT|DELETE|PATCH)"/);
+  // The install command is copyable text only.
   assert.match(source, /navigator\.clipboard\.writeText\(installCommand\)/);
 });
 
+test("the pi package switch renders only when the skill is installed; disabled reasons are visible text", () => {
+  // The switch block is gated on piSkillInstalled (未安装 shows no toggle).
+  assert.match(source, /\{detect\?\.piSkillInstalled && \(\s*\n\s*<ConfigSwitch/);
+  // Disabled = no project or no resolved source, with the reason as visible
+  // text under the switch's line (describedBy), never only a tooltip.
+  assert.match(source, /disabled=\{!cwd \|\| !sourceState\.source\}/);
+  assert.match(source, /describedBy=\{switchReason \? switchReasonId : undefined\}/);
+  assert.match(source, /<span id=\{switchReasonId\} className="config-scope-switch-reason">/, "the reason renders as visible text");
+  const reasons = [
+    "polyforge.settings.switchNeedsProject",
+    "polyforge.settings.switchResolving",
+    "polyforge.settings.switchNoPackage",
+  ];
+  for (const key of reasons) {
+    assert.match(source, new RegExp(`t\\("${key.replace(/\./g, "\\.")}"\\)`), `the section carries ${key}`);
+  }
+});
+
 test("the section reuses the shared SettingsUi blocks and every word is a prop", () => {
-  for (const block of ["ConfigButton", "ConfigDetailGrid", "ConfigDetailGridRow", "ConfigDetailStack", "ConfigFooter", "ConfigFooterStatus", "ConfigSectionTitle"]) {
+  for (const block of ["ConfigButton", "ConfigDetailGrid", "ConfigDetailGridRow", "ConfigDetailStack", "ConfigFooter", "ConfigFooterStatus", "ConfigSectionTitle", "ConfigSwitch"]) {
     assert.match(source, new RegExp(`<${block}[\\s>]`), `the section renders through ${block}`);
   }
   // The section label reuses the existing polyforge.title key (no new label).
@@ -49,7 +89,7 @@ test("the section reuses the shared SettingsUi blocks and every word is a prop",
 
 test("the panel hosts the section without a project and re-detects on every open", () => {
   assert.match(panelSource, /\{ id: "polyforge", label: t\("polyforge\.title"\), requiresProject: false \}/);
-  assert.match(panelSource, /<PolyforgeConfig active=\{section === "polyforge"\} \/>/);
+  assert.match(panelSource, /<PolyforgeConfig cwd=\{cwd\} active=\{section === "polyforge"\} \/>/);
   // Not cwd-gated: the section host renders without a selected project.
   const hostLine = panelSource.slice(panelSource.indexOf('sectionHost("polyforge"'));
   assert.doesNotMatch(hostLine.split("\n")[0], /cwd &&/, "the polyforge section host is not project-gated");
@@ -83,6 +123,11 @@ test("the install command and every section string exist in all three locales", 
       "polyforge.settings.daemonReachable",
       "polyforge.settings.daemonUnreachable",
       "polyforge.settings.daemonNotApplicable",
+      "polyforge.settings.packageSwitch",
+      "polyforge.settings.switchNeedsProject",
+      "polyforge.settings.switchResolving",
+      "polyforge.settings.switchNoPackage",
+      "polyforge.settings.packageToggled",
     ]) {
       assert.match(text, new RegExp(`"${key}": "`), `${locale} must carry ${key}`);
     }

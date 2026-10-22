@@ -87,6 +87,9 @@ test("the detect route wires ?force=1 to the probe's cache bypass", () => {
 test("one detection implementation: the detect surface reuses the dock's presence probe", () => {
   // The route delegates presence to lib/polyforge-detect.ts, which delegates
   // to the shared probe; no second `pf --version` spawn site exists anywhere.
+  // The route names the shared probe it delegates through (the e2e's S3
+  // wording check pins the same text).
+  assert.match(detectSource, /probePolyforgeVersion|polyforge-status/, "the route names the shared probe");
   assert.match(detectSource, /from "@\/lib\/polyforge-detect"/, "the route imports the detection lib");
   assert.match(detectLibSource, /from "\.\/polyforge-status"/, "the detection lib reuses the dock's probe module");
   assert.match(detectLibSource, /probePolyforgeVersion\(force\)/, "presence flows through the shared probe");

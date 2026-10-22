@@ -17,9 +17,9 @@ shared blocks; its machine-level detection comes from
 
 - **Cadence — never a poll.** Detection runs once each time the section
   becomes active (the section host keeps visited sections mounted and passes
-  an `active` signal, so every open re-detects) and again on the 「重新检测」
-  control (`?force=1`, bypassing the 60 s presence cache). No timer exists in
-  the section, and the dock's
+  an `active` signal, so every open re-detects), again on the 「重新检测」
+  control (`?force=1`, bypassing the 60 s presence cache), and automatically
+  after a toggle (non-force). No timer exists in the section, and the dock's
   polling hook (`hooks/usePolyforge.ts`) is deliberately not reused. The
   activation fetch is guarded against React StrictMode's simulated dev remount
   (setup → cleanup → setup), so one open issues exactly one detect request.
@@ -34,6 +34,18 @@ shared blocks; its machine-level detection comes from
   Claude Code items (skill symlink present/absent, SessionStart hook
   present/absent — no control either way), and the daemon row
   (可达/不可达 + pf's own stderr/不适用 without pf).
+- **The one switch.** The pi package switch renders only when the skill is
+  installed (未安装 shows no toggle — only the state and the install command).
+  It is the section's only switch, and it writes through the existing global
+  path exactly as PluginsConfig's package switch does: `POST /api/plugins`
+  `{action: "enable"|"disable", source, scope: "global", cwd}`. The source is
+  resolved from that listing's join (`scope === "global" &&
+  packageName === "polyforge"`), never from the detect response (which
+  carries no paths). With no project selected the switch renders disabled
+  with visible reason text (the write path needs a `cwd`); it is never a
+  tooltip-only title. Write failures surface as a visible footer status.
+  Nothing in the section edits `cli.toml`, writes Claude Code config, or
+  executes any install.
 
 ## Shared blocks
 - Panels are built from the shared blocks in `components/SettingsUi.tsx` (`ConfigScopeTag`, `ConfigScopeSwitch`, `ConfigSaveTarget`, `ConfigAddSourceHeading`, `ConfigAddSourcePanel`, `ConfigDetailGrid`, `ConfigFooterStatus`, `ConfigTrustNotice`), `itemsToSwitch()` in `components/settings-ui-helpers.ts`, and `lib/display-path.ts`; a new settings section reuses them instead of copying a panel. `SettingsUi.tsx` takes every word as a prop and holds no state, so it renders outside the i18n provider; panels pass `t()` strings.

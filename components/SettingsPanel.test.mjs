@@ -33,7 +33,7 @@ test("keeps every requested configuration surface inside the settings panel", ()
   }
   // The Polyforge section (pi#122) is not project-gated and re-detects on
   // every open through the active signal.
-  assert.match(panelSource, /<PolyforgeConfig active=\{section === "polyforge"\} \/>/);
+  assert.match(panelSource, /<PolyforgeConfig cwd=\{cwd\} active=\{section === "polyforge"\} \/>/);
   assert.match(panelSource, /\{ id: "polyforge", label: t\("polyforge\.title"\), requiresProject: false \}/);
 });
 
