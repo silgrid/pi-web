@@ -120,7 +120,10 @@ settings file, a failed spawn, a broken link — never an error, never a guess.
   `<homedir>/.local/share/polyforge/release/current` when it exists; then
   `git -C <root> remote get-url origin` via `execFileAsync` (no shell, 3 s).
   The URL's owner/repo pair (`git@host:O/R.git` and `https://host/O/R.git`
-  forms, `.git` stripped) === `GMISWE/ieops-polyforge` → `internal`; any other
+  forms, `.git` stripped) sha256-compares (hex) against the built-in
+  internal-line digest constant (`INTERNAL_ORIGIN_OWNER_REPO_SHA256` in
+  `lib/polyforge-detect.ts` — the pair is stored only as that digest, never
+  as plaintext) → a match is `internal`; any other
   parseable origin → `public`; no clone, no origin, or a git/parse failure →
   `unknown`, never a guess. The resolved home-path root never leaves the
   server.

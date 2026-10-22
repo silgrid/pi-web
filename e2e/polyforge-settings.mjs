@@ -130,7 +130,7 @@ const absentPath = (process.env.PATH || "").split(delimiter).map((dir, index) =>
 }).join(delimiter);
 const resetFixtures = () => {
   setStub({});
-  setOrigin("git@github.com:GMISWE/ieops-polyforge.git");
+  setOrigin("git@github.com:example-org/public-forge.git");
   setClaude();
   setGlobalPackages([{ source: clone, skills: ["./skills/polyforge"] }]);
 };
@@ -143,7 +143,7 @@ const T = {
   S2: "S2: The detect endpoint answers 200 decodable JSON in every absent/degraded state; the only non-2xx is the gate's 403 JSON",
   S3: "S3: One detection implementation — the detect surface reuses the dock's presence probe",
   S4: "S4: Version reported with a non-blocking 版本过低 hint below v2.18.1",
-  S5: "S5: Line 内部线/公开线/未知 by the clone's git origin",
+  S5: "S5: Line 公开线/未知 by the clone's git origin (内部线 covered by the pure digest unit test)",
   S6: "S6: pi skill state read from the global settings entry only (project scope ignored)",
   S7: "S7: Claude Code side shows two separate read-only items, each with its own absent state",
   S8: "S8: Daemon 可达/不可达 with pf stderr capped at 512 bytes, 不适用 without pf, via pf --json ops status",
@@ -321,7 +321,7 @@ try {
     assert.equal(response.json?.pfVersion, "v2.17.0-e2e");
     assert.equal(response.json?.pfVersionBelowMinimum, true, "below v2.18.1 must carry the 版本过低 hint");
     assert.equal(response.json?.pfPresent, true);
-    assert.equal(response.json?.line, "internal", "the hint must not block the line detection");
+    assert.equal(response.json?.line, "public", "the hint must not block the line detection");
     assert.equal(response.json?.piSkillInstalled, true, "the hint must not block the pi-skill detection");
     assert.equal(response.json?.piSkillEnabled, true);
     assert.equal(response.json?.claudeSkillsSymlink, true, "the hint must not block the Claude Code detection");
@@ -330,13 +330,13 @@ try {
     setStub({});
   });
   await check(T.S5, "line by origin", async () => {
-    setOrigin("git@github.com:GMISWE/ieops-polyforge.git");
-    assert.equal((await detect()).json?.line, "internal", "origin GMISWE/ieops-polyforge must report 内部线");
+    setOrigin("git@github.com:example-org/public-forge.git");
+    assert.equal((await detect()).json?.line, "public", "a neutral public origin must report 公开线");
     setOrigin("https://github.com/silgrid/some-other-repo.git");
     assert.equal((await detect()).json?.line, "public", "any other origin must report 公开线");
     setOrigin(null);
     assert.equal((await detect()).json?.line, "unknown", "no origin must report 未知, never a guess");
-    setOrigin("git@github.com:GMISWE/ieops-polyforge.git");
+    setOrigin("git@github.com:example-org/public-forge.git");
   });
   await check(T.S6, "pi skill from the global entry only", async () => {
     setGlobalPackages([{ source: clone, skills: ["./skills/polyforge"] }]);
