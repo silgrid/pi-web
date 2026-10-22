@@ -25,12 +25,16 @@ test("opens one settings panel from direct sidebar shortcuts", () => {
 });
 
 test("keeps every requested configuration surface inside the settings panel", () => {
-  for (const section of ["general", "models", "skills", "agents", "plugins"]) {
+  for (const section of ["general", "models", "skills", "agents", "plugins", "polyforge"]) {
     assert.match(panelSource, new RegExp(`id: "${section}"`));
   }
   for (const component of ["ModelsConfig", "SkillsConfig", "AgentsConfig", "PluginsConfig"]) {
     assert.match(panelSource, new RegExp(`<${component} embedded`));
   }
+  // The Polyforge section (pi#122) is not project-gated and re-detects on
+  // every open through the active signal.
+  assert.match(panelSource, /<PolyforgeConfig cwd=\{cwd\} active=\{section === "polyforge"\} \/>/);
+  assert.match(panelSource, /\{ id: "polyforge", label: t\("polyforge\.title"\), requiresProject: false \}/);
 });
 
 test("restores the settings section and each list detail selection", async () => {

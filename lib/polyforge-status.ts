@@ -210,24 +210,57 @@ export interface PolyforgeWatchStatus extends PolyforgeSummary {
 
 // ---- transport ----
 
-let presenceCache: { present: boolean; expiresAt: number } | null = null;
+/** Cached presence probe: `pf` reachable on PATH plus the version it
+ *  reported. Cached server-side for 60s (assumption 5: a CLI installed while
+ *  the server runs appears after a reload once the TTL expires). Any probe
+ *  failure (ENOENT, timeout, kill) reads as absent — the UI affordance is
+ *  gated on presence, never on daemon reachability. */
+let presenceCache: { present: boolean; version: string | null; expiresAt: number } | null = null;
 
-/** `pf` reachable on PATH. Cached server-side for 60s (assumption 5: a CLI
- *  installed while the server runs appears after a reload once the TTL
- *  expires). Any probe failure (ENOENT, timeout, kill) reads as absent —
- *  the UI affordance is gated on presence, never on daemon reachability. */
+export interface PolyforgePresence {
+  present: boolean;
+  /** The version `pf --version` reported, verbatim; null when absent or unparseable. */
+  version: string | null;
+}
+
+/** `pf` reachable on PATH (pi#108's original probe, boolean contract kept for
+ *  its callers — the status route and `lib/session-chat-id.ts`). Same single
+ *  `pf --version` spawn and 60s cache as `probePolyforgeVersion`. */
 export async function probePolyforgePresent(): Promise<boolean> {
+  return (await probePolyforgeVersion()).present;
+}
+
+/** The one `pf --version` spawn (presence + the reported version), cached
+ *  module-side for 60s. `force` bypasses the cache read (the settings
+ *  section's 「重新检测」, pi#122) but still refreshes it — one spawn per
+ *  probe, never a second detection implementation. */
+export async function probePolyforgeVersion(force = false): Promise<PolyforgePresence> {
   const now = Date.now();
-  if (presenceCache && now < presenceCache.expiresAt) return presenceCache.present;
+  if (!force && presenceCache && now < presenceCache.expiresAt) {
+    return { present: presenceCache.present, version: presenceCache.version };
+  }
   let present = false;
+  let version: string | null = null;
   try {
-    await execFileAsync("pf", ["--version"], { timeout: PRESENCE_PROBE_TIMEOUT_MS });
+    const { stdout } = await execFileAsync("pf", ["--version"], { timeout: PRESENCE_PROBE_TIMEOUT_MS });
     present = true;
+    version = parsePolyforgeVersion(stdout);
   } catch {
     present = false;
   }
-  presenceCache = { present, expiresAt: now + PRESENCE_TTL_MS };
-  return present;
+  presenceCache = { present, version, expiresAt: now + PRESENCE_TTL_MS };
+  return { present, version };
+}
+
+const VERSION_VALUE_PATTERN = /^v?\d+\.\d+\.\d+(?:[-+][^\s]+)?$/;
+
+/** Version parse (pure): `pf --version` stdout verbatim when it is a
+ *  semver-ish `v?X.Y.Z` line (a prerelease/build suffix tolerated — the
+ *  reported string is the point); anything else → null (version absent,
+ *  still present), never an error. */
+export function parsePolyforgeVersion(stdout: string): string | null {
+  const value = stdout.trim();
+  return VERSION_VALUE_PATTERN.test(value) ? value : null;
 }
 
 async function runPfJson(argv: string[]): Promise<unknown> {

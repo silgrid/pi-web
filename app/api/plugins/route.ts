@@ -11,6 +11,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
 import { hasJsonContentType, isApiRequestAllowed } from "@/lib/request-security";
+import { getPackageSource, isDisabledPackage } from "@/lib/package-settings";
 import { getProjectTrustStatus } from "@/lib/project-trust";
 import { isPluginSourceCheckable } from "@/lib/plugin-updates";
 import type {
@@ -40,20 +41,6 @@ function toPluginScope(scope: string): PluginScope {
 
 function keyFor(source: string, scope: PluginScope): string {
   return `${scope}\0${source}`;
-}
-
-function getPackageSource(entry: PackageSource): string {
-  return typeof entry === "string" ? entry : entry.source;
-}
-
-function isDisabledPackage(entry: PackageSource): boolean {
-  if (typeof entry === "string") return false;
-  return (
-    Array.isArray(entry.extensions) && entry.extensions.length === 0 &&
-    Array.isArray(entry.skills) && entry.skills.length === 0 &&
-    Array.isArray(entry.prompts) && entry.prompts.length === 0 &&
-    Array.isArray(entry.themes) && entry.themes.length === 0
-  );
 }
 
 function getDisabledPackages(settingsManager: SettingsManager): Map<string, boolean> {
