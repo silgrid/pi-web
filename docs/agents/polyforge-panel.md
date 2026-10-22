@@ -10,7 +10,10 @@ and sheet height constants in `lib/panel-layout.ts`, the resize handles
 `.pf-dock-resize-handle` / `.pf-sheet-resize-handle` styles in
 `app/globals.css`. The session chat-id resolution (pi#121) lives in
 `lib/session-chat-id.ts` + `app/api/sessions/[id]/chat-id` and is documented
-here too, because it is the same pf subprocess contract.
+here too, because it is the same pf subprocess contract. The Settings Polyforge
+section's machine-level detection (pi#122) is documented here as well — its
+`detect` route lives under `app/api/polyforge/**` and shares the same presence
+probe; the section UI itself is in [settings-ui.md](settings-ui.md).
 
 ## Route contracts (degradation-first)
 
@@ -28,6 +31,21 @@ here too, because it is the same pf subprocess contract.
   (the four summarize-lane fields) are sanitized, additive fields: each is
   absent when missing or malformed on the wire, and every existing field is
   unchanged.
+- `GET /api/polyforge/detect[?force=1]` (pi#122, the Settings Polyforge section)
+  → 200 flat `{pfPresent, pfVersion: string|null, pfVersionBelowMinimum,
+  line: "internal"|"public"|"unknown", piSkillInstalled, piSkillEnabled,
+  claudeSkillsSymlink, claudeSessionStartHook, daemon: {reachable, error?} |
+  null}` — assembled by `detectPolyforge(force)` in `lib/polyforge-detect.ts`.
+  Pf absent answers the same 200 shape with every dependent field absent
+  (`pfVersion: null`, `daemon: null` = 不适用, no probe attempted, **no error
+  field** — the pf-less path must trip no browser console error). A top-level
+  catch answers 200 with those absent states: no 5xx path exists, and the only
+  non-2xx is the same in-route `isApiRequestAllowed` 403. `?force=1` bypasses
+  the 60 s presence cache read (the section's 「重新检测」). The response is
+  flat booleans/labels only (R8): no `api_key`, server address, `user_id`,
+  `cli.toml` contents, absolute home paths, or `process.env` values ever leave
+  — the resolved clone root, the package source and the Claude hook command
+  text all stay server-side.
 - There is no 5xx path on either route, and every failure answers decodable
   JSON: the e2e suite treats any 5xx as a browser error. Both routes re-check
   `isApiRequestAllowed` in-route (`lib/request-security.ts`) and answer 403 JSON
@@ -50,7 +68,14 @@ here too, because it is the same pf subprocess contract.
 - Presence probe: `pf --version`, 3 s timeout, cached module-side for 60 s
   (a CLI installed while the server runs appears after a reload once the TTL
   expires). The UI affordance is gated on presence, never on daemon
-  reachability.
+  reachability. **One detection implementation (pi#122):** the cache carries
+  `{present, version}` — `probePolyforgeVersion(force?)` returns both from the
+  single `pf --version` spawn (`force` bypasses the cache read; every probe
+  refreshes it), `probePolyforgePresent()` keeps its boolean contract by
+  delegating to it (its callers — the status route and
+  `lib/session-chat-id.ts` — are unchanged), and `parsePolyforgeVersion`
+  (pure) passes a semver-ish `v?X.Y.Z` line verbatim and reads anything else as
+  version-absent-but-present. No other module spawns `pf --version`.
 - Ops: `pf --json ops status`, 10 s timeout. Watch: `pf --json watch <ref>
   --once --demand --events 40`, 10 s timeout. **`--once` is mandatory** —
   without it `pf watch` is the resident watcher and streams forever.
@@ -75,6 +100,47 @@ here too, because it is the same pf subprocess contract.
   agent must never drive the daemon), so the shape is verified from the
   polyforge CLI source (`verbs_chat.go` prints `rec.ChatID` via `Fprintln`)
   and its own CLI test, which pins stdout == the bare token.
+
+## Settings detection (pi#122)
+
+`detectPolyforge(force?)` in `lib/polyforge-detect.ts` assembles the Settings
+Polyforge section's machine-level detection. Field independence: line, pi-skill
+and Claude Code state are machine facts read independently of pf presence; the
+pf-dependent fields degrade when pf is absent (version absent, daemon 不适用,
+no probe attempted). Every read degrades on its own — a missing or unparsable
+settings file, a failed spawn, a broken link — never an error, never a guess.
+
+- **Version hint (R3):** `pfVersionBelowMinimum` is a server-computed boolean
+  against `POLYFORGE_MINIMUM_PF_VERSION = "2.18.1"` (the dock's documented
+  `--demand` floor): pure semver-ish compare of the X.Y.Z cores (leading `v`
+  tolerated, prerelease suffix ignored), non-blocking — every other field is
+  still reported below the floor.
+- **Line (R4):** the clone root is located as the global polyforge package
+  entry's source when that entry exists, else install.sh's conventional
+  `<homedir>/.local/share/polyforge/release/current` when it exists; then
+  `git -C <root> remote get-url origin` via `execFileAsync` (no shell, 3 s).
+  The URL's owner/repo pair (`git@host:O/R.git` and `https://host/O/R.git`
+  forms, `.git` stripped) === `GMISWE/ieops-polyforge` → `internal`; any other
+  parseable origin → `public`; no clone, no origin, or a git/parse failure →
+  `unknown`, never a guess. The resolved home-path root never leaves the
+  server.
+- **pi skill (R5):** the harness package is the **global** settings entry whose
+  source resolves to an existing directory whose `package.json` name is
+  `polyforge` (project-scope entries are never consulted). Installed = such an
+  entry exists; enabled = a plain string entry, or an object entry the plugins
+  route's disabled-shape rule does not count disabled — the same rule lives
+  once in `lib/package-settings.ts` (`getPackageSource`/`isDisabledPackage`,
+  extracted from the plugins route). Global settings are read through
+  `lib/global-settings-file.ts`'s locked `readGlobalSettings`; a missing or
+  unparsable file degrades to 未安装, never an error.
+- **Claude Code (R6):** `~/.claude/skills/polyforge` resolves through the
+  symlink (stat) → boolean; `~/.claude/settings.json` carries a SessionStart
+  hook whose command references polyforge → boolean. Two separate read-only
+  facts; the command text itself never leaves the server (only the boolean).
+- **Daemon (R7):** reused exactly — `getPolyforgeOpsStatus()`
+  (`pf --json ops status`) resolving = 可达; throwing = 不可达 + pf's own
+  stderr (≤512 through `PolyforgeError`); pf absent → `daemon: null`, no probe
+  attempted. No second probe, no Node-direct UDS.
 
 ## Session chat ids (pi#121)
 

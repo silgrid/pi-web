@@ -82,6 +82,7 @@ app/api/
   push/config/route.ts            GET VAPID public key for push subscriptions
   push/subscribe/route.ts         POST register a push subscription
   tools/settings/route.ts         GET/PUT defaultTools switches: PowerShell (Windows) and Code mode (automatic / always)
+  polyforge/detect/route.ts       GET ?force= — Settings Polyforge section machine detection (pi#122; 200 flat JSON, no 5xx)
 
 lib/
   agent-client.ts      typed fetch helper for /api/agent commands
@@ -172,7 +173,7 @@ Design decisions and traps live in `docs/agents/`, one note per area. Read every
 - [settings-ui.md](docs/agents/settings-ui.md): Plugins and Skills routes, sidebar group switches, the shared `SettingsUi` blocks every settings panel and add pane uses. Files: `app/api/plugins/**`, `app/api/skills/**`, `components/SettingsUi.tsx`, `components/settings-ui-helpers.ts`, `components/SkillsConfig.tsx`, `components/PluginsConfig.tsx`; also before adding a settings section or add pane.
 - [subagents.md](docs/agents/subagents.md): the built-in subagent setting, profiles and their files, run status, completion notifications. Files: `lib/subagent*.ts`, `app/api/subagents/**`, `components/AgentsConfig.tsx`.
 - [client-platform.md](docs/agents/client-platform.md): mobile software keyboard and viewport height, completion sound. Files: `hooks/useViewportHeight.ts`, `hooks/useAudio.ts`, the keyboard-open CSS.
-- [polyforge-panel.md](docs/agents/polyforge-panel.md): the Polyforge dock panel — read-only `app/api/polyforge/**` routes (degradation-first, no 5xx), pf subprocess contract (`--once --events 40`, probe TTL), response sanitization, polling cadence, the shared dock slot. Files: `lib/polyforge-status.ts`, `app/api/polyforge/**`, `hooks/usePolyforge.ts`, `components/PolyforgePanel.tsx`, `polyforge.*` wiring in `components/AppShell.tsx` and `lib/i18n/messages/*`.
+- [polyforge-panel.md](docs/agents/polyforge-panel.md): the Polyforge dock panel — read-only `app/api/polyforge/**` routes (degradation-first, no 5xx), pf subprocess contract (`--once --events 40`, probe TTL), response sanitization, polling cadence, the shared dock slot, the Settings section's machine detection (pi#122: the detect route, the line/pi-skill/Claude/daemon rules, the shared presence probe). Files: `lib/polyforge-status.ts`, `lib/polyforge-detect.ts`, `lib/package-settings.ts`, `app/api/polyforge/**`, `hooks/usePolyforge.ts`, `components/PolyforgePanel.tsx`, `polyforge.*` wiring in `components/AppShell.tsx` and `lib/i18n/messages/*`.
 
 ---
 
