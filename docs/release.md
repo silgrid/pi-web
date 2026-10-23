@@ -42,6 +42,13 @@ dispatch again. (PR CI silently not running for recent PRs is the same
 symptom — do not trust merged-PR checkmarks as release evidence when this
 state is active.)
 
+Not every silent "tag push produced no run" is this fork state. The
+2026-10-23 v0.0.35 incident had dispatch **succeeding** and both REST
+flags reading fine: its cause was a multi-tag `--tags` push (§4), not a
+disabled fork. Distinguish the two by whether dispatch answers 422
+(this fork state) or works while the tag-push trigger stays silent
+(see §4).
+
 ## 1. Preflight
 
 ```bash
@@ -100,7 +107,33 @@ git commit -m "Release v<version>"
 
 ```bash
 git tag -a v<version> -m "v<version>"
-git push origin main --tags
+git push origin main v<version>
+```
+
+Push **exactly** these two refs — `main` and the release tag — and never
+`--tags`. GitHub creates no `push` events for tags when more than three
+tags are pushed at once, so a multi-tag push silently starts no `Release`
+run (measured 2026-10-23, v0.0.35: a `--tags` push from a clone holding
+old upstream tags shipped 58 tags at once, and the workflow never fired;
+the `| tail` on the masked output hid 56 of the `[new tag]` lines). A
+clone can hold unrelated local tags — old upstream or archive tags — that
+`--tags` would publish to the public origin. When `main` is already on
+origin (release PR merged), `git push origin v<version>` alone is also
+fine; that single-tag push is what v0.0.28–v0.0.34 used.
+
+Confirm the tag push actually started the workflow — the `Release` run
+should appear within ~1 minute (precedent: v0.0.30–v0.0.34 started within
+seconds of their pushes):
+
+```bash
+gh run list --workflow=release.yml --limit 1   # expect event=push on the v<version> tag
+```
+
+If no `Release` run for the tag appears, fall back to a manual dispatch of
+the same workflow (as used for v0.0.35) and let §7 catch any gap:
+
+```bash
+gh workflow run release.yml --ref main
 ```
 
 Confirm the tag does not already exist before creating it when unsure:
