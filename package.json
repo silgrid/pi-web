@@ -47,7 +47,7 @@
     "lint": "eslint .",
     "test:terminal": "node e2e/terminal.mjs",
     "test:e2e": "node --experimental-strip-types e2e/run.mjs",
-    "test": "node scripts/tmp-guard.mjs node --experimental-strip-types --test \"app/**/*.test.mjs\" \"components/**/*.test.mjs\" \"hooks/**/*.test.mjs\" \"lib/**/*.test.mjs\" \"public/**/*.test.mjs\"",
+    "test": "node scripts/tmp-guard.mjs node --experimental-strip-types --test \"app/**/*.test.mjs\" \"components/**/*.test.mjs\" \"docs/**/*.test.mjs\" \"hooks/**/*.test.mjs\" \"lib/**/*.test.mjs\" \"public/**/*.test.mjs\"",
     "release": "npm version patch --no-git-tag-version && npm run build && npm publish --access public"
   },
   "dependencies": {
