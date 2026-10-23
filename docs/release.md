@@ -5,7 +5,7 @@ This repo publishes two artifacts for each release:
 - npm package: `@silgrid/pi-web`
 - GitHub Release: `silgrid/pi-web`
 
-Pushing a tag `v*` to `origin` triggers [`.github/workflows/release.yml`](../.github/workflows/release.yml), which runs `npm ci`, `next build`, and `npm publish --access public --provenance` via **npm Trusted Publishing** (GitHub OIDC): the workflow presents a short-lived `id-token: write` token, npm exchanges it for a publish credential, and the published tarball carries a provenance attestation. No `NODE_AUTH_TOKEN` secret is used — the earlier token-secret route is dead under npm's 2025+ 2FA policy (the full E403/EOTP failure matrix is documented as comments at the top of the workflow file). This checklist covers the tag/notes side and the manual fallback.
+Pushing a tag `v*` to `origin` — one tag per push, see §4 — triggers [`.github/workflows/release.yml`](../.github/workflows/release.yml), which runs `npm ci`, `next build`, and `npm publish --access public --provenance` via **npm Trusted Publishing** (GitHub OIDC): the workflow presents a short-lived `id-token: write` token, npm exchanges it for a publish credential, and the published tarball carries a provenance attestation. No `NODE_AUTH_TOKEN` secret is used — the earlier token-secret route is dead under npm's 2025+ 2FA policy (the full E403/EOTP failure matrix is documented as comments at the top of the workflow file). This checklist covers the tag/notes side and the manual fallback.
 
 ## 0. Trusted Publishing prerequisites (one-time)
 
@@ -38,9 +38,19 @@ gh run list --workflow=release.yml --limit 1
 If the dispatch answers HTTP 422 "Actions has been disabled", open the
 repo's **Actions tab** in a browser and click the enable button on the
 "Workflows aren't being run on this forked repository" banner, then
-dispatch again. (PR CI silently not running for recent PRs is the same
+dispatch again. This banner click is **owner-only**: it needs the
+owner's browser session, so an agent running this checklist stops here
+and hands the click to the owner instead of attempting it. (PR CI
+silently not running for recent PRs is the same
 symptom — do not trust merged-PR checkmarks as release evidence when this
 state is active.)
+
+Not every silent "tag push produced no run" is this fork state. The
+2026-10-23 v0.0.35 incident had dispatch **succeeding** and both REST
+flags reading fine: its cause was a multi-tag `--tags` push (§4), not a
+disabled fork. Distinguish the two by whether dispatch answers 422
+(this fork state) or works while the tag-push trigger stays silent
+(see §4).
 
 ## 1. Preflight
 
@@ -100,8 +110,54 @@ git commit -m "Release v<version>"
 
 ```bash
 git tag -a v<version> -m "v<version>"
-git push origin main --tags
+git push origin main v<version>
 ```
+
+Push **exactly** these two refs — `main` and the release tag — and never
+`--tags`. GitHub creates no `push` events for tags when more than three
+tags are pushed at once, so a multi-tag push silently starts no `Release`
+run (measured 2026-10-23, v0.0.35: a `--tags` push from a clone holding
+old upstream tags shipped 58 tags at once, and the workflow never fired;
+the `| tail` on the masked output hid 56 of the `[new tag]` lines). A
+clone can hold unrelated local tags — old upstream or archive tags — that
+`--tags` would publish to the public origin. When `main` is already on
+origin (release PR merged), push the tag alone instead
+(`git push origin v<version>`): if local `main` is behind `origin/main`,
+a two-ref push is rejected on the `main` refspec, exits non-zero, and
+still pushes the tag — the push is non-atomic. That single-tag push is
+what v0.0.28–v0.0.34 used.
+
+Confirm the tag push actually started the workflow — the `Release` run
+should appear within ~1 minute (precedent: v0.0.30–v0.0.34 started within
+a minute of their pushes):
+
+```bash
+gh run list --workflow=release.yml --limit 1   # expect event=push on the v<version> tag
+```
+
+If no `Release` run for the tag appears, fall back to a manual dispatch of
+the same workflow (as used for v0.0.35). The dispatch builds and
+publishes `main` **as of dispatch time** — release.yml declares a `ref`
+input but no step uses it, so the dispatch cannot select the tagged
+commit. Confirm `origin/main` still equals the tagged commit first:
+
+```bash
+git rev-parse origin/main             # must equal the next line's output
+git rev-parse v<version>^{commit}
+```
+
+```bash
+gh workflow run release.yml --ref main
+```
+
+If `origin/main` has moved past the tag, do not dispatch: stop and hand
+the publish to the owner. §7 still catches any gap.
+
+If this dispatch itself answers HTTP 422 "Actions has been disabled",
+that is the §0.5 fork state: hand the owner-only browser enable click to
+the owner per §0.5, then re-dispatch. Every Actions state then has a
+documented path — healthy: the tag push; trigger silently dead: this
+dispatch; dispatch answering 422: §0.5's enable step, then re-dispatch.
 
 Confirm the tag does not already exist before creating it when unsure:
 
