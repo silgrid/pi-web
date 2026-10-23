@@ -121,8 +121,11 @@ old upstream tags shipped 58 tags at once, and the workflow never fired;
 the `| tail` on the masked output hid 56 of the `[new tag]` lines). A
 clone can hold unrelated local tags — old upstream or archive tags — that
 `--tags` would publish to the public origin. When `main` is already on
-origin (release PR merged), `git push origin v<version>` alone is also
-fine; that single-tag push is what v0.0.28–v0.0.34 used.
+origin (release PR merged), push the tag alone instead
+(`git push origin v<version>`): if local `main` is behind `origin/main`,
+a two-ref push is rejected on the `main` refspec, exits non-zero, and
+still pushes the tag — the push is non-atomic. That single-tag push is
+what v0.0.28–v0.0.34 used.
 
 Confirm the tag push actually started the workflow — the `Release` run
 should appear within ~1 minute (precedent: v0.0.30–v0.0.34 started within
@@ -133,13 +136,22 @@ gh run list --workflow=release.yml --limit 1   # expect event=push on the v<vers
 ```
 
 If no `Release` run for the tag appears, fall back to a manual dispatch of
-the same workflow (as used for v0.0.35); the `ref` input makes the run
-build exactly the tagged commit instead of whatever `main` points to at
-dispatch time, and §7 catches any gap:
+the same workflow (as used for v0.0.35). The dispatch builds and
+publishes `main` **as of dispatch time** — release.yml declares a `ref`
+input but no step uses it, so the dispatch cannot select the tagged
+commit. Confirm `origin/main` still equals the tagged commit first:
 
 ```bash
-gh workflow run release.yml --ref main -f ref=v<version>
+git rev-parse origin/main             # must equal the next line's output
+git rev-parse v<version>^{commit}
 ```
+
+```bash
+gh workflow run release.yml --ref main
+```
+
+If `origin/main` has moved past the tag, do not dispatch: stop and hand
+the publish to the owner. §7 still catches any gap.
 
 If this dispatch itself answers HTTP 422 "Actions has been disabled",
 that is the §0.5 fork state: hand the owner-only browser enable click to
