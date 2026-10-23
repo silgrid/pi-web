@@ -5,7 +5,7 @@ This repo publishes two artifacts for each release:
 - npm package: `@silgrid/pi-web`
 - GitHub Release: `silgrid/pi-web`
 
-Pushing a tag `v*` to `origin` triggers [`.github/workflows/release.yml`](../.github/workflows/release.yml), which runs `npm ci`, `next build`, and `npm publish --access public --provenance` via **npm Trusted Publishing** (GitHub OIDC): the workflow presents a short-lived `id-token: write` token, npm exchanges it for a publish credential, and the published tarball carries a provenance attestation. No `NODE_AUTH_TOKEN` secret is used — the earlier token-secret route is dead under npm's 2025+ 2FA policy (the full E403/EOTP failure matrix is documented as comments at the top of the workflow file). This checklist covers the tag/notes side and the manual fallback.
+Pushing a tag `v*` to `origin` — one tag per push, see §4 — triggers [`.github/workflows/release.yml`](../.github/workflows/release.yml), which runs `npm ci`, `next build`, and `npm publish --access public --provenance` via **npm Trusted Publishing** (GitHub OIDC): the workflow presents a short-lived `id-token: write` token, npm exchanges it for a publish credential, and the published tarball carries a provenance attestation. No `NODE_AUTH_TOKEN` secret is used — the earlier token-secret route is dead under npm's 2025+ 2FA policy (the full E403/EOTP failure matrix is documented as comments at the top of the workflow file). This checklist covers the tag/notes side and the manual fallback.
 
 ## 0. Trusted Publishing prerequisites (one-time)
 
@@ -38,7 +38,10 @@ gh run list --workflow=release.yml --limit 1
 If the dispatch answers HTTP 422 "Actions has been disabled", open the
 repo's **Actions tab** in a browser and click the enable button on the
 "Workflows aren't being run on this forked repository" banner, then
-dispatch again. (PR CI silently not running for recent PRs is the same
+dispatch again. This banner click is **owner-only**: it needs the
+owner's browser session, so an agent running this checklist stops here
+and hands the click to the owner instead of attempting it. (PR CI
+silently not running for recent PRs is the same
 symptom — do not trust merged-PR checkmarks as release evidence when this
 state is active.)
 
@@ -123,18 +126,26 @@ fine; that single-tag push is what v0.0.28–v0.0.34 used.
 
 Confirm the tag push actually started the workflow — the `Release` run
 should appear within ~1 minute (precedent: v0.0.30–v0.0.34 started within
-seconds of their pushes):
+a minute of their pushes):
 
 ```bash
 gh run list --workflow=release.yml --limit 1   # expect event=push on the v<version> tag
 ```
 
 If no `Release` run for the tag appears, fall back to a manual dispatch of
-the same workflow (as used for v0.0.35) and let §7 catch any gap:
+the same workflow (as used for v0.0.35); the `ref` input makes the run
+build exactly the tagged commit instead of whatever `main` points to at
+dispatch time, and §7 catches any gap:
 
 ```bash
-gh workflow run release.yml --ref main
+gh workflow run release.yml --ref main -f ref=v<version>
 ```
+
+If this dispatch itself answers HTTP 422 "Actions has been disabled",
+that is the §0.5 fork state: hand the owner-only browser enable click to
+the owner per §0.5, then re-dispatch. Every Actions state then has a
+documented path — healthy: the tag push; trigger silently dead: this
+dispatch; dispatch answering 422: §0.5's enable step, then re-dispatch.
 
 Confirm the tag does not already exist before creating it when unsure:
 
