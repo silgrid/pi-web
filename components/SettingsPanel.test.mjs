@@ -1,0 +1,286 @@
+import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import test from "node:test";
+
+const panelSource = await readFile(new URL("./SettingsPanel.tsx", import.meta.url), "utf8");
+const cssSource = await readFile(new URL("../app/settings.css", import.meta.url), "utf8");
+const globalCssSource = await readFile(new URL("../app/globals.css", import.meta.url), "utf8");
+const shellSource = await readFile(new URL("./AppShell.tsx", import.meta.url), "utf8");
+const sidebarSource = await readFile(new URL("./SessionSidebar.tsx", import.meta.url), "utf8");
+const themeSource = await readFile(new URL("../hooks/useTheme.ts", import.meta.url), "utf8");
+const themeOptionsSource = await readFile(new URL("../lib/theme.ts", import.meta.url), "utf8");
+const enSource = await readFile(new URL("../lib/i18n/messages/en.ts", import.meta.url), "utf8");
+const zhSource = await readFile(new URL("../lib/i18n/messages/zh-CN.ts", import.meta.url), "utf8");
+const loginSource = await readFile(new URL("../app/login/page.tsx", import.meta.url), "utf8");
+
+test("opens one settings panel from direct sidebar shortcuts", () => {
+  assert.match(shellSource, /<SettingsPanel/);
+  assert.match(shellSource, /setSettingsSection\(section\)/);
+  assert.match(shellSource, /initialSection=\{settingsSection\}/);
+  assert.match(shellSource, /translate\("common\.settings"\)/);
+  assert.match(shellSource, /<SettingsSectionIcon section=\{section\} size=\{14\} strokeWidth=\{2\} \/>\s*<span>\{label\}<\/span>/);
+  assert.match(shellSource, /<SettingsSectionIcon section="general" size=\{14\} strokeWidth=\{2\} \/>/);
+  assert.doesNotMatch(shellSource, /\["plugins", translate\("common\.plugins"\)\]/);
+  assert.doesNotMatch(shellSource, /setModelsConfigOpen|setSkillsConfigOpen|setAgentsConfigOpen|setPluginsConfigOpen/);
+});
+
+test("keeps every requested configuration surface inside the settings panel", () => {
+  for (const section of ["general", "models", "skills", "agents", "plugins", "polyforge"]) {
+    assert.match(panelSource, new RegExp(`id: "${section}"`));
+  }
+  for (const component of ["ModelsConfig", "SkillsConfig", "AgentsConfig", "PluginsConfig"]) {
+    assert.match(panelSource, new RegExp(`<${component} embedded`));
+  }
+  // The Polyforge section (pi#122) is not project-gated and re-detects on
+  // every open through the active signal.
+  assert.match(panelSource, /<PolyforgeConfig cwd=\{cwd\} active=\{section === "polyforge"\} \/>/);
+  assert.match(panelSource, /\{ id: "polyforge", label: t\("polyforge\.title"\), requiresProject: false \}/);
+});
+
+test("restores the settings section and each list detail selection", async () => {
+  assert.match(shellSource, /getLastSettingsSection\(projectTrustCwd\)/);
+  assert.match(panelSource, /setLastSettingsSection\(initialSection\)/);
+  assert.match(panelSource, /setLastSettingsSection\(nextSection\)/);
+  for (const name of ["ModelsConfig", "SkillsConfig", "AgentsConfig", "PluginsConfig"]) {
+    assert.match(
+      await readFile(new URL(`./${name}.tsx`, import.meta.url), "utf8"),
+      /getLastSettingsSelection/,
+    );
+  }
+});
+
+test("keeps visited settings sections mounted and contains nested Escape handling", async () => {
+  const modelsSource = await readFile(new URL("./ModelsConfig.tsx", import.meta.url), "utf8");
+  assert.match(panelSource, /mountedSections\.has\(id\)/);
+  assert.match(panelSource, /hidden=\{section !== id\}/);
+  assert.match(panelSource, /event\.defaultPrevented/);
+  assert.match(modelsSource, /e\.preventDefault\(\);\s*e\.stopPropagation\(\);\s*onClose\(\);/);
+});
+
+test("offers five palettes and system theme selection with native radios", () => {
+  for (const preference of ["light", "dark", "mist", "rose", "pine", "auto"]) {
+    assert.match(themeOptionsSource, new RegExp(`id: "${preference}"`));
+  }
+  assert.match(panelSource, /THEME_OPTIONS\.map/);
+  assert.match(panelSource, /type="radio"/);
+  assert.match(panelSource, /setThemePreference\(option\.id\)/);
+  assert.match(themeSource, /const setThemePreference = useCallback/);
+});
+
+test("keeps language selection in General settings", () => {
+  assert.match(panelSource, /t\("common\.language"\)/);
+  assert.match(panelSource, /className="settings-language-options"/);
+  assert.match(panelSource, /setLocale\(plugin\.id/);
+});
+
+test("groups fonts, chat font size and width in one section, chat behavior in another, without row backgrounds", () => {
+  const appearanceSection = panelSource.slice(
+    panelSource.indexOf('{t("settings.appearance")}'),
+    panelSource.indexOf('{t("settings.typography")}'),
+  );
+  const typographySection = panelSource.slice(
+    panelSource.indexOf('{t("settings.typography")}'),
+    panelSource.indexOf('{t("settings.chat")}'),
+  );
+  const chatSection = panelSource.slice(
+    panelSource.indexOf('{t("settings.chat")}'),
+    panelSource.indexOf('{t("settings.sessionFilter")}'),
+  );
+
+  assert.doesNotMatch(appearanceSection, /settings-chat-content|<FontSettings/);
+  assert.match(typographySection, /className="settings-chat-options"[\s\S]*<FontSettings \/>/);
+  assert.equal((typographySection.match(/className="settings-chat-option settings-chat-range-option"/g) ?? []).length, 2);
+  for (const key of ["chatContentWidth", "chatContentFontSize", "fontDescription"]) {
+    assert.match(typographySection, new RegExp(`t\\("settings\\.${key}"\\)`));
+  }
+  assert.match(chatSection, /className="settings-chat-options"/);
+  assert.doesNotMatch(chatSection, /settings-chat-content/);
+  assert.equal((chatSection.match(/className="settings-chat-option(?: |")/g) ?? []).length, 3);
+  assert.equal((chatSection.match(/<ConfigSwitch/g) ?? []).length, 2);
+  for (const key of ["thinkingExpandedDefault", "quoteSelection", "enterSendMode", "enterSendModeEnter", "enterSendModeCtrlEnter"]) {
+    assert.match(chatSection, new RegExp(`t\\("settings\\.${key}"\\)`));
+  }
+  assert.doesNotMatch(panelSource, /ThinkingIcon|settings-thinking-/);
+  const chatOptionStyles = cssSource.match(/\.settings-chat-option \{[\s\S]*?\}/)?.[0] ?? "";
+  assert.match(chatOptionStyles, /font-size: 12px/);
+  assert.doesNotMatch(chatOptionStyles, /background/);
+});
+
+test("keeps General free of divider rows", () => {
+  assert.match(panelSource, /className="settings-dialog-header"/);
+  assert.match(cssSource, /\.settings-dialog-header \{[\s\S]*?display: flex[\s\S]*?align-items: center[\s\S]*?min-height: 50px/);
+  assert.doesNotMatch(panelSource, /sections\.find\(\(item\) => item\.id === section\)/);
+  assert.doesNotMatch(panelSource, /<section style=\{\{[^}]*borderBottom/);
+  assert.doesNotMatch(panelSource, /borderLeft: index > 0/);
+});
+
+test("uses top navigation on desktop and one compact section picker on mobile", () => {
+  assert.match(panelSource, /className="settings-mobile-section-picker"/);
+  assert.match(panelSource, /className="settings-section-tabs"/);
+  assert.match(panelSource, /className="settings-section-tab"/);
+  assert.match(cssSource, /\.settings-section-tab \{[\s\S]*?width: 96px/);
+  assert.match(cssSource, /\.settings-section-icon \{[\s\S]*?flex-shrink: 0/);
+  assert.match(cssSource, /\.settings-section-tab::after \{[\s\S]*?width: 24px/);
+  assert.match(cssSource, /\.settings-section-tab\[aria-current="page"\]::after/);
+  assert.match(cssSource, /\.settings-section-tab:focus-visible:not\(\[aria-current="page"\]\)/);
+  assert.match(cssSource, /\.settings-section-tab:focus-visible\[aria-current="page"\][\s\S]*?outline: none/);
+  assert.match(cssSource, /@media \(max-width: 640px\)[\s\S]*?\.settings-section-tabs \{[\s\S]*?display: none/);
+  assert.match(cssSource, /@media \(max-width: 640px\)[\s\S]*?\.settings-mobile-section-picker \{[\s\S]*?display: block/);
+  assert.doesNotMatch(panelSource, /width: isMobile \? "100%" : 188/);
+  assert.match(panelSource, /<main className="settings-dialog-main">/);
+  assert.doesNotMatch(panelSource, /<style>/);
+  assert.doesNotMatch(panelSource, /style=\{\{/);
+});
+
+test("labels agent profiles as sub-agents", () => {
+  assert.match(enSource, /"common\.agents": "Sub-agents"/);
+  assert.match(enSource, /"agents\.new": "New sub-agent"/);
+  assert.match(zhSource, /"common\.agents": "子代理"/);
+  assert.match(zhSource, /"agents\.new": "新建子代理"/);
+});
+
+test("uses the child-session robot glyph for the sub-agents tab", () => {
+  const robotGlyph = /<rect x="5" y="7" width="14" height="11" rx="2" \/>\s*<path d="M9 11h\.01M15 11h\.01M9 15h6M12 7V4M10 4h4" \/>/;
+  assert.match(panelSource, robotGlyph);
+  assert.match(sidebarSource, robotGlyph);
+  assert.match(panelSource, /section === "agents"[\s\S]*?className="settings-section-icon is-agent"/);
+  assert.match(cssSource, /\.settings-section-icon\.is-agent \{[\s\S]*?transform: scale\(1\.25\)/);
+});
+
+test("uses the compact controls glyph for General", () => {
+  assert.match(panelSource, /section === "general"[\s\S]*?<path d="M20 7h-9M14 17H5" \/>[\s\S]*?<circle cx="7" cy="7" r="3" \/>[\s\S]*?<circle cx="17" cy="17" r="3" \/>/);
+});
+
+test("keeps password authentication to one login field and one settings action", () => {
+  assert.equal((loginSource.match(/type="password"/g) ?? []).length, 1);
+  assert.doesNotMatch(loginSource, /type="(?:text|email)"/);
+  assert.match(loginSource, /autoComplete="current-password"/);
+  assert.match(loginSource, /safeLoginDestination\(destination, window\.location\.origin\)/);
+  assert.match(panelSource, /fetch\("\/api\/web-auth", \{ method: "DELETE" \}\)/);
+  assert.match(panelSource, /t\("auth\.logOut"\)/);
+  assert.match(loginSource, /className="web-login-composer"[\s\S]*?type="password"[\s\S]*?<button type="submit"/);
+  assert.match(globalCssSource, /\.web-login-composer \{[\s\S]*?display: flex;[\s\S]*?border-radius: 14px/);
+});
+
+// ---------------------------------------------------------------------------
+// Session filter (wi pi#49 R1): an editable multi-pattern filter with a
+// reveal toggle, inside the existing general area (no new navigation entry).
+// ---------------------------------------------------------------------------
+
+test("the general area hosts the session filter section with the rules editor and reveal toggle", () => {
+  // Heading, description, the line-per-rule textarea and the reveal switch
+  // all render inside GeneralSettings with the sessionFilter i18n keys.
+  assert.match(panelSource, /t\("settings\.sessionFilter"\)/);
+  assert.match(panelSource, /t\("settings\.sessionFilterDescription"\)/);
+  assert.match(panelSource, /aria-label=\{t\("settings\.sessionFilterPatternsLabel"\)\}/);
+  assert.match(panelSource, /<textarea/);
+  assert.match(panelSource, /t\("settings\.showFilteredSessions"\)/);
+  assert.match(panelSource, /<ConfigSwitch[\s\S]*?label=\{t\("settings\.showFilteredSessions"\)\}[\s\S]*?onChange=\{handleShowFilteredSessionsChange\}/);
+  // The section lives in GeneralSettings, not in a new settings-section tab.
+  const generalStart = panelSource.indexOf("function GeneralSettings");
+  const generalBody = panelSource.slice(generalStart, panelSource.indexOf("export function SettingsPanel"));
+  assert.match(generalBody, /settings\.sessionFilter/);
+});
+
+test("the session filter editor persists on change and hydrates after mount, never writing on first render", () => {
+  // Every edit routes through the LIVE store setters (review B1): the
+  // sidebar subscribes to the same store and re-filters immediately, while
+  // persistence stays best-effort inside the store.
+  assert.match(
+    panelSource,
+    /const handleSessionFilterRulesChange = \(value: string\) => \{[\s\S]*?setSessionFilterPatterns\(value\.split\("\\n"\)\);/,
+  );
+  assert.match(
+    panelSource,
+    /const handleShowFilteredSessionsChange = \(enabled: boolean\) => \{[\s\S]*?setShowFilteredSessionsState\(enabled\);/,
+  );
+  // Initial state is the DEFAULT list joined (SSR-safe, no storage read in
+  // render) and the mount effect only READS: a first run renders the default
+  // without writing the key.
+  assert.match(
+    panelSource,
+    /useState\(\s*\(\) => DEFAULT_SESSION_FILTER_PATTERNS\.join\("\\n"\),\s*\)/,
+  );
+  const mountEffect = panelSource.slice(
+    panelSource.indexOf("setSessionFilterRulesText(loadSessionFilterPatterns"),
+    panelSource.indexOf("}, []);", panelSource.indexOf("setSessionFilterRulesText(loadSessionFilterPatterns")) + "}, []);".length,
+  );
+  assert.match(mountEffect, /loadSessionFilterPatterns\(sessionFilterStorage\(\)\)/);
+  assert.match(mountEffect, /loadShowFilteredSessions\(sessionFilterStorage\(\)\)/);
+  assert.doesNotMatch(mountEffect, /save(SessionFilterPatterns|ShowFilteredSessions)/,
+    "hydration must not persist anything back on the first run");
+});
+
+test("the session filter strings exist in all three locales", async () => {
+  for (const locale of ["en", "zh-CN", "zh-TW"]) {
+    const source = await readFile(new URL(`../lib/i18n/messages/${locale}.ts`, import.meta.url), "utf8");
+    for (const key of [
+      "settings.sessionFilter",
+      "settings.sessionFilterDescription",
+      "settings.sessionFilterPatternsLabel",
+      "settings.showFilteredSessions",
+    ]) {
+      assert.match(source, new RegExp(`"${key}": "`), `${locale} must carry ${key}`);
+    }
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Files placement (wi B3): the sidebar-layout preference lives in General
+// settings as a two-option radio row backed by the live store (no sidebar
+// shortcut, per the work item).
+// ---------------------------------------------------------------------------
+
+test("the general area hosts the files-placement radio row backed by the live store", () => {
+  assert.match(
+    panelSource,
+    /import \{\s*setFilesPlacement,\s*useFilesPlacement,\s*\} from "@\/lib\/files-placement";/,
+  );
+  assert.match(panelSource, /const filesPlacement = useFilesPlacement\(\);/);
+  const section = panelSource.slice(
+    panelSource.indexOf('{t("settings.sidebarLayout")}'),
+    panelSource.indexOf("{shellSettings?.isWindows && ("),
+  );
+  // The section renders in GeneralSettings (after the session filter),
+  // with heading + description + a two-option radiogroup.
+  assert.ok(section.includes('t("settings.sidebarLayoutDescription")'));
+  assert.match(section, /role="radiogroup" aria-label=\{t\("settings\.sidebarLayout"\)\}/);
+  assert.equal((section.match(/name="files-placement"/g) ?? []).length, 2);
+  assert.match(section, /value="stacked"/);
+  assert.match(section, /value="tabs"/);
+  assert.match(section, /checked=\{filesPlacement === "stacked"\}/);
+  assert.match(section, /checked=\{filesPlacement === "tabs"\}/);
+  // Every change routes through the LIVE store setter, which persists and
+  // broadcasts, so the sidebar reacts without prop drilling; the hook value
+  // re-renders this row in sync.
+  assert.match(section, /onChange=\{\(\) => setFilesPlacement\("stacked"\)\}/);
+  assert.match(section, /onChange=\{\(\) => setFilesPlacement\("tabs"\)\}/);
+  // No dedicated CSS or new navigation entry: the row reuses the existing
+  // send-mode radio classes inside a General section.
+  assert.match(panelSource, /className="settings-general-heading">\{t\("settings\.sidebarLayout"\)\}/);
+  assert.match(section, /className="settings-send-mode-options"/);
+  const generalBody = panelSource.slice(
+    panelSource.indexOf("function GeneralSettings"),
+    panelSource.indexOf("export function SettingsPanel"),
+  );
+  assert.match(generalBody, /settings\.sidebarLayout/);
+});
+
+test("the files-placement strings exist in all three locales", async () => {
+  for (const locale of ["en", "zh-CN", "zh-TW"]) {
+    const source = await readFile(new URL(`../lib/i18n/messages/${locale}.ts`, import.meta.url), "utf8");
+    for (const key of [
+      "settings.sidebarLayout",
+      "settings.sidebarLayoutDescription",
+      "settings.filesPlacementStacked",
+      "settings.filesPlacementTabs",
+      // The sidebar tab labels land with the layout change; the keys ship
+      // with the preference so the message files move once.
+      "sidebar.tabsLabel",
+      "sidebar.tabSessions",
+      "sidebar.tabFiles",
+    ]) {
+      assert.match(source, new RegExp(`"${key}": "`), `${locale} must carry ${key}`);
+    }
+  }
+});

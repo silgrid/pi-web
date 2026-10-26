@@ -1,0 +1,310 @@
+# Pi Web
+
+[中文文档](./README.zh-CN.md) | [日本語](./README.ja.md) | [Русский](./README.ru.md)
+
+Local browser UI for the [pi coding agent](https://github.com/earendil-works/pi). Pi Web uses the same local configuration and session files as pi, so you can browse and resume conversations, run agent turns, configure models and resources, and inspect project files from a browser.
+
+This is the **@silgrid/pi-web** fork of [agegr/pi-web](https://github.com/agegr/pi-web), adding split-pane chat and background task panels. The fork keeps its own version line (`0.0.x`) and never reuses upstream version numbers.
+
+## Fork baseline
+
+| Fork version | Upstream version | Upstream commit |
+|---|---|---|
+| 0.0.1 | 0.9.1 | `ffb2daf` |
+| 0.0.4 | 0.9.1 | `1eb5e66` |
+| 0.0.17 | 0.9.3 | `96966e5` (merge of piupstream/main) |
+
+Update one row per upstream merge so the table stays the mapping between the fork line and the upstream baseline.
+
+![Pi Web displaying a pi session with structured Markdown, tool calls, and project navigation](https://raw.githubusercontent.com/agegr/pi-web/main/docs/screenshot2.png)
+
+## Features
+
+- **Session workspace**: browse, resume, rename, export, and delete conversations grouped by project, with running state, context usage, cost, and compaction details.
+- **Two ways to branch**: **New session** creates an independent session file from an earlier message; **Edit from here** creates a branch inside the current session.
+- **Project file tools**: browse and upload files, inspect Git diffs, and preview source, Markdown, images, audio, PDFs, and DOCX files with automatic refresh.
+- **Git worktrees**: switch checkouts from the sidebar while keeping sessions from the same repository grouped together.
+- **Web-based configuration**: manage provider login and API keys, models, model tests, plugin packages, and skills without leaving Pi Web.
+- **English, Simplified Chinese, and Traditional Chinese UI**: Pi Web follows the browser language initially and provides a language switcher in the top bar.
+
+## Quick Start
+
+> **⚠️ Exposure warning.** `npx` / `pi-web` binds `127.0.0.1` only by default. Any non-loopback bind — `deploy-piweb.sh` binds `0.0.0.0` by default, and `pi-web -H 0.0.0.0` / `npm run start:lan` do the same — has **no authentication** unless `PI_WEB_PASSWORD` is set: anyone who can reach the port can read and write files, open a terminal, and drive the agent. Set `PI_WEB_PASSWORD` (or keep the loopback bind / front it with a trusted edge) before exposing the port.
+
+Pi Web requires Node.js 22.19.0 or newer. Check your version with `node --version`, then run:
+
+```bash
+npx @silgrid/pi-web@latest
+```
+
+The CLI opens a browser after the server is ready. If it does not, open [http://127.0.0.1:30141](http://127.0.0.1:30141). Pi Web listens only on `127.0.0.1` by default.
+
+If no model provider is configured yet, open the **Models** panel to sign in or add an API key.
+
+To install the `pi-web` command globally:
+
+```bash
+npm install -g @silgrid/pi-web@latest
+pi-web
+```
+
+To update, stop the running process with `Ctrl+C` and run the same install command again. To uninstall, run `npm uninstall -g @silgrid/pi-web`.
+
+## Deployment (container autostart)
+
+This fork ships a deployment script for containers without systemd:
+
+```bash
+./deploy-piweb.sh   # npm i -g @silgrid/pi-web@latest, then restart the tmux service
+```
+
+The script installs the latest published package globally and (re)starts pi-web
+in a detached `tmux` session (`piweb`) with a restart loop. `PI_WEB_IDLE_TIMEOUT_MS=0`
+is required for unattended runs: by default pi-web exits after 10 idle minutes,
+which looks like the process "self-exits" when run as a background service.
+
+For container entrypoint autostart, create the tmux session at container start
+(e.g. from an entrypoint script or shell rc):
+
+```bash
+tmux new-session -d -s piweb 'PI_WEB_IDLE_TIMEOUT_MS=0 pi-web'
+```
+
+Override the session name with `PIWEB_TMUX_SESSION`; attach with `tmux attach -t piweb`.
+
+To reach pi-web from a phone or another network without running your own edge,
+see [Expose pi-web to your phone](#expose-pi-web-to-your-phone) — the deploy
+script ships opt-in exposure modes (`PIWEB_EXPOSE=lan|tailscale|cloudflare`).
+
+## Configuration
+
+For port and hostname, command-line options override the corresponding environment variables. Either `--no-open` or `PI_WEB_NO_OPEN=1` disables automatic browser opening. Run `pi-web --help` (or `-h`) to print startup options and exit without starting the server. Unknown options exit with an error.
+
+| Option or environment variable | Purpose | Default |
+| --- | --- | --- |
+| `--help`, `-h` | Print startup options and exit | — |
+| `--port <port>`, `-p <port>`, or `PORT` | Server port | `30141` |
+| `--hostname <host>`, `-H <host>`, or `PI_WEB_HOSTNAME` | Bind hostname | `127.0.0.1` |
+| `--no-open` or `PI_WEB_NO_OPEN=1` | Do not open a browser automatically | Browser opens |
+| `PI_WEB_SKIP_VERSION_CHECK=1` | Disable Pi Web update checks | Unset |
+| `PI_WEB_ALLOWED_HOSTS` | Additional exact proxy or custom hostnames, comma-separated | Unset |
+| `PI_WEB_PASSWORD` | Enable browser password login; API clients may use Basic Auth with username `pi` | Authentication disabled |
+| `PI_WEB_IDLE_TIMEOUT_MS` | Session idle timeout in milliseconds, up to `2147483647`; `0` disables idle shutdown; invalid or out-of-range values use the default | `600000` (10 min) |
+| `PI_WEB_PUSH_ALLOWED_ENDPOINT_SUFFIXES` | Additional Web Push endpoint host suffixes (comma-separated) accepted by `/api/push/subscribe`, on top of the built-in browser push services (FCM, Mozilla autopush, Apple) | Unset |
+| `PI_WEB_SHUTDOWN_DEADLINE_MS` | How long extensions get to handle `session_shutdown` before a closing session is disposed anyway, in milliseconds up to `2147483647`; `0`, invalid or out-of-range values use the default | `5000` (5 s) |
+
+For example:
+
+```bash
+pi-web --help
+pi-web -p 8080 -H 0.0.0.0 --no-open
+```
+
+### Remote Access
+
+Binding to a non-loopback address exposes an agent that can execute high-privilege actions. On a trusted LAN, require a long random password:
+
+```bash
+PI_WEB_PASSWORD='a-long-random-password' pi-web --hostname 0.0.0.0
+```
+
+Password authentication does not encrypt the connection. Do not expose Pi Web over plain HTTP to the internet; use HTTPS through a trusted reverse proxy or a trusted VPN. If a reverse proxy sends an external hostname, add that exact name to `PI_WEB_ALLOWED_HOSTS`. This allow-list does not change the address Pi Web binds to.
+
+For turnkey HTTPS exposure without your own reverse proxy, see [Expose pi-web to your phone](#expose-pi-web-to-your-phone) below.
+
+### HTTP Proxy
+
+Server-side model and API requests honor the standard `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` environment variables.
+
+On macOS or Linux:
+
+```bash
+HTTP_PROXY=http://127.0.0.1:7890 \
+HTTPS_PROXY=http://127.0.0.1:7890 \
+NO_PROXY=localhost,127.0.0.1 \
+npx @silgrid/pi-web@latest
+```
+
+On Windows PowerShell:
+
+```powershell
+$env:HTTP_PROXY = "http://127.0.0.1:7890"
+$env:HTTPS_PROXY = "http://127.0.0.1:7890"
+$env:NO_PROXY = "localhost,127.0.0.1"
+npx @silgrid/pi-web@latest
+```
+
+## Expose pi-web to your phone
+
+`deploy-piweb.sh` ships opt-in exposure modes: set `PIWEB_EXPOSE=lan|tailscale|cloudflare` when deploying. Leaving `PIWEB_EXPOSE` **unset** keeps the legacy self-managed deployment unchanged — pi-web binds `0.0.0.0` and you run your own edge (the GCP static-IP + Caddy setup, for example), with `PI_WEB_ALLOWED_HOSTS` passed through untouched and no tunnel/serve tooling installed.
+
+| Situation | Mode | Result |
+| --- | --- | --- |
+| You already manage an edge (GCP + Caddy, own reverse proxy) | *unset* | `0.0.0.0:<port>`; edge and certs are yours |
+| Phone on the same WiFi as the host | `PIWEB_EXPOSE=lan` | Direct `http://<host-LAN-IP>:<port>` — zero extra tooling |
+| Your own devices, on any network ⭐ | `PIWEB_EXPOSE=tailscale` | `https://<machine>.<tailnet>.ts.net` with an auto Let's Encrypt cert (recommended) |
+| Sharing with many people at scale | `PIWEB_EXPOSE=cloudflare` + `PIWEB_TUNNEL=named` | Public hostname over an outbound-only Cloudflare tunnel |
+| Just kicking the tires | `PIWEB_EXPOSE=cloudflare` + `PIWEB_TUNNEL=quick` | Random `*.trycloudflare.com` URL — **demo only** |
+
+```bash
+# Same WiFi only
+PIWEB_EXPOSE=lan ./deploy-piweb.sh
+
+# Recommended for personal use: your devices, anywhere (5G, roaming)
+PIWEB_EXPOSE=tailscale ./deploy-piweb.sh
+
+# Cloudflare: named tunnel (stable public hostname) or quick tunnel (demo)
+PIWEB_EXPOSE=cloudflare PIWEB_TUNNEL=quick ./deploy-piweb.sh
+PIWEB_EXPOSE=cloudflare PIWEB_TUNNEL=named \
+  PIWEB_CF_CONFIG=/etc/cloudflared/config.yml \
+  PIWEB_CF_HOSTNAME=pi.example.com ./deploy-piweb.sh
+```
+
+Any other `PIWEB_EXPOSE` value fails fast, before the script uninstalls, installs, or restarts anything.
+
+### LAN mode
+
+Zero extra tooling: pi-web stays reachable at `http://<host-LAN-IP>:<port>` on the local network, and nothing is appended to `PI_WEB_ALLOWED_HOSTS`. One cleartext caveat to know (the script states it, it cannot fix it):
+
+- PWA install degrades over HTTP — Chrome may not offer “Install app”. (Chrome app-mode windows — the mac/Windows `piweb` launcher — open `http://` origins fine.)
+
+### Tailscale mode (recommended)
+
+Installs Tailscale when absent (macOS via Homebrew, Linux via the upstream install script), runs `tailscale up` (SSO login), and mounts pi-web at `https://<machine>.<tailnet>.ts.net` through `tailscale serve` with an auto-provisioned Let's Encrypt cert — no domain, no ports, no Caddy.
+
+The ts.net HTTPS origin satisfies **both** mobile clients on one origin: the Chrome PWA install criteria on Android and Safari Add-to-Home-Screen on iOS. `tailscale serve` runs as a tmux window of the deploy session, so killing the session stops it; redeploys keep a serve mapping that already forwards to the current port, and replace the serve holder window otherwise (a healthy serve survives a redeploy).
+
+Node sharing (share this machine with family/colleagues' tailnet accounts) covers the "people I trust" case; public sharing needs Cloudflare mode or Tailscale Funnel (not automated by this script).
+
+### Cloudflare mode
+
+`cloudflared` runs outbound-only — no inbound ports. `PIWEB_TUNNEL=quick` (default) starts a quick tunnel and prints its `*.trycloudflare.com` URL, captured and wired into `PI_WEB_ALLOWED_HOSTS` automatically. **Quick-tunnel URLs are demo-only**: reusing a healthy connector keeps the URL stable across redeploys, but the connector restarting (or dying) still mints a fresh one — never bake one into a PWA or app-mode client.
+
+`PIWEB_TUNNEL=named` is for public distribution at scale. It requires a Cloudflare account with your domain on Cloudflare DNS and two operator-supplied settings:
+
+- `PIWEB_CF_CONFIG` — your `cloudflared` `config.yml` (tunnel ID, credentials-file, and an ingress entry mapping your hostname to `http://127.0.0.1:<port>`)
+- `PIWEB_CF_HOSTNAME` — the public ingress hostname to allow
+
+The cloudflared process runs as a tmux window of the deploy session; a redeploy keeps a healthy connector that forwards to the current port running (its PID — and the quick URL — survive), and replaces it only when it is stale or dead, so redeploys don't accumulate tunnels.
+
+### Common behavior in exposed modes
+
+- In `tailscale`/`cloudflare` modes the served/tunnel hostname is appended to `PI_WEB_ALLOWED_HOSTS` before pi-web starts (operator entries are preserved and come first) — otherwise request-security rejects the unknown `Host` header. `lan` mode and the unset path append nothing.
+- Serve/tunnel lifecycle is tied to the `${PIWEB_TMUX_SESSION:-piweb}` tmux session: killing it stops the tunnel. Re-running the script is tunnel-idempotent — only the pi-web loop window(s) are recycled (unnamed loop windows left by older deploys or the autostart recipe included); a serve/tunnel window that is alive and forwarding to the current port survives with its process (and the quick URL, recovered from `~/.piweb/<session>-quick-tunnel.log`), and a stale or dead one is replaced, window included.
+- Phone client: install the PWA over the HTTPS origin — Android: Chrome → Install app; iPhone: Safari → Share → Add to Home Screen.
+
+### China notes
+
+- **Tailscale SSO**: sign in with GitHub or Apple — Google login does not work in mainland China.
+- **Tailscale connectivity**: generally usable in mainland China; direct connections are preferred, with DERP relay as fallback.
+- **Android**: Chrome WebAPK minting and closed-app Web Push go through Google/FCM and need a VPN on mainland networks.
+- **iOS**: PWA Web Push uses APNs and works in mainland China without a VPN.
+
+## Clients
+
+Every platform opens the same self-hosted origin — no bundled server, no proxying, no script injection:
+
+| Platform | Standalone form | Install path |
+|---|---|---|
+| macOS | Chrome app mode — `piweb` alias | shell rc file (see [`docs/mobile.md`](./docs/mobile.md)) |
+| Windows | Chrome app mode — `piweb` function | PowerShell profile (see [`docs/mobile.md`](./docs/mobile.md)) |
+| iPhone | Safari PWA — the native standalone form on iOS | Safari → Share → Add to Home Screen |
+| Android | Chrome PWA — for now | Chrome → ⋮ → Install app |
+
+Closed-app Web Push on Android goes through FCM, which needs a VPN in mainland China — see the launcher snippets, the China reachability notes and the full notification capability matrix in [`docs/mobile.md`](./docs/mobile.md).
+
+## Notes
+
+- **Agent data**: Pi Web reads pi data from `~/.pi/agent` by default, including session files under `sessions/<encoded-cwd>/<timestamp>_<uuid>.jsonl`. Set `PI_CODING_AGENT_DIR` to use another pi agent directory.
+- **Filesystem access**: Pi Web must be able to read the agent data directory and the working directories recorded by its sessions. Run Pi Web in the same filesystem environment as pi when sharing existing sessions.
+- **Shared configuration**: the Models panel uses pi's model, settings, and credential storage, so changes are visible to both interfaces.
+- **File access boundary**: the file browser is limited to working directories selected in Pi Web and project or session roots it already knows about; it is not a general filesystem browser.
+- **Git worktrees**: see [Worktrees in Pi Web](./docs/worktrees.md) for switcher visibility, worktree creation, and removal behavior.
+
+### Downstream Session Context Menu
+
+Electron wrappers and other downstream integrations can provide a session-row
+context menu without patching `SessionSidebar`. Listen for the cancelable
+`pi-web:session-row-contextmenu` browser event and call `preventDefault()`
+synchronously when the integration will handle it:
+
+```js
+window.addEventListener("pi-web:session-row-contextmenu", (event) => {
+  event.preventDefault();
+  const { id, path, cwd, name, clientX, clientY, refresh } = event.detail;
+
+  void openSessionMenu({ id, path, cwd, name, clientX, clientY }).then((changed) => {
+    if (changed) refresh();
+  });
+});
+```
+
+The detail object contains `id`, `path`, `cwd`, optional `name`, pointer
+coordinates, and a `refresh()` callback for actions that change the session
+list. If no listener cancels the extension event, Pi Web preserves the
+browser's native context menu. This hook is browser-side and independent of
+Pi agent extensions.
+
+### Extension Session Liveness
+
+Server-side Pi extensions with detached work can prevent automatic idle
+session eviction through the versioned global registry:
+
+```js
+const liveness = globalThis[Symbol.for("@agegr/pi-web/session-liveness/v1")];
+const release = liveness?.version === 1
+  ? liveness.register({
+      name: "my-extension",
+      sessionId,
+      sessionFile: sessionFile || undefined,
+      isActive: () => detachedJobs.size > 0,
+    })
+  : () => {};
+```
+
+Register once per active extension session and call the returned idempotent
+`release` function on session shutdown, replacement, or reload. `isActive`
+must be synchronous, cheap, and scoped to the supplied exact session id or
+file. Provider errors fail safe by preserving that session. This lease only
+affects automatic idle eviction; explicit shutdown and Stop fallback cleanup
+still take precedence.
+
+## Development
+
+```bash
+npm install
+npm run dev
+```
+
+The development server runs at [http://127.0.0.1:30141](http://127.0.0.1:30141). Run the common checks with:
+
+```bash
+npm test
+node_modules/.bin/tsc --noEmit
+npm run lint
+```
+
+`npm test` runs the tests with a private temp dir and fails if anything is left in it afterwards (`scripts/tmp-guard.mjs`): a test removes what it creates, in `t.after()`.
+
+Do not run `next build` or `npm run build` during normal development. It writes to `.next/` and can interfere with the development server; leave builds for release work.
+
+Contributor guides: [Internationalization](./docs/i18n.md) and [Release process](./docs/release.md).
+
+## Repository Layout
+
+```text
+app/             Next.js UI and API routes
+components/      React UI components
+hooks/           Client state and interaction hooks
+lib/             Session, agent, model, file, Git, and security logic
+public/          Static assets and PWA files
+bin/             npm CLI entrypoint and launch option parsing
+scripts/         Development scripts (the npm test temp guard); not published
+docs/            Focused user and contributor guides
+```
+
+See [AGENTS.md](./AGENTS.md) for the architecture notes and detailed file map.
+
+## License
+
+[MIT](./LICENSE)
