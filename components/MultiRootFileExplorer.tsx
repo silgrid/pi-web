@@ -111,7 +111,7 @@ export const MultiRootFileExplorer = forwardRef<MultiRootFileExplorerHandle, Pro
       setShowBuildOutputs(next);
       // Apply the EFFECTIVE value: the setter broadcasts the read-back
       // (false when storage failed), and this checkbox must agree with
-      // what the explorers actually got (review B1, pi#50).
+      // what the explorers actually got (the review finding, pi#50).
       setShowBuildOutputsState(getShowBuildOutputs());
     }, [showBuildOutputs]);
     // Single global "show git-ignored files" toggle, same bottom-toolbar slot

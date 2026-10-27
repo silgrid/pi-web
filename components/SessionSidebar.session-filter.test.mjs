@@ -37,7 +37,7 @@ function session(overrides = {}) {
 }
 
 test("the sidebar reads the filter through the shared lib and derives visibleSessions from allSessions", () => {
-  // The wiring goes through the production store seam (review B1): a LIVE
+  // The wiring goes through the production store seam (the review finding): a LIVE
   // useSyncExternalStore subscription so a Settings edit updates the rendered
   // sidebar in the same window — never a mount-time one-shot read. The
   // import block also carries the pi#65 hidden-count/marking helpers

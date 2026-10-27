@@ -16,15 +16,37 @@ shared blocks; its machine-level detection comes from
 [polyforge-panel.md](polyforge-panel.md)).
 
 The configuration panel below the detection block is its own surface: the
-machine-scope note is always visible, read-only keys render pf's reload class,
+machine-scope note is always visible, and the keys of `pf --json config list`
+render in source cards, each with a title and a visible one-line
+hint, in a fixed order — cli.toml flat keys, `[daemon]`, workspace mapping,
+summarize, then the declared candidates. The grouping is presentation only and
+lives in the import-free `components/polyforge-config-helpers.ts`: pf marks no
+table membership, so the daemon card uses a copy of pf's five `[daemon]` key
+names (a key pf adds later shows in the cli.toml card until the list is
+extended — cosmetic), a `section` item is a workspace mapping, a `summarize.`
+key is summarize, and any other key stays in the cli.toml card, never dropped.
+Every card is one five-column grid — key | reload class badge | file value |
+daemon value | actions — whose rows are CSS subgrids, and every row renders all
+five cells: an unset value or a key without a daemon value shows
+`—（未设置）`, a row without a write control keeps an empty actions cell and a
+muted value, and under 640px the same cells stack in one column. A workspace
+mapping row shows the workspace path (`shortenPath()`, display only) with its
+projects as chips, never the raw `[workspace."…"]` TOML header; a header that
+does not parse renders verbatim. Read-only keys render pf's reload class,
 the three daemon-column keys show the file value beside the daemon's loaded
 value with a visible stale reason (and, when `pf --json ops status` fails, the
 column says the daemon is not running), and the workspace summarize values come
 from the cwd-resolved workspace (their rows stay visible but read-only, with
 the visible reason, when the cwd is unmapped). Below the pf capability floor,
 or an old list shape, the write controls are unavailable with visible reason
-text while detection keeps working. Candidate steps are read-only; an
-undeclared step is labelled bundle default and no composed list is shown. The
+text while detection keeps working. Candidate steps are read-only and render
+in the candidates card as one collapsible group per project (native
+`<details open>`; summary = project + step count, project-less steps in one
+"all projects" group last), each step a line with its models as chips on the
+line below. `groupStepsByProject()` sorts projects and steps by name (pf builds
+them from Go maps, so its order is unstable) but never reorders a step's
+models, which are pf's order. An undeclared step is labelled bundle default
+and no composed list is shown. The
 write controls are schema-derived (numeric/duration bounds from pf, enforced
 again client-side before the write so 0/9 cannot be submitted; free-text
 language, ordered models, an api_key password field that clears after save).

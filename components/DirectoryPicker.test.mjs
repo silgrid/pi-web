@@ -464,7 +464,7 @@ test("every validation issue code has a translated message in all three locales"
 
 
 // ---------------------------------------------------------------------------
-// createCreateFlow (review P2 races): deferred-response interaction tests
+// createCreateFlow (the review finding races): deferred-response interaction tests
 // driving the REAL production flow — cancel/reopen during a pending
 // creation, and navigation during a pending folder creation.
 // ---------------------------------------------------------------------------
@@ -664,7 +664,7 @@ test("a browse-row FOLDER creation enters the row's directory so the result is v
   assert.match(calls[1].url, /files\/work\/row\?type=mkdir/);
   // Success enters the ROW's directory: the created folder is a child of it
   // and can never appear in the parent listing, so navigation IS the
-  // visibility (review B2).
+  // visibility (the review finding).
   assert.deepEqual(h.navigated, ["/work/row"]);
   assert.equal(h.state.kind, null);
   assert.equal(h.state.busy, false);

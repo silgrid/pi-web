@@ -286,7 +286,47 @@ export function AppShell() {
     watchStatus: pfWatchStatus,
     select: selectPolyforgeJob,
     refreshStatus: refreshPolyforgeStatus,
+    activeTab: pfActiveTab,
+    setActiveTab: setPfActiveTab,
+    messagesCapable: pfMessagesCapable,
+    messagesReason: pfMessagesReason,
+    messagesError: pfMessagesError,
+    conversations: pfConversations,
+    unreadTotal: pfUnreadTotal,
+    selectedConversation: pfSelectedConversation,
+    selectConversation: selectPfConversation,
+    messages: pfMessages,
+    initialPageLoaded: pfMessagesInitialPageLoaded,
+    blocked: pfMessagesBlocked,
+    loadingOlder: pfMessagesLoadingOlder,
+    loadOlder: loadPfOlderMessages,
+    acknowledgeExplicitly: acknowledgePfMessagesExplicitly,
+    sendMessage: sendPfMessage,
+    analyzeMessage: analyzePfMessage,
+    analyses: pfAnalyses,
+    openAnchor: openPfAnchor,
   } = usePolyforge(pfPanelOpen);
+
+  const pfMessagesSurface = {
+    pfPresent,
+    capable: pfMessagesCapable,
+    reason: pfMessagesReason,
+    conversations: pfConversations,
+    error: pfMessagesError,
+    selectedConversation: pfSelectedConversation,
+    onSelectConversation: selectPfConversation,
+    messages: pfMessages,
+    initialPageLoaded: pfMessagesInitialPageLoaded,
+    blocked: pfMessagesBlocked,
+    loadingOlder: pfMessagesLoadingOlder,
+    onLoadOlder: loadPfOlderMessages,
+    onAcknowledge: acknowledgePfMessagesExplicitly,
+    onSend: sendPfMessage,
+    onAnalyze: analyzePfMessage,
+    analyses: pfAnalyses,
+    onOpenAnchor: openPfAnchor,
+    unreadTotal: pfUnreadTotal,
+  };
 
   // pi#121: the polyforge chat id of every session that carries the
   // display-only ` · <id>` suffix — the pane tabs on desktop, the current
@@ -1983,6 +2023,22 @@ export function AppShell() {
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
               <path d="M4 21V9l8-5 8 5v12" /><path d="M4 21h16" /><path d="M12 4v5" /><path d="M9 21v-6h6v6" />
             </svg>
+            {pfUnreadTotal > 0 && (
+              <span
+                aria-label={translate("polyforge.messages.unread")}
+                title={translate("polyforge.messages.unread")}
+                style={{
+                  position: "absolute",
+                  bottom: 6,
+                  left: mobile ? 6 : 10,
+                  width: 8,
+                  height: 8,
+                  borderRadius: 4,
+                  background: "var(--accent)",
+                  display: "inline-block",
+                }}
+              />
+            )}
             {pfRunningCount !== null && pfRunningCount > 0 && (
               <span
                 aria-label={String(pfRunningCount)}
@@ -3412,6 +3468,9 @@ export function AppShell() {
                     onSelect={selectPolyforgeJob}
                     onClose={() => setPfPanelOpen(false)}
                     onRefresh={refreshPolyforgeStatus}
+                    activeTab={pfActiveTab}
+                    onActiveTab={setPfActiveTab}
+                    messagesSurface={pfMessagesSurface}
                   />
                 </div>
               </>
@@ -3449,6 +3508,9 @@ export function AppShell() {
                   onSelect={selectPolyforgeJob}
                   onClose={() => setPfPanelOpen(false)}
                   onRefresh={refreshPolyforgeStatus}
+                  activeTab={pfActiveTab}
+                  onActiveTab={setPfActiveTab}
+                  messagesSurface={pfMessagesSurface}
                 />
               </div>
             )

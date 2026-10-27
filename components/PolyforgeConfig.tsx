@@ -7,6 +7,7 @@ import type { PolyforgeConfigHistoryEntry } from "@/lib/polyforge-config-history
 import type { PolyforgeConfigItem, PolyforgeConfigRead } from "@/lib/polyforge-config";
 import { configValueError } from "@/lib/polyforge-config-schema";
 import type { PluginPackageInfo } from "@/lib/api-types";
+import { shortenPath } from "@/lib/display-path";
 import {
   ConfigButton,
   ConfigDetailGrid,
@@ -17,6 +18,14 @@ import {
   ConfigSectionTitle,
   ConfigSwitch,
 } from "./SettingsUi";
+import {
+  groupConfigItems,
+  groupStepsByProject,
+  isUnsetValue,
+  workspaceProjects,
+  workspaceSectionPath,
+  type ConfigGroupId,
+} from "./polyforge-config-helpers";
 
 /**
  * Settings › Polyforge: machine-level detection (pi#122) plus the
@@ -52,6 +61,20 @@ function isNumericKey(key: string): boolean {
 function isDaemonColumnKey(key: string): boolean {
   return key === "max_concurrent_jobs" || key === "step_timeout" || key === "stall_window";
 }
+
+/** Each source card's title and one-line hint. */
+const GROUP_TITLE: Record<ConfigGroupId, string> = {
+  flat: "polyforge.settings.configGroupFlat",
+  daemon: "polyforge.settings.configGroupDaemon",
+  workspace: "polyforge.settings.configGroupWorkspace",
+  summarize: "polyforge.settings.configGroupSummarize",
+};
+const GROUP_HINT: Record<ConfigGroupId, string> = {
+  flat: "polyforge.settings.configGroupFlatHint",
+  daemon: "polyforge.settings.configGroupDaemonHint",
+  workspace: "polyforge.settings.configGroupWorkspaceHint",
+  summarize: "polyforge.settings.configGroupSummarizeHint",
+};
 
 /** The read snapshot the CAS compares: only the keys the file actually
  *  declares (source `file`), with api_key reduced to {set}. Keyed to the file
@@ -305,6 +328,7 @@ export function PolyforgeConfig({ cwd, active }: Props) {
         ? t("polyforge.settings.switchNoPackage")
         : null;
   const switchReasonId = useId();
+  const unset = t("polyforge.settings.configUnset");
   const configReason = !cwd
     ? t("polyforge.settings.configNeedsProject")
     : config?.capable === false
@@ -385,54 +409,107 @@ export function PolyforgeConfig({ cwd, active }: Props) {
         {configReason && <p className="config-scope-switch-reason">{configReason}</p>}
         {config && (
           <>
-            {config.capable && (config.items ?? []).map((item) => {
-              const writable = WRITABLE.has(item.key) && !item.section && (!item.key.startsWith("summarize.") || config.mapped);
-              return (
-                <div key={item.key} className="polyforge-config-row">
-                  <span className="polyforge-config-key">{item.key}</span>
-                  <span className="polyforge-config-class">{item.class}</span>
-                  {writable ? (
-                    <input
-                      type={item.key === "api_key" ? "password" : isNumericKey(item.key) ? "number" : "text"}
-                      aria-label={item.key}
-                      placeholder={item.key === "api_key" ? t("polyforge.settings.configApiKeyWriteOnly") : undefined}
-                      value={drafts[item.key] ?? String(itemValue(item))}
-                      min={item.schema?.min}
-                      max={item.schema?.max}
-                      step={item.schema?.kind === "int" ? 1 : undefined}
-                      onChange={(event) => setDrafts((current) => ({ ...current, [item.key]: event.target.value }))}
-                    />
-                  ) : (
-                    <span className="polyforge-config-value">{item.key === "api_key" ? (item.set ? "<set>" : "<unset>") : JSON.stringify(item.value ?? null)}</span>
-                  )}
-                  {isDaemonColumnKey(item.key) && (
-                    <span className="polyforge-config-daemon">
-                      {config.daemonReachable === false
-                        ? t("polyforge.settings.configDaemonDown")
-                        : item.daemon
-                          ? <>{t("polyforge.settings.configDaemonValue")}: {String(item.daemon.value)}{item.stale_reason ? ` (${item.stale_reason})` : ""}</>
-                          : null}
-                    </span>
-                  )}
-                  {writable && (
-                    <ConfigButton size="small" disabled={writeBusy !== null} onClick={() => void save(item)}>
-                      {t("polyforge.settings.configSave")}
-                    </ConfigButton>
-                  )}
-                </div>
-              );
-            })}
-            {config.steps && config.steps.length > 0 && (
-              <div className="polyforge-config-steps">
-                <p className="config-add-source-examples-label">{t("polyforge.settings.configCandidates")}</p>
-                {config.steps.map((step) => (
-                  <div key={`${step.project ?? ""}:${step.step}`} className="polyforge-config-step">
-                    <span>{step.project ? `${step.project}/${step.step}` : step.step}</span>
-                    <span>{step.declared ? (step.models ?? []).join(", ") : t("polyforge.settings.configBundleDefault")}</span>
+            {config.capable && groupConfigItems(config.items ?? []).map((group) => (
+              <section key={group.id} className="polyforge-config-card" aria-label={t(GROUP_TITLE[group.id])}>
+                <p className="polyforge-config-card-title">{t(GROUP_TITLE[group.id])}</p>
+                <p className="polyforge-config-card-hint">{t(GROUP_HINT[group.id])}</p>
+                <div className="polyforge-config-grid">
+                  <div className="polyforge-config-grid-header" aria-hidden="true">
+                    <span>{t("polyforge.settings.configColKey")}</span>
+                    <span>{t("polyforge.settings.configColClass")}</span>
+                    <span>{t("polyforge.settings.configColFile")}</span>
+                    <span>{t("polyforge.settings.configColDaemon")}</span>
+                    <span />
                   </div>
+                  {group.items.map((item) => {
+                    const writable = WRITABLE.has(item.key) && !item.section && (!item.key.startsWith("summarize.") || config.mapped);
+                    const workspacePath = item.section ? workspaceSectionPath(item.key) : null;
+                    // Every row renders all five cells so the columns never
+                    // collapse; an empty value is the visible placeholder.
+                    return (
+                      <div key={item.key} className={`polyforge-config-row${writable ? "" : " is-readonly"}`}>
+                        <span className="polyforge-config-key">
+                          {workspacePath !== null
+                            ? <span className="polyforge-config-workspace-path">{shortenPath(workspacePath)}</span>
+                            : item.key}
+                        </span>
+                        <span className="polyforge-config-class">
+                          {item.class ? <span className="polyforge-config-badge">{item.class}</span> : null}
+                        </span>
+                        <span className="polyforge-config-file">
+                          {writable ? (
+                            <input
+                              type={item.key === "api_key" ? "password" : isNumericKey(item.key) ? "number" : "text"}
+                              aria-label={item.key}
+                              placeholder={item.key === "api_key" ? t("polyforge.settings.configApiKeyWriteOnly") : undefined}
+                              value={drafts[item.key] ?? String(itemValue(item))}
+                              min={item.schema?.min}
+                              max={item.schema?.max}
+                              step={item.schema?.kind === "int" ? 1 : undefined}
+                              onChange={(event) => setDrafts((current) => ({ ...current, [item.key]: event.target.value }))}
+                            />
+                          ) : item.section ? (
+                            workspaceProjects(item.value).length > 0 ? (
+                              <span className="polyforge-config-chips" aria-label={t("polyforge.settings.configProjects")}>
+                                {workspaceProjects(item.value).map((project) => (
+                                  <span key={project} className="polyforge-config-chip">{project}</span>
+                                ))}
+                              </span>
+                            ) : <span className="polyforge-config-empty">{unset}</span>
+                          ) : item.key !== "api_key" && isUnsetValue(item.value) ? (
+                            <span className="polyforge-config-empty">{unset}</span>
+                          ) : (
+                            <span className="polyforge-config-value">{item.key === "api_key" ? (item.set ? "<set>" : "<unset>") : JSON.stringify(item.value ?? null)}</span>
+                          )}
+                        </span>
+                        <span className="polyforge-config-daemon">
+                          {isDaemonColumnKey(item.key) && config.daemonReachable === false
+                            ? t("polyforge.settings.configDaemonDown")
+                            : isDaemonColumnKey(item.key) && item.daemon
+                              ? <>{t("polyforge.settings.configDaemonValue")}: {String(item.daemon.value)}{item.stale_reason ? ` (${item.stale_reason})` : ""}</>
+                              : <span className="polyforge-config-empty">{unset}</span>}
+                        </span>
+                        <span className="polyforge-config-actions">
+                          {writable && (
+                            <ConfigButton size="small" disabled={writeBusy !== null} onClick={() => void save(item)}>
+                              {t("polyforge.settings.configSave")}
+                            </ConfigButton>
+                          )}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </section>
+            ))}
+            {config.steps && config.steps.length > 0 && (
+              <section className="polyforge-config-card polyforge-config-steps" aria-label={t("polyforge.settings.configCandidates")}>
+                <p className="polyforge-config-card-title">{t("polyforge.settings.configCandidates")}</p>
+                <p className="polyforge-config-card-hint">{t("polyforge.settings.configGroupCandidatesHint")}</p>
+                {groupStepsByProject(config.steps).map((group) => (
+                  <details key={group.project ?? ""} className="polyforge-config-candidate-group" open>
+                    <summary>
+                      <span className="polyforge-config-candidate-project">{group.project ?? t("polyforge.settings.configAllProjects")}</span>
+                      <span className="polyforge-config-candidate-count">{t("polyforge.settings.configCandidateCount", { count: group.steps.length })}</span>
+                    </summary>
+                    {group.steps.map((step) => (
+                      <div key={step.step} className="polyforge-config-candidate-step">
+                        <span className="polyforge-config-key">{step.step}</span>
+                        {step.declared ? (
+                          <span className="polyforge-config-chips">
+                            {(step.models ?? []).map((model, index) => (
+                              <span key={`${index}:${model}`} className="polyforge-config-chip">{model}</span>
+                            ))}
+                          </span>
+                        ) : (
+                          <span className="polyforge-config-empty">{t("polyforge.settings.configBundleDefault")}</span>
+                        )}
+                      </div>
+                    ))}
+                  </details>
                 ))}
                 {config.steps_complete === false && <p className="config-scope-switch-reason">{t("polyforge.settings.configStepsIncomplete")}</p>}
-              </div>
+              </section>
             )}
             <div>
               <ConfigButton size="small" disabled={writeBusy !== null || !config.capable} onClick={() => void reload()}>

@@ -778,7 +778,7 @@ export function SessionSidebar({ selectedSessionId, highlightSessionId, followHi
   // empty on both server render and first client render (it fills only
   // after the first /api/sessions response lands client-side), so a stored
   // preference can never cause a hydration mismatch.
-  // Session filter (review B1): a LIVE subscription to the shared
+  // Session filter (the review finding): a LIVE subscription to the shared
   // session-filter store — editing rules or the reveal toggle in Settings
   // updates the rendered sidebar immediately, without a remount.
   // getServerSnapshot: the app server-renders client components — without a

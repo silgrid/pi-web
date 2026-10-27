@@ -2,9 +2,11 @@
 
 A read-only Polyforge panel in the shared dock slot (the bg-tasks slot): a topbar
 button + right dock (desktop) / bottom sheet (mobile), a job list, and a selected
-work item's steps and event tail. Files: `lib/polyforge-status.ts`,
-`app/api/polyforge/**`, `hooks/usePolyforge.ts`, `components/PolyforgePanel.tsx`,
-the `polyforge.*` wiring in `components/AppShell.tsx`, the dock width
+work item's steps and event tail. Files: `lib/polyforge-status.ts`, `lib/polyforge-messages.ts`,
+`lib/polyforge-messages-pure.ts`, `app/api/polyforge/**`,
+`hooks/usePolyforge.ts`, `components/PolyforgePanel.tsx`,
+`components/PolyforgeMessages.tsx`, the `polyforge.*` wiring in
+`components/AppShell.tsx`, the dock width
 and sheet height constants in `lib/panel-layout.ts`, the resize handles
 `hooks/useResizablePanel.ts` / `hooks/useResizableSheet.ts` and their
 `.pf-dock-resize-handle` / `.pf-sheet-resize-handle` styles in
@@ -96,6 +98,100 @@ probe; the section UI itself is in [settings-ui.md](settings-ui.md).
   `isApiRequestAllowed` 403. The id is shape-validated
   (`isChatIdToken`, `lib/session-chat-id.ts`) before it can reach a response;
   pf's stderr never does.
+
+## Messages tab
+
+The dock has two tabs, Jobs and Messages. The Messages tab is the human
+inbox: a member-only conversation list, a newest-page-first history with
+scroll-up paging, a composer (new message or reply), work-item anchors that
+open the existing Jobs detail, and the read-only analyzer on received
+messages. The list view — including the empty state — carries the
+new-message entry (recipient, text and an optional anchor); after a send the
+list refreshes and the resulting conversation opens. Inside an open
+conversation the recipient is that conversation's peer (not a free field),
+so a reply needs no typed user id. Files: `lib/polyforge-messages.ts` (pf
+transport, argv validation,
+sanitizers, capability floor), `lib/polyforge-messages-pure.ts` (client-safe
+types, page merges, `ackDecision`, `splitAnchor`),
+`app/api/polyforge/messages/**` (the four routes), `components/PolyforgeMessages.tsx`.
+
+**Routes** (all re-check `isApiRequestAllowed` in-route; every read answers
+200 JSON, every write is a JSON-only POST):
+
+- `GET /api/polyforge/messages` → 200
+  `{pfPresent, pfVersion, capable, reason?, error?, conversations:[{id,kind,peer?,last_seq,unread,created_at}]}`.
+  pf absent answers `{pfPresent:false,capable:false,conversations:[]}`; below
+  the floor `{pfPresent:true,pfVersion,capable:false,reason}` and **no
+  message verb is spawned**. All other list-read failures (a missing
+  `user_id`, AUTH-401, an unreachable aihub or daemon) answer
+  `{capable:true,error,conversations:[]}`: `capable:false` is reserved for pf
+  absent or below the floor, so a poll blip never shows a false upgrade
+  notice and an open conversation stays on screen. The server reads the
+  caller's own id once from `pf --json config list` (`user_id`), drops every
+  conversation it is not a member of, derives `peer` from `members`, and
+  drops both fields before the response: one list spawn, no
+  per-conversation preview fan-out.
+- `GET /api/polyforge/messages/[id][?before=<seq>|?after=<seq>]` → 200
+  `{capable, messages:[{id,seq,text,about_wi?,reply_to?,created_at,mine}], last_seq, has_older}`.
+  No cursor asks for the newest page (`--before` above the newest, 50 rows);
+  `before` is scroll-up (the page just below that sequence); `after` is the
+  open conversation's forward refresh on the 3 s tick. `has_older` is true
+  only when the page was full (aihub's `seq` is a global AUTOINCREMENT, so
+  `seq == 1` is not an end-of-history signal). `mine` is derived from
+  `sender_id` and the server-side pf user id; `sender_id` never leaves.
+- `POST /api/polyforge/messages/ack` — `{conversation_id, seq}`; advances the
+  caller's read cursor only. A non-positive/malformed seq is a 400 before any
+  spawn; pf's typed refusal (past the newest = CORE-400, unknown conversation
+  = CORE-404, non-member = AUTH-403) is its own 4xx. The response carries
+  `{error}` only: there is no invented error-code field. pf runs with `--json`,
+  so its stderr envelope `{code, detail}` (or plain `CODE: text`) is decoded
+  and only `detail` reaches the panel.
+- `POST /api/polyforge/messages/analyze` — `{message_id}`; one read-only
+  `pf --json msg analyze` read. The conclusion exists only in the response
+  and in component state; DAEMON-409 is a 409, DAEMON-500/unavailable is a
+  200 `{error}` (this repo has no 5xx route path). The analyzer spawn waits
+  at least five minutes (the ruling; a real one-shot is an LLM call).
+
+**Capability floor.** `POLYFORGE_MESSAGES_MINIMUM_PF_VERSION = "2.20.7"` in
+`lib/polyforge-messages.ts`, checked with `probePolyforgeVersion` +
+`isPolyforgeVersionBelowMinimum`. Below it the panel renders a visible
+"pf upgrade required" state with the reason and spawns no message verb; there
+is no read-only fallback. pf absent keeps the dock's existing degradation.
+
+**Cadence.** Messages ride the dock's existing timers — 3 s while the panel is
+open, 30 s while closed — and the open conversation refreshes on the 3 s tick
+with one forward `?after=` read. No new interval, websocket or push channel.
+
+**Acknowledgment discipline.** One pure helper (`ackDecision`) makes the
+decision: automatic ack only while the panel is open, Messages is the active
+tab, a conversation is open and no local job has `status === "needs_input"`;
+the acknowledged sequence is always the **newest displayed** one and never a
+sequence already acked (an optimistic per-conversation stamp suppresses
+duplicates). An explicit gesture (message click, scroll-to-bottom) acks the
+newest displayed sequence even with a blocked job; a programmatic scroll is
+never an explicit gesture (only wheel/touch/pointer/key input or a message
+click is). Opening a hidden conversation never acks, and auto-tab-switch is
+suppressed while blocked. Opening a conversation always positions the
+history at the bottom — on selection change and on the first page load, even
+while a local job is blocked; the blocked state suppresses only the
+**arrival** scroll-to-bottom write, so no programmatic `onScroll` can turn
+into an ack.
+
+**Anchors and analysis.** `splitAnchor` makes only the work-item prefix
+(`task-42`, `proj#12`, `wi_…`) clickable; the rest of a deep reference
+renders as text and is never fetched. Clicking it switches to Jobs and runs
+the existing watch read for that ref. The analyzer control renders only when
+the sanitized message says `mine: false`; its conclusion is component state,
+dropped when the dock closes, never written to storage or disk. Incoming
+messages never enter a chat session, an agent turn or the composer.
+
+**Sanitization.** The sanitizers are the only passport: a conversation keeps
+id/kind/peer/last_seq/unread/created_at, a message keeps
+id/seq/text/about_wi/reply_to/created_at/mine. `sender_id`, `members` and any
+unknown wire field are dropped; no route response, error, log line or history
+entry carries the pf user id, api key, server address, an environment value
+or another identity's unread state. pf's stderr is the only error text and is
+capped at 512 chars; the routes never `console.*` a request or response body.
 
 ## Subprocess contract
 

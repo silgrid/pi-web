@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useState } from "react";
 import type { PolyforgeEvent, PolyforgeJob, PolyforgeOpsStatus, PolyforgeWatchStatus } from "@/lib/polyforge-status";
+import type { PolyforgeConversation, PolyforgeMessage } from "@/lib/polyforge-messages-pure";
+import { PolyforgeMessages } from "./PolyforgeMessages";
 import { useI18n } from "@/hooks/useI18n";
 
 const STEP_STATUS_COLORS: Record<string, string> = {
@@ -270,6 +272,9 @@ export function PolyforgePanel({
   onSelect,
   onClose,
   onRefresh,
+  activeTab,
+  onActiveTab,
+  messagesSurface,
 }: {
   opsStatus: PolyforgeOpsStatus | null;
   opsError: string | null;
@@ -280,6 +285,28 @@ export function PolyforgePanel({
   // May return the status fetch's settle promise (usePolyforge.refreshStatus
   // does); the manual-refresh feedback (pi#113) awaits it.
   onRefresh: () => void | Promise<void>;
+  activeTab: "jobs" | "messages";
+  onActiveTab: (tab: "jobs" | "messages") => void;
+  messagesSurface: {
+    pfPresent: boolean;
+    capable: boolean;
+    reason: string | null;
+    conversations: PolyforgeConversation[];
+    error: string | null;
+    selectedConversation: string | null;
+    onSelectConversation: (id: string | null) => void;
+    messages: PolyforgeMessage[];
+    initialPageLoaded: boolean;
+    blocked: boolean;
+    loadingOlder: boolean;
+    onLoadOlder: () => void;
+    onAcknowledge: () => void;
+    onSend: (input: { to: string; text: string; aboutWi?: string; replyTo?: string }) => Promise<unknown>;
+    onAnalyze: (messageId: string) => Promise<string>;
+    analyses: Record<string, string>;
+    onOpenAnchor: (ref: string) => void;
+    unreadTotal: number;
+  };
 }) {
   const { t, locale } = useI18n();
 
@@ -428,9 +455,48 @@ export function PolyforgePanel({
         </button>
       </div>
 
+      {/* Jobs | Messages tab strip. The unread indicator is
+          its own element beside the label: it never replaces any badge. */}
+      <div role="tablist" aria-label={t("polyforge.title")} style={{ display: "flex", borderBottom: "1px solid var(--border)", flexShrink: 0 }}>
+        <button type="button" role="tab" aria-selected={activeTab === "jobs"}
+          onClick={() => onActiveTab("jobs")}
+          style={{ flex: 1, padding: "6px 12px", background: activeTab === "jobs" ? "var(--bg-selected)" : "none", border: "none", borderBottom: activeTab === "jobs" ? "2px solid var(--accent)" : "2px solid transparent", color: activeTab === "jobs" ? "var(--text)" : "var(--text-muted)", cursor: "pointer", fontSize: 12 }}>
+          {t("polyforge.messages.jobsTab")}
+        </button>
+        <button type="button" role="tab" aria-selected={activeTab === "messages"}
+          onClick={() => onActiveTab("messages")}
+          style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "6px 12px", background: activeTab === "messages" ? "var(--bg-selected)" : "none", border: "none", borderBottom: activeTab === "messages" ? "2px solid var(--accent)" : "2px solid transparent", color: activeTab === "messages" ? "var(--text)" : "var(--text-muted)", cursor: "pointer", fontSize: 12 }}>
+          {t("polyforge.messages.tab")}
+          {messagesSurface.unreadTotal > 0 && (
+            <span aria-label={t("polyforge.messages.unread")} title={t("polyforge.messages.unread")}
+              style={{ width: 8, height: 8, borderRadius: 4, background: "var(--accent)", display: "inline-block" }} />
+          )}
+        </button>
+      </div>
+
       {/* Body */}
       <div style={{ flex: 1, minHeight: 0, overflow: "hidden", display: "flex", flexDirection: "column" }}>
-        {opsStatus ? (
+        {activeTab === "messages" ? (
+          <PolyforgeMessages
+            pfPresent={messagesSurface.pfPresent}
+            capable={messagesSurface.capable}
+            reason={messagesSurface.reason}
+            conversations={messagesSurface.conversations}
+            error={messagesSurface.error}
+            selectedConversation={messagesSurface.selectedConversation}
+            onSelectConversation={messagesSurface.onSelectConversation}
+            messages={messagesSurface.messages}
+            initialPageLoaded={messagesSurface.initialPageLoaded}
+            blocked={messagesSurface.blocked}
+            loadingOlder={messagesSurface.loadingOlder}
+            onLoadOlder={messagesSurface.onLoadOlder}
+            onAcknowledge={messagesSurface.onAcknowledge}
+            onSend={messagesSurface.onSend}
+            onAnalyze={messagesSurface.onAnalyze}
+            analyses={messagesSurface.analyses}
+            onOpenAnchor={messagesSurface.onOpenAnchor}
+          />
+        ) : opsStatus ? (
           <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
             {/* Queue line + job list */}
             <div style={{ maxHeight: "45%", overflowY: "auto", borderBottom: "1px solid var(--border)" }}>

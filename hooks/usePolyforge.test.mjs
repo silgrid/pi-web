@@ -70,3 +70,50 @@ test("pi#113: refreshStatus returns its settle promise for the manual-refresh fe
   assert.match(body, /\.catch\(\(\) => \{/);
   assert.match(body, /return fetch\("\/api\/polyforge\/status"\)/);
 });
+
+test("messages reuse the dock cadence and add no timer of their own", () => {
+  assert.match(source, /setInterval\(refreshMessages, panelOpen \? OPEN_STATUS_POLL_MS : CLOSED_STATUS_POLL_MS\)/);
+  assert.equal((source.match(/const (OPEN|CLOSED)_[A-Z_]+_MS =/g) ?? []).length, 3, "only the existing three cadence constants");
+  assert.match(source, /const OPEN_WATCH_POLL_MS = 3000;/, "the open conversation refresh reuses the 3 s tick");
+  assert.match(source, /setInterval\(\(\) => refreshOpen\(selectedConversation\), OPEN_WATCH_POLL_MS\)/);
+});
+
+test("one acknowledge per advance, naming the newest displayed seq", () => {
+  assert.match(source, /import \{[\s\S]*ackDecision,[\s\S]*\} from "@\/lib\/polyforge-messages-pure"/);
+  assert.match(source, /newestDisplayedSeq/);
+  assert.match(source, /if \(seq <= \(lastAcked\.current\[conversationId\] \?\? 0\)\) return Promise\.resolve\(\);/, "already-acked seq is a no-op");
+  assert.match(source, /lastAcked\.current\[conversationId\] = seq;/, "the optimistic stamp prevents a duplicate ack");
+  assert.match(source, /if \(!statusReady\) return;/, "the blocked state is judged on this opening's own status read");
+  assert.match(source, /explicit: true/, "the explicit gesture bypasses the blocked/visibility gate");
+});
+
+test("no message content or analysis is persisted in the browser", () => {
+  assert.doesNotMatch(source, /(?:window\.)?(?:localStorage|sessionStorage)\./, "the hook writes neither storage");
+  assert.match(source, /if \(!panelOpen\) setAnalyses\(\{\}\);/, "closing the dock drops the transient conclusion");
+});
+
+test("paging reads backwards, refresh reads forwards", () => {
+  assert.match(source, /\?before=\$\{oldest\}/);
+  assert.match(source, /\?after=\$\{newest\}/);
+  assert.match(source, /mergeOlderPage\(previous, older\)/);
+  assert.match(source, /mergeNewestPage\(previous, newer\)/);
+  assert.match(source, /setHasOlder\(body\.has_older === true\)/, "paging ends on page fullness, not seq 1");
+  assert.doesNotMatch(source, /page\[0\]\.seq > 1/, "the global AUTOINCREMENT seq is not a paging bound");
+  assert.match(source, /blocked,/, "the messages surface receives the blocked state");
+});
+
+test("the first settled page is exposed so the panel can position while blocked", () => {
+  assert.match(source, /setInitialPageLoaded\(conversationId\)/);
+  assert.match(source, /initialPageLoaded: selectedConversation !== null && initialPageLoaded === selectedConversation/);
+});
+
+test("refreshOpen returns its fetch and a list send opens the resulting conversation", () => {
+  const start = source.indexOf("const refreshOpen = useCallback");
+  const end = source.indexOf("}, []);", start);
+  const body = source.slice(start, end);
+  assert.match(body, /return fetch\(`\/api\/polyforge\/messages\/\$\{encodeURIComponent\(conversationId\)\}\?after=\$\{newest\}`\)/);
+  assert.match(source, /const listBody = await refreshMessages\(\);/);
+  assert.match(source, /const match = rows\.find\(\(row\) => row\.peer === input\.to\);/);
+  assert.match(source, /if \(match\) selectConversation\(match\.id\);/);
+  assert.match(source, /if \(selectedConversation\) \{\s*\/\/ Await the open conversation's refresh/);
+});
