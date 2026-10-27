@@ -99,10 +99,11 @@ export class PolyforgeError extends Error {
 
 /**
  * A single closed positional: slug `proj#123` (project part `[A-Za-z0-9]`
- * then dash-safe) or id `wi_…`. Anything else (spaces, flags, `;`) is
- * refused — the ref never reaches argv.
+ * then dash-safe), id `wi_…`, or a message anchor's `project-123` form
+ * (a sent anchor is the work item's stable short reference).
+ * Anything else (spaces, flags, `;`) is refused — the ref never reaches argv.
  */
-const WI_REF_PATTERN = /^(wi_[A-Za-z0-9]+|[A-Za-z0-9][A-Za-z0-9_-]*#\d+)$/;
+const WI_REF_PATTERN = /^(wi_[A-Za-z0-9]+|[A-Za-z0-9][A-Za-z0-9_-]*#\d+|[A-Za-z0-9][A-Za-z0-9_-]*-\d+)$/;
 
 export function isPolyforgeWiRef(value: unknown): value is string {
   return typeof value === "string" && WI_REF_PATTERN.test(value);
@@ -572,6 +573,8 @@ export function sanitizeWatch(machine: unknown): PolyforgeWatchStatus | null {
     declared_steps?: unknown;
   };
   if (!ex.steps || typeof ex.steps !== "object") return null;
+  // `work_item` is the daemon's wire field (internal/common/api/machines_face.go);
+  // a `wi`-only document is not a watch snapshot.
   const wi = toTrimmedString(m.work_item);
   const slug = toTrimmedString(m.slug);
   if (!wi || !slug) return null;

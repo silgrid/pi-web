@@ -65,7 +65,7 @@ export function saveShowHiddenPreference(storage: StorageLike, value: boolean): 
 }
 
 /**
- * Composed show-hidden lifecycle (review P2 coverage): the production
+ * Composed show-hidden lifecycle (the review finding coverage): the production
  * wiring the picker runs at mount and on toggle, as ONE seam so behavioral
  * tests drive the real initialization + current-directory reload
  * composition (navigate away, toggle, showHidden=true on the CURRENT path,
@@ -140,7 +140,7 @@ export function createBrowseController(options: {
   // The directory whose listing is currently DISPLAYED. It advances ONLY on
   // a successful browse: a failed navigation must never become the refetch
   // target, so the show-hidden toggle keeps operating on the directory the
-  // user actually sees, never the failed target (review P2 regression).
+  // user actually sees, never the failed target (the review finding regression).
   let appliedDirectory: string | undefined;
 
   async function browse(directory?: string): Promise<void> {

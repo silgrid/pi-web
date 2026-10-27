@@ -85,7 +85,7 @@ export function setShowBuildOutputs(
   // write targeted), never the optimistic request: when storage is
   // unavailable or the write throws, the preference stays false, and every
   // surface must agree on that instead of half-applying the requested
-  // value (review B1, pi#50).
+  // value (the review finding, pi#50).
   emitBuildOutputsChange({ value: getShowBuildOutputs(storage) }, eventTarget);
 }
 

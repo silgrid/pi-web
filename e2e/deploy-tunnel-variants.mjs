@@ -10,11 +10,11 @@
 //      PID, new URL, old process dead);
 //   3. named tunnel, consecutive deploys: the `cloudflared tunnel --config`
 //      process is reused (PID unchanged);
-//   4. legacy session recycle (review B1): a session pre-seeded the way
+//   4. legacy session recycle (the review finding): a session pre-seeded the way
 //      pre-pi#107 deploys and the README autostart recipe create it — an
 //      unnamed loop window running pi-web — must converge on one deploy:
 //      the old loop process dead, exactly one (named) loop window left;
-//   5. tailscale serve (review B3): two deploys with PIWEB_EXPOSE=tailscale
+//   5. tailscale serve (the review finding): two deploys with PIWEB_EXPOSE=tailscale
 //      keep the serve pane PID unchanged; a PIWEB_PORT change replaces the
 //      serve holder and leaves exactly one 'serve' window.
 //
@@ -28,7 +28,7 @@
 // real cloudflared binary holds its command line — that is what lets the
 // pgrep identity see it. Every deploy also runs with HOME pointed at the
 // scratch dir, so the stable quick-tunnel log (~/.piweb/...) never touches
-// the real home directory (review N2).
+// the real home directory (the review finding).
 //
 // Run: node e2e/deploy-tunnel-variants.mjs   (from the repository root)
 import assert from "node:assert/strict";
@@ -222,7 +222,7 @@ const deploy = async ({ expose = "cloudflare", tunnel, port, target = session })
     ...process.env,
     PATH: `${stubbin}:${process.env.PATH}`,
     TMPDIR: scratch,
-    HOME: scratch, // keep ~/.piweb residue inside the scratch dir (review N2)
+    HOME: scratch, // keep ~/.piweb residue inside the scratch dir (the review finding)
     PIWEB_EXPOSE: expose,
     PIWEB_TMUX_SESSION: target,
     PIWEB_PORT: String(port),
@@ -256,7 +256,7 @@ try {
   assert.ok(url1 && url2, "deploy output must report the quick-tunnel URL");
   assert.equal(url2, url1, `pi#107 (quick): URL must be reused; observed ${url1} -> ${url2}`);
   // The pi-web loop window is recycled even while the tunnel is reused —
-  // its PID must change on every deploy (review B1).
+  // its PID must change on every deploy (the review finding).
   assert.ok(pidList("piweb").length >= 2, "each deploy must start its own pi-web loop process");
   assert.notEqual(
     pidList("piweb")[1],
@@ -289,7 +289,7 @@ try {
     "pi#107 (named): the pi-web loop PID must change across deploys (window recycled)",
   );
 
-  // --- 4. legacy session: unnamed loop window is recycled (review B1) -----
+  // --- 4. legacy session: unnamed loop window is recycled (the review finding) -----
   // Pre-seed the scratch session the way pre-pi#107 deploys and the README
   // autostart recipe do: one unnamed window running the pi-web loop.
   spawnSync("tmux", ["new-session", "-d", "-s", legacySession, join(stubbin, "pi-web")], { encoding: "utf8" });
@@ -311,7 +311,7 @@ try {
   );
 
   // --- 5. tailscale serve: holder reuse and port-change replacement ------
-  // (review B3: two deploys keep the serve pane PID; a port change replaces
+  // (the review finding: two deploys keep the serve pane PID; a port change replaces
   // the holder and leaves exactly one 'serve' window.)
   const ts1 = await deploy({ expose: "tailscale", port: portT1, target: tsSession });
   assert.match(ts1.stdout, /Starting 'tailscale serve'/, "the first tailscale deploy must start the serve holder");

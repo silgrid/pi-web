@@ -574,3 +574,23 @@ test("pi#120: with a job selected, the whole detail is ONE vertical scroll regio
   // scroll) — the graph container keeps its overflow-hidden wrap container.
   assert.match(source, /flexWrap: "wrap", alignItems: "center", rowGap: 6/, "the graph node row still wraps");
 });
+
+test("the dock adds Jobs | Messages tabs with an unread dot of its own", () => {
+  assert.match(source, /role="tablist"/);
+  assert.match(source, /role="tab" aria-selected=\{activeTab === "jobs"\}/);
+  assert.match(source, /role="tab" aria-selected=\{activeTab === "messages"\}/);
+  assert.match(source, /t\("polyforge\.messages\.jobsTab"\)/);
+  assert.match(source, /t\("polyforge\.messages\.tab"\)/);
+  assert.match(source, /messagesSurface\.unreadTotal > 0/);
+  assert.match(source, /aria-label=\{t\("polyforge\.messages\.unread"\)\}/, "the dot is named unread");
+  assert.match(source, /activeTab === "messages" \? \(\s*<PolyforgeMessages/, "the Messages tab renders the messages surface");
+});
+
+test("the Jobs content is unchanged behind the tab switch", () => {
+  const jobListStart = source.indexOf("{/* Queue line + job list */}");
+  const jobListEnd = source.indexOf("{/* Detail for the selected work item */}");
+  assert.ok(jobListStart >= 0 && jobListEnd > jobListStart, "the Jobs body keeps its block markers");
+  const jobs = source.slice(jobListStart, jobListEnd);
+  assert.match(jobs, /jobs\.map\(\(job: PolyforgeJob\) =>/);
+  assert.match(jobs, /opsStatus\.queue\.running/, "the queue running/max line stays");
+});

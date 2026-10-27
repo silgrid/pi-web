@@ -195,3 +195,20 @@ test("pi#120: both mobile sheets drag-resize through one shared mechanism; each 
   // branches keep no height resize (the pi#117 dock resizer is width-only).
   assert.equal((source.match(/pf-sheet-resize-handle/g) ?? []).length, 2, "only the two mobile sheets carry a sheet handle");
 });
+
+test("the unread dot is its own element beside the running-count badge", () => {
+  assert.match(source, /pfUnreadTotal > 0 && \(/);
+  assert.match(source, /aria-label=\{translate\("polyforge\.messages\.unread"\)\}/);
+  const dotIndex = source.indexOf('aria-label={translate("polyforge.messages.unread")}');
+  const badgeIndex = source.indexOf("aria-label={String(pfRunningCount)}");
+  assert.ok(dotIndex >= 0 && badgeIndex > dotIndex, "the running badge still renders separately after the unread dot");
+  assert.match(source, /\{pfRunningCount > 9 \? "9\+" : pfRunningCount\}/, "the running count is not replaced");
+});
+
+test("the shell passes the messages surface and tab state into both dock branches", () => {
+  assert.match(source, /const pfMessagesSurface = \{/);
+  assert.match(source, /onOpenAnchor: openPfAnchor/);
+  assert.equal((source.match(/messagesSurface=\{pfMessagesSurface\}/g) ?? []).length, 2, "desktop dock and mobile sheet share the surface");
+  assert.match(source, /activeTab=\{pfActiveTab\}/);
+  assert.match(source, /onActiveTab=\{setPfActiveTab\}/);
+});

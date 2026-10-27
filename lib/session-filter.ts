@@ -250,7 +250,7 @@ export function isFamilyRowFiltered(
 }
 
 /**
- * Live store (review B1): the sidebar and the Settings editor share ONE
+ * Live store (the review finding): the sidebar and the Settings editor share ONE
  * in-memory state, persisted best-effort on every write and fanned out to
  * subscribers — so a rules edit or toggle in Settings updates the rendered
  * sidebar immediately in the same window (no remount needed). The snapshot

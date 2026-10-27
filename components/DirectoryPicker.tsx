@@ -120,7 +120,7 @@ export function createRowPinHandler(options: {
 }
 
 /**
- * Error-lifecycle seam (review P2): the picker's browse, pin and manage
+ * Error-lifecycle seam (the review finding): the picker's browse, pin and manage
  * errors are managed by ONE production-used helper so stale errors can
  * never mask a fresh failure —
  *
@@ -263,7 +263,7 @@ export function dialogEscapeDismisses(
 }
 
 /**
- * Create-flow seam (review P2 races): the picker's new-folder/new-file
+ * Create-flow seam (the review finding races): the picker's new-folder/new-file
  * submission lifecycle, as ONE production-used helper so tests drive the
  * real guards —
  *
@@ -420,7 +420,7 @@ export function createRowCreateFlow(deps: {
             deps.setKind(null);
             deps.setName("");
             if (submittedScope === "browse") {
-              // Browse-row folder (review B2): the created entry is a child
+              // Browse-row folder (the review finding): the created entry is a child
               // of the ROW's directory and can never appear in the parent
               // listing — enter the row's directory so the result is
               // immediately visible.
@@ -1201,7 +1201,7 @@ export function DirectoryPicker({ onCancel, onSelect, initialPath, busy = false,
   const [createBusy, setCreateBusy] = useState(false);
   const [createNotice, setCreateNotice] = useState<string | null>(null);
 
-  // Error lifecycle (review P2): one production-used seam owns clearing —
+  // Error lifecycle (the review finding): one production-used seam owns clearing —
   // new requests reset stale errors, success clears browse errors, and a
   // pin failure can never be masked by a leftover browse error.
   const pickerErrors = useMemo(() => createPickerErrorState({ setLoadError, setPinError, setManageError }), []);
@@ -1263,7 +1263,7 @@ export function DirectoryPicker({ onCancel, onSelect, initialPath, busy = false,
   // the create flow at submit and completion time (state is async).
   const currentPathRef = useRef("");
 
-  // Create-flow seam (review P2 races): open/cancel/submit all go through
+  // Create-flow seam (the review finding races): open/cancel/submit all go through
   // ONE production helper whose guards the tests drive directly.
   const createFlow = useMemo(() => createCreateFlow({
     t,

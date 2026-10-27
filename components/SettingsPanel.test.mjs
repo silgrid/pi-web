@@ -183,7 +183,7 @@ test("the general area hosts the session filter section with the rules editor an
 });
 
 test("the session filter editor persists on change and hydrates after mount, never writing on first render", () => {
-  // Every edit routes through the LIVE store setters (review B1): the
+  // Every edit routes through the LIVE store setters (the review finding): the
   // sidebar subscribes to the same store and re-filters immediately, while
   // persistence stays best-effort inside the store.
   assert.match(

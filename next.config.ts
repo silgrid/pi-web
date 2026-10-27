@@ -5,6 +5,13 @@ import { fileURLToPath } from "url";
 
 const configDir = dirname(fileURLToPath(import.meta.url));
 const { version } = JSON.parse(readFileSync(join(configDir, "package.json"), "utf8")) as { version: string };
+// A release never bumps main's package.json (release.sh is tag-only), so the
+// value above is a development one on a tagged tree. release.yml hands the
+// pushed tag's version to the build as PI_WEB_RELEASE_VERSION; that wins, and
+// only a local/dev build without it falls back to package.json. The UI renders
+// `v<value>` itself (ChatWindow, SessionSidebar), so the tag's leading `v` is
+// stripped here rather than in the workflow — either side may hand us `v0.1.4`.
+const appVersion = (process.env.PI_WEB_RELEASE_VERSION || version).replace(/^v/, "");
 let piVersion = "unknown";
 try {
   const piPkgPath = join(configDir, "node_modules/@earendil-works/pi-coding-agent/package.json");
@@ -123,7 +130,7 @@ const nextConfig: NextConfig = {
     ];
   },
   env: {
-    NEXT_PUBLIC_APP_VERSION: version,
+    NEXT_PUBLIC_APP_VERSION: appVersion,
     NEXT_PUBLIC_PI_VERSION: piVersion,
   },
 };

@@ -1907,8 +1907,6 @@
 
 /* the Polyforge configuration panel rows. */
 .polyforge-config-panel { display: flex; flex-direction: column; gap: 8px; }
-.polyforge-config-row,
-.polyforge-config-step,
 .polyforge-config-history-row {
   display: flex;
   align-items: center;
@@ -1916,8 +1914,94 @@
   flex-wrap: wrap;
   font-size: 12px;
 }
-.polyforge-config-key { font-family: var(--font-mono); min-width: 190px; }
-.polyforge-config-class { color: var(--text-muted); min-width: 90px; }
+/* source cards, each one five-column grid
+   (key | reload class | file value | daemon value | actions). Rows are
+   subgrids of the card's grid so every cell lines up across rows. */
+.polyforge-config-card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-panel);
+}
+.polyforge-config-card-title { margin: 0; font-size: 12px; font-weight: 600; color: var(--text); }
+.polyforge-config-card-hint { margin: 0 0 4px; font-size: 11px; color: var(--text-muted); }
+.polyforge-config-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) auto minmax(0, 1.5fr) minmax(0, 1fr) auto;
+  gap: 6px 10px;
+  align-items: center;
+  font-size: 12px;
+}
+.polyforge-config-grid-header,
+.polyforge-config-row {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: minmax(0, 1.2fr) auto minmax(0, 1.5fr) minmax(0, 1fr) auto;
+  grid-template-columns: subgrid;
+  align-items: center;
+}
+.polyforge-config-grid-header { font-size: 11px; color: var(--text-dim); }
+.polyforge-config-row > * { min-width: 0; }
+.polyforge-config-file > input { width: 100%; min-width: 0; box-sizing: border-box; }
+.polyforge-config-key { font-family: var(--font-mono); overflow-wrap: anywhere; }
+.polyforge-config-workspace-path { font-family: var(--font-mono); overflow-wrap: anywhere; }
+.polyforge-config-badge {
+  display: inline-block;
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
 .polyforge-config-value { font-family: var(--font-mono); word-break: break-all; }
-.polyforge-config-daemon { color: var(--text-muted); }
+.polyforge-config-row.is-readonly .polyforge-config-value { color: var(--text-muted); }
+.polyforge-config-daemon { color: var(--text-muted); overflow-wrap: anywhere; }
+.polyforge-config-empty { color: var(--text-dim); }
+.polyforge-config-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.polyforge-config-chip {
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--bg-hover);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text);
+}
+/* Declared candidates: one collapsible group per project, each step a line
+   with its models as chips on the line below. */
+.polyforge-config-candidate-group { font-size: 12px; }
+.polyforge-config-candidate-group > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 0;
+  cursor: pointer;
+}
+.polyforge-config-candidate-group > summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.polyforge-config-candidate-project { font-family: var(--font-mono); font-weight: 600; }
+.polyforge-config-candidate-count { color: var(--text-muted); font-size: 11px; }
+.polyforge-config-candidate-step {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 0 4px 16px;
+  min-width: 0;
+}
+@media (max-width: 640px) {
+  /* Phones: the same cells stack in one column; the header row hides. */
+  .polyforge-config-grid { grid-template-columns: minmax(0, 1fr); }
+  .polyforge-config-grid-header { display: none; }
+  .polyforge-config-row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 4px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid var(--border);
+  }
+}
 .polyforge-config-history { display: flex; flex-direction: column; gap: 4px; }

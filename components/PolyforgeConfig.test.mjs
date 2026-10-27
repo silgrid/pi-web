@@ -179,3 +179,96 @@ test("visible reasons: capability floor, unmapped cwd and incomplete candidates 
   assert.match(source, /config\.steps_complete === false/);
   assert.match(source, /polyforge\.settings\.configMachineScope/);
 });
+
+test("items render in source cards with a title and a visible one-line hint", () => {
+  assert.match(source, /groupConfigItems\(config\.items \?\? \[\]\)\.map\(\(group\) =>/);
+  assert.match(source, /<p className="polyforge-config-card-title">\{t\(GROUP_TITLE\[group\.id\]\)\}<\/p>/);
+  assert.match(source, /<p className="polyforge-config-card-hint">\{t\(GROUP_HINT\[group\.id\]\)\}<\/p>/);
+  for (const id of ["Flat", "Daemon", "Workspace", "Summarize"]) {
+    assert.match(source, new RegExp(`"polyforge\\.settings\\.configGroup${id}"`), `card title ${id}`);
+    assert.match(source, new RegExp(`"polyforge\\.settings\\.configGroup${id}Hint"`), `card hint ${id}`);
+  }
+  // The daemon card uses pf's five [daemon] keys; the daemon column stays the three live keys.
+  assert.match(source, /function isDaemonColumnKey\(key: string\): boolean \{\s*\n\s*return key === "max_concurrent_jobs" \|\| key === "step_timeout" \|\| key === "stall_window";/);
+});
+
+test("every row renders all five grid cells, never gated behind writable", () => {
+  for (const label of ["configColKey", "configColClass", "configColFile", "configColDaemon"]) {
+    assert.match(source, new RegExp(`t\\("polyforge\\.settings\\.${label}"\\)`), `grid header ${label}`);
+  }
+  const row = source.slice(source.indexOf('className={`polyforge-config-row'), source.indexOf("</section>"));
+  const cells = ["polyforge-config-key", "polyforge-config-class", "polyforge-config-file", "polyforge-config-daemon", "polyforge-config-actions"];
+  let at = 0;
+  for (const cell of cells) {
+    const index = row.indexOf(`<span className="${cell}">`, at);
+    assert.ok(index > at, `${cell} renders unconditionally, in column order`);
+    // The line opening the cell is the cell itself, not a `cond && (` wrapper.
+    const before = row.slice(row.lastIndexOf("\n", index), index);
+    assert.match(before, /^\n\s*$/, `${cell} is not wrapped in a condition`);
+    at = index;
+  }
+  assert.match(source, /<span className="polyforge-config-badge">\{item\.class\}<\/span>/, "the reload class is a badge");
+  assert.match(source, /<span className="polyforge-config-empty">\{unset\}<\/span>/, "unset values show the placeholder");
+  assert.match(source, /const unset = t\("polyforge\.settings\.configUnset"\)/);
+  assert.match(source, /is-readonly/, "read-only rows are muted");
+});
+
+test("a workspace row shows the path and project chips, never the raw TOML header", () => {
+  assert.match(source, /workspaceSectionPath\(item\.key\)/);
+  assert.match(source, /shortenPath\(workspacePath\)/);
+  assert.match(source, /workspaceProjects\(item\.value\)\.map\(\(project\) =>/);
+  assert.match(source, /<span key=\{project\} className="polyforge-config-chip">\{project\}<\/span>/);
+  assert.match(source, /aria-label=\{t\("polyforge\.settings\.configProjects"\)\}/);
+  // The raw key renders only when the header did not parse (a visible degradation).
+  assert.match(source, /workspacePath !== null\s*\n\s*\? <span className="polyforge-config-workspace-path">/);
+});
+
+test("the grid CSS aligns rows by subgrid and stacks on phones", async () => {
+  const css = await readFile(new URL("../app/settings.css", import.meta.url), "utf8");
+  for (const cls of ["polyforge-config-card", "polyforge-config-grid", "polyforge-config-badge", "polyforge-config-empty", "polyforge-config-chips", "polyforge-config-chip", "polyforge-config-workspace-path"]) {
+    assert.match(css, new RegExp(`\\.${cls}\\b`), `${cls} is styled`);
+  }
+  assert.match(css, /\.polyforge-config-row \{[^}]*grid-template-columns: subgrid;/);
+  assert.match(css, /@media \(max-width: 640px\) \{[^@]*\.polyforge-config-grid-header \{ display: none; \}/);
+});
+
+test("the card, column and placeholder strings exist in all three locales", async () => {
+  for (const locale of ["en", "zh-CN", "zh-TW"]) {
+    const text = await readFile(new URL(`../lib/i18n/messages/${locale}.ts`, import.meta.url), "utf8");
+    for (const key of [
+      "configGroupFlat", "configGroupFlatHint", "configGroupDaemon", "configGroupDaemonHint",
+      "configGroupWorkspace", "configGroupWorkspaceHint", "configGroupSummarize", "configGroupSummarizeHint",
+      "configColKey", "configColClass", "configColFile", "configColDaemon", "configUnset", "configProjects",
+    ]) {
+      assert.match(text, new RegExp(`"polyforge\\.settings\\.${key}": "`), `${locale} must carry ${key}`);
+    }
+  }
+});
+
+test("candidates are collapsible per-project groups with model chips", () => {
+  const card = source.slice(source.indexOf('polyforge-config-card polyforge-config-steps'), source.indexOf("config.steps_complete === false"));
+  assert.match(card, /groupStepsByProject\(config\.steps\)\.map\(\(group\) =>/);
+  assert.match(card, /<details key=\{group\.project \?\? ""\} className="polyforge-config-candidate-group" open>/, "groups are native details, open by default");
+  assert.match(card, /<summary>/);
+  assert.match(card, /t\("polyforge\.settings\.configCandidateCount", \{ count: group\.steps\.length \}\)/);
+  assert.match(card, /group\.project \?\? t\("polyforge\.settings\.configAllProjects"\)/);
+  assert.match(card, /\(step\.models \?\? \[\]\)\.map\(\(model, index\) =>/, "one chip per model, in pf's order");
+  assert.match(card, /className="polyforge-config-chip">\{model\}<\/span>/);
+  assert.match(card, /t\("polyforge\.settings\.configBundleDefault"\)/, "an undeclared step still says bundle default");
+  assert.match(card, /t\("polyforge\.settings\.configGroupCandidatesHint"\)/);
+  assert.doesNotMatch(card, /\.join\(", "\)/, "no flat comma-joined model list");
+});
+
+test("candidate group CSS and strings in all three locales", async () => {
+  const css = await readFile(new URL("../app/settings.css", import.meta.url), "utf8");
+  assert.match(css, /\.polyforge-config-candidate-group > summary \{/);
+  assert.match(css, /\.polyforge-config-candidate-group > summary:focus-visible \{/);
+  assert.match(css, /\.polyforge-config-candidate-step \{/);
+  for (const locale of ["en", "zh-CN", "zh-TW"]) {
+    const text = await readFile(new URL(`../lib/i18n/messages/${locale}.ts`, import.meta.url), "utf8");
+    for (const key of ["configGroupCandidatesHint", "configAllProjects"]) {
+      assert.match(text, new RegExp(`"polyforge\\.settings\\.${key}": "`), `${locale} must carry ${key}`);
+    }
+    assert.match(text, /"polyforge\.settings\.configCandidateCount": "[^"]*\{count\}/, `${locale}'s count interpolates {count}`);
+  }
+});
