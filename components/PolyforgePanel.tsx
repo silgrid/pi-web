@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import type { PolyforgeEvent, PolyforgeJob, PolyforgeOpsStatus, PolyforgeWatchStatus } from "@/lib/polyforge-status";
 import type { PolyforgeConversation, PolyforgeMessage } from "@/lib/polyforge-messages-pure";
 import { PolyforgeMessages } from "./PolyforgeMessages";
+import { PolyforgeMemory } from "./PolyforgeMemory";
 import { useI18n } from "@/hooks/useI18n";
 
 const STEP_STATUS_COLORS: Record<string, string> = {
@@ -274,6 +275,7 @@ export function PolyforgePanel({
   onRefresh,
   activeTab,
   onActiveTab,
+  memoryCwd,
   messagesSurface,
 }: {
   opsStatus: PolyforgeOpsStatus | null;
@@ -285,8 +287,10 @@ export function PolyforgePanel({
   // May return the status fetch's settle promise (usePolyforge.refreshStatus
   // does); the manual-refresh feedback (pi#113) awaits it.
   onRefresh: () => void | Promise<void>;
-  activeTab: "jobs" | "messages";
-  onActiveTab: (tab: "jobs" | "messages") => void;
+  activeTab: "jobs" | "messages" | "memory";
+  onActiveTab: (tab: "jobs" | "messages" | "memory") => void;
+  /** The session cwd the Memory tab scopes its project dropdown to. */
+  memoryCwd: string | null;
   messagesSurface: {
     pfPresent: boolean;
     capable: boolean;
@@ -472,6 +476,11 @@ export function PolyforgePanel({
               style={{ width: 8, height: 8, borderRadius: 4, background: "var(--accent)", display: "inline-block" }} />
           )}
         </button>
+        <button type="button" role="tab" aria-selected={activeTab === "memory"}
+          onClick={() => onActiveTab("memory")}
+          style={{ flex: 1, padding: "6px 12px", background: activeTab === "memory" ? "var(--bg-selected)" : "none", border: "none", borderBottom: activeTab === "memory" ? "2px solid var(--accent)" : "2px solid transparent", color: activeTab === "memory" ? "var(--text)" : "var(--text-muted)", cursor: "pointer", fontSize: 12 }}>
+          {t("polyforge.memory.tab")}
+        </button>
       </div>
 
       {/* Body */}
@@ -496,6 +505,8 @@ export function PolyforgePanel({
             analyses={messagesSurface.analyses}
             onOpenAnchor={messagesSurface.onOpenAnchor}
           />
+        ) : activeTab === "memory" ? (
+          <PolyforgeMemory cwd={memoryCwd} onOpenWorkItem={messagesSurface.onOpenAnchor} />
         ) : opsStatus ? (
           <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
             {/* Queue line + job list */}

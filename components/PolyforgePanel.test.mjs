@@ -594,3 +594,15 @@ test("the Jobs content is unchanged behind the tab switch", () => {
   assert.match(jobs, /jobs\.map\(\(job: PolyforgeJob\) =>/);
   assert.match(jobs, /opsStatus\.queue\.running/, "the queue running/max line stays");
 });
+
+test("the tab strip gains a third Memory tab and the body renders the memory surface", () => {
+  assert.match(source, /role="tab" aria-selected=\{activeTab === "memory"\}/);
+  assert.match(source, /t\("polyforge\.memory\.tab"\)/);
+  // The Messages branch stays pinned (the #56 assertion above); the Memory
+  // branch slots between it and the Jobs fallback.
+  assert.match(source, /activeTab === "messages" \? \(\s*<PolyforgeMessages[\s\S]*\) : activeTab === "memory" \? \(\s*<PolyforgeMemory cwd=\{memoryCwd\} onOpenWorkItem=\{messagesSurface\.onOpenAnchor\} \/>/);
+  assert.match(source, /memoryCwd: string \| null;/, "the panel takes the session cwd as a prop");
+  for (const [name, localeSource] of [["en", enSource], ["zh-CN", zhCNSource], ["zh-TW", zhTWSource]]) {
+    assert.match(localeSource, /"polyforge\.memory\.tab": "\S/, `${name} translates the tab label`);
+  }
+});

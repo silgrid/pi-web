@@ -99,27 +99,52 @@ probe; the section UI itself is in [settings-ui.md](settings-ui.md).
   (`isChatIdToken`, `lib/session-chat-id.ts`) before it can reach a response;
   pf's stderr never does.
 
-## Messages tab
+## Messages tab (layout redone in)
 
 The dock has two tabs, Jobs and Messages. The Messages tab is the human
-inbox: a member-only conversation list, a newest-page-first history with
-scroll-up paging, a composer (new message or reply), work-item anchors that
-open the existing Jobs detail, and the read-only analyzer on received
-messages. The list view — including the empty state — carries the
-new-message entry (recipient, text and an optional anchor); after a send the
-list refreshes and the resulting conversation opens. Inside an open
-conversation the recipient is that conversation's peer (not a free field),
-so a reply needs no typed user id. Files: `lib/polyforge-messages.ts` (pf
-transport, argv validation,
+inbox, laid out like Slack: the conversation list is a right-hand column
+(`clamp(120px, 35%, 220px)`, never shrinking, flush with the panel's right
+edge) with the 新消息 compose entry on top, the 单聊 and 群聊 sections (each
+always rendered, with its empty placeholder; any non-`direct` kind is a
+group) and rows carrying an initial-plus-colour avatar (FNV-1a hash of the
+peer id — the hash input is never rendered as text), the ellipsized display
+name and the unread badge. To its left sits the bubble stream pane: the open
+conversation's header shows the peer's avatar and display name, own bubbles
+are right-aligned with no name and no avatar, peer bubbles are left-aligned
+with the avatar and name only on the first message of a consecutive run, and
+every bubble keeps its timestamp (HH:MM from `created_at`), work-item
+anchor and reply quote. Every identity surface renders the display name or
+the 未知用户 placeholder with a ? avatar — a raw user id is never rendered,
+titled or labelled anywhere. An absent or empty `peer_name` (the old-aihub
+transient included) is the placeholder, never an id fallback. With nothing
+open the left pane shows 选择一个会话 and acks nothing; the click on a row is
+the opening and acknowledgment gesture. Below 640px the same component shows
+one view at a time — the list while nothing is open (filling the sheet's
+full width, no divider; the clamp is the desktop column's), the chat with
+the ← back control while a conversation is open — so the ack and scroll
+refs survive the switch; desktop keeps both columns at every dock width. The
+new-message entry expands to the recipient picker (existing conversation
+peers only, by display name — no name→id resolution, no directory) and the
+typed-user-id field for a first contact; picking a peer sends to that
+conversation's peer id (never its name, and never a rendered id — the
+picked row is held by conversation id, so a disappeared row falls back to
+nothing picked); after a send the list refreshes
+and the resulting conversation opens — the send's own answer names it
+(`conversation_id` on the returned message), so the open never races the
+list read. Inside an open conversation the
+recipient is that conversation's peer (no recipient field at all — the
+header names the peer), so a reply needs no typed user id. Files:
+`lib/polyforge-messages.ts` (pf transport, argv validation,
 sanitizers, capability floor), `lib/polyforge-messages-pure.ts` (client-safe
-types, page merges, `ackDecision`, `splitAnchor`),
-`app/api/polyforge/messages/**` (the four routes), `components/PolyforgeMessages.tsx`.
+types, page merges, `ackDecision`, `splitAnchor`, the name/avatar/section
+helpers), `app/api/polyforge/messages/**` (the four routes),
+`components/PolyforgeMessages.tsx`.
 
 **Routes** (all re-check `isApiRequestAllowed` in-route; every read answers
 200 JSON, every write is a JSON-only POST):
 
 - `GET /api/polyforge/messages` → 200
-  `{pfPresent, pfVersion, capable, reason?, error?, conversations:[{id,kind,peer?,last_seq,unread,created_at}]}`.
+  `{pfPresent, pfVersion, capable, reason?, error?, conversations:[{id,kind,peer?,peer_name?,last_seq,unread,created_at}]}`.
   pf absent answers `{pfPresent:false,capable:false,conversations:[]}`; below
   the floor `{pfPresent:true,pfVersion,capable:false,reason}` and **no
   message verb is spawned**. All other list-read failures (a missing
@@ -128,12 +153,16 @@ types, page merges, `ackDecision`, `splitAnchor`),
   absent or below the floor, so a poll blip never shows a false upgrade
   notice and an open conversation stays on screen. The server reads the
   caller's own id once from `pf --json config list` (`user_id`), drops every
-  conversation it is not a member of, derives `peer` from `members`, and
-  drops both fields before the response: one list spawn, no
-  per-conversation preview fan-out.
+  conversation it is not a member of, derives `peer` from `members`, takes
+  `peer_name` from exactly the peer's own `member_names` key (only the
+  peer's name, never the caller's), and drops both raw fields before the
+  response: one list spawn, no per-conversation preview fan-out.
 - `GET /api/polyforge/messages/[id][?before=<seq>|?after=<seq>]` → 200
-  `{capable, messages:[{id,seq,text,about_wi?,reply_to?,created_at,mine}], last_seq, has_older}`.
-  No cursor asks for the newest page (`--before` above the newest, 50 rows);
+  `{capable, messages:[{id,seq,text,about_wi?,reply_to?,created_at,mine,conversation_id?}], last_seq, has_older}`.
+  `conversation_id?` is the message's own conversation, kept whenever the
+  sanitized message carries it (the send's answer relies on it to open the
+  conversation it landed in). No
+  cursor asks for the newest page (`--before` above the newest, 50 rows);
   `before` is scroll-up (the page just below that sequence); `after` is the
   open conversation's forward refresh on the 3 s tick. `has_older` is true
   only when the page was full (aihub's `seq` is a global AUTOINCREMENT, so
@@ -152,7 +181,7 @@ types, page merges, `ackDecision`, `splitAnchor`),
   200 `{error}` (this repo has no 5xx route path). The analyzer spawn waits
   at least five minutes (the ruling; a real one-shot is an LLM call).
 
-**Capability floor.** `POLYFORGE_MESSAGES_MINIMUM_PF_VERSION = "2.20.7"` in
+**Capability floor.** `POLYFORGE_MESSAGES_MINIMUM_PF_VERSION = "2.20.10"` in
 `lib/polyforge-messages.ts`, checked with `probePolyforgeVersion` +
 `isPolyforgeVersionBelowMinimum`. Below it the panel renders a visible
 "pf upgrade required" state with the reason and spawns no message verb; there
@@ -186,12 +215,83 @@ dropped when the dock closes, never written to storage or disk. Incoming
 messages never enter a chat session, an agent turn or the composer.
 
 **Sanitization.** The sanitizers are the only passport: a conversation keeps
-id/kind/peer/last_seq/unread/created_at, a message keeps
-id/seq/text/about_wi/reply_to/created_at/mine. `sender_id`, `members` and any
-unknown wire field are dropped; no route response, error, log line or history
+id/kind/peer/peer_name/last_seq/unread/created_at, a message keeps
+id/seq/text/about_wi/reply_to/created_at/mine plus its own optional
+`conversation_id` (a conversation id, not an identity — the send's answer
+carries it so its client can open the conversation the message landed in).
+`sender_id`, `members` and any
+unknown wire field are dropped; `peer_name` is read from exactly the peer's
+own `member_names` key — only the peer's name ever leaves, never the
+caller's; no route response, error, log line or history
 entry carries the pf user id, api key, server address, an environment value
 or another identity's unread state. pf's stderr is the only error text and is
 capped at 512 chars; the routes never `console.*` a request or response body.
+
+## Memory tab
+
+Search-then-view, pull-only. `lib/polyforge-memory-pure.ts` is the
+client-safe model (wire types, the six type filters, page size 20, result
+limit 200, collapse threshold 2000, validators, newest-first sort, page
+slicer, truncation test); `lib/polyforge-memory.ts` is the server module;
+`components/PolyforgeMemory.tsx` owns its state — no hook read, no timer, no
+storage. Fetches happen on three gestures only: the scope read when the tab
+first renders, the search on submit, the single-memory read on selection.
+Back restores the list, page and filters from component state without
+re-fetching.
+
+**Routes.** `GET /api/polyforge/memory?cwd=…` is two faces: without `q` it
+is the SCOPE read (capability plus the cwd's workspace projects, empty hit
+list, no memory verb — opening the tab reads nothing); with `q` (plus
+`project`, `type`, optional `tags`, optional `any=1`) it is the SEARCH:
+exactly one `pf --json recall --project <p> --limit 200 [<flags>] <q>`
+(`--type` is sent only for the five non-`*` values).
+`GET /api/polyforge/memory/[id]` is the single-memory read: one
+`pf --json memory show <id>`. Both answer 200 JSON on every failure (pf
+absent → `pfPresent:false`, below the floor → `capable:false` + reason, a
+failed spawn → `error` with pf's own bounded stderr); the only non-2xx
+answers are the in-route `isApiRequestAllowed` 403 and the 400s below.
+
+**Validation order.** Shape validation (`validateMemorySearch`: a keyword
+that is empty, starts with `-` or carries control bytes; a project not
+shaped like one; a type outside the six values; a bad tag list; on the show
+route a malformed `mem_` id) answers 400 BEFORE any pf process, the version
+probe included. Project MEMBERSHIP ("one of the projects the panel offered")
+is judged against the same `pf config` read that fills the dropdown — that
+read runs first and an off-list project answers 400 with no recall spawn,
+but after the config read. Zero pf processes would need a per-cwd scope
+cache, which the spec's non-goals forbid. An unmapped cwd answers 200 with
+`mapped:false` and no recall.
+
+**Passports.** A hit keeps exactly id/type/title/visibility/status/tags/
+related/work_item_id/created_at/updated_at/content_len — the search response
+carries no `content` or `content_excerpt`. The detail adds `content`, cut to
+at most 262144 UTF-8 bytes on a code-point boundary (`MEMORY_BODY_FORWARD_CAP`,
+pf's own human-mode cap; `--json` is never capped by pf, so this cap is
+ours). `owner_user_id`, `project_id`, `content_sha` and every unknown field
+are dropped. There is no truncation wire field: the client compares the
+body's UTF-8 byte length with `content_len` and shows the notice. The floor
+is `POLYFORGE_MEMORY_MINIMUM_PF_VERSION = "2.20.9"`; below it no memory verb
+is spawned. pf's stderr is the only error text (capped at 512), and no
+module or route calls `console.*` — a memory body never enters the log.
+
+**Body collapse.** A body whose `content_len` exceeds 2000 renders inside a
+CSS `maxHeight` clip with `overflow-y: hidden`; the markdown source is never
+sliced, so fences, tables and links survive. Expanding removes the clip and
+scrolls the body's end into view (the dock body is height-bounded, so
+unclipping alone would leave the last lines below the fold); collapsing
+restores the clip.
+
+**References.** `work_item_id` leaves through the shell's existing
+`openPfAnchor` (Jobs tab + the existing watch read); a `related` id opens in
+place through the same single-memory read; a null `work_item_id` renders no
+link. `related` and the copy control use `lib/clipboard.ts` `copyText`.
+
+**Project rule.** `readPolyforgeMemoryProjects(cwd)` is the config panel's
+cwd→workspace rule in one place: `pf --json config workspace --cwd <cwd>`,
+then the `[workspace."<name>"]` item of `pf --json config list`, split with
+the shared `workspaceProjects` helper
+(`components/polyforge-config-helpers.ts`). The config panel's own
+sanitizer is untouched.
 
 ## Subprocess contract
 
@@ -486,9 +586,21 @@ mobile sheet and the desktop dock, so both get the fix.
   open, 30 s while closed (the badge = queue running count; no badge while the
   daemon is down). With a selection while open: watch polls every 3 s; a null
   status keeps the previous snapshot, so the selection survives the job
-  leaving the job list until the user deselects. Stale responses are dropped
-  by sequence counters (effect cleanups advance them, never reset to an
-  observation + 1). `refreshStatus` returns its settle promise (pi#113) so a
+  leaving the job list until the user deselects. Stale status/watch responses
+  are dropped by their sequence counters (effect cleanups advance them, never
+  reset to an observation + 1); the Messages list read is accepted by
+  LANDING order instead — the mount/dock-open/tab burst fires concurrent
+  reads, the first body to land renders, and anything older than a landed
+  response is discarded — and page writes guard by conversation identity
+  (`selectedConversationRef`): a previous selection's in-flight page can
+  never land under the current one. The first list read starts at mount,
+  ungated on the presence probe — the route itself degrades (pf absent
+  answers `{pfPresent:false}`, below the floor spawns no verb). Once the
+  probe answers "absent" the effect reads nothing more (its re-runs on the
+  probe landing and on dock toggles return first, and the dock button that
+  reaches the tab is not rendered without pf), so a pf-less install issues
+  exactly one messages request, at mount; the poll interval requires
+  presence. `refreshStatus` returns its settle promise (pi#113) so a
   manual caller can show in-flight state; the mount probe and the interval
   polls ignore it.
 - `components/PolyforgePanel.tsx`: all jobs on the machine (no owner filter);

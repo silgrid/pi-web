@@ -212,3 +212,8 @@ test("the shell passes the messages surface and tab state into both dock branche
   assert.match(source, /activeTab=\{pfActiveTab\}/);
   assert.match(source, /onActiveTab=\{setPfActiveTab\}/);
 });
+
+test("both dock branches pass the memory cwd to the panel", () => {
+  assert.equal((source.match(/memoryCwd=\{projectTrustCwd\}/g) ?? []).length, 2, "mobile sheet and desktop dock share the session cwd");
+  assert.match(source, /const projectTrustCwd = selectedSession\?\.cwd \?\? effectiveNewSessionCwd;/, "the cwd is the config panel's own source");
+});
