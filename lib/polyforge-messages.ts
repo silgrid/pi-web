@@ -10,16 +10,21 @@ import { probePolyforgeVersion } from "./polyforge-status";
  * HTTP faces under `app/api/polyforge/messages/**` only degrade and answer.
  *
  * The sanitizers are the only passport off this module: a conversation keeps
- * id/kind/peer/last_seq/unread/created_at (member-only, peer derived from
- * `members`), a message keeps id/seq/text/about_wi/reply_to/created_at/mine
- * (mine derived from `sender_id` and the server-side pf config user id).
- * `sender_id` and `members` never leave the server, and no response carries
- * the pf user id, api key, server address or an environment value.
+ * id/kind/peer/peer_name/last_seq/unread/created_at (member-only, peer
+ * derived from `members`, peer_name from exactly the peer's own
+ * `member_names` key), a message keeps id/seq/text/about_wi/reply_to/created_at/mine
+ * (mine derived from `sender_id` and the server-side pf config user id) plus
+ * its own optional conversation_id — the conversation the message lives in,
+ * carried by a send's answer so its client can open that conversation
+ * without re-reading the list.
+ * `sender_id`, `members` and every other `member_names` key never leave the
+ * server, and no response carries the pf user id, api key, server address or
+ * an environment value.
  */
 
 /** Messages' own capability floor: the release that ships the split cursor,
- *  `pf msg ack` and `list --before`. */
-export const POLYFORGE_MESSAGES_MINIMUM_PF_VERSION = "2.20.7";
+ *  `pf msg ack`, `list --before` and the conversation list's `member_names`. */
+export const POLYFORGE_MESSAGES_MINIMUM_PF_VERSION = "2.20.10";
 
 const READ_TIMEOUT_MS = 15000;
 const WRITE_TIMEOUT_MS = 15000;
@@ -207,7 +212,20 @@ export function sanitizeConversation(raw: unknown, userId = ""): PolyforgeConver
     created_at: str(row.created_at),
   };
   const peer = userId ? members.find((member) => member !== userId) : "";
-  if (peer) conversation.peer = peer;
+  if (peer) {
+    conversation.peer = peer;
+    // Scope: exactly the peer's own key of member_names is read
+    //. The caller's own name and any other member's name
+    // never leave the server; a missing or non-string value — the
+    // old-aihub transient with no member_names at all included — reads as
+    // "" and renders as the unknown-user placeholder, never an id.
+    const names = row.member_names;
+    conversation.peer_name =
+      names && typeof names === "object" && !Array.isArray(names) &&
+        typeof (names as Record<string, unknown>)[peer] === "string"
+        ? ((names as Record<string, string>)[peer] as string).trim()
+        : "";
+  }
   return conversation;
 }
 
@@ -231,6 +249,11 @@ export function sanitizeMessage(raw: unknown, userId = ""): PolyforgeMessage | n
   if (about) message.about_wi = about;
   const reply = str(row.reply_to);
   if (reply) message.reply_to = reply;
+  // The conversation the message lives in (task-42): a send's answer carries
+  // it, so the client can open the resulting conversation without a second
+  // list read racing the polls. Shape-validated, same as the page reads.
+  const conversation = str(row.conversation_id);
+  if (isPolyforgeConversationId(conversation)) message.conversation_id = conversation;
   return message;
 }
 
@@ -318,7 +341,7 @@ export interface PolyforgeMessagesCapability {
   reason?: string;
 }
 
-/** The Messages floor gate: presence + the 2.20.7 capability floor. Below it
+/** The Messages floor gate: presence + the 2.20.10 capability floor. Below it
  *  no message verb is spawned (the panel renders the upgrade state). */
 export async function readPolyforgeMessagesCapability(): Promise<PolyforgeMessagesCapability> {
   const presence = await probePolyforgeVersion();
@@ -348,8 +371,14 @@ export async function readPolyforgeMessages(): Promise<PolyforgeMessagesRead> {
   let raw: unknown;
   let userId: string;
   try {
-    userId = await readPolyforgeUserId();
-    raw = await listConversationsRaw();
+    // The identity read and the list read are independent spawns: they run
+    // concurrently, so a fresh page's first list lands after one spawn's
+    // latency, not two (task-42: the list and the picker render on the first
+    // poll after the dock opens). Any failure keeps the same degraded answer.
+    [userId, raw] = await Promise.all([
+      readPolyforgeUserId(),
+      listConversationsRaw(),
+    ]);
   } catch (error) {
     // A list-read failure (missing user_id, AUTH-401, an unreachable aihub or
     // daemon) is NOT the capability floor: `capable:false` is reserved for pf
@@ -381,11 +410,14 @@ export async function readPolyforgeMessagesPage(
   if (!isPolyforgeConversationId(conversationId)) {
     throw new PolyforgeMessagesError("conversation must be a conversation id", "CORE-400");
   }
-  const userId = await readPolyforgeUserId();
   const effectiveBefore = before > 0 ? before : Number.MAX_SAFE_INTEGER;
-  const page = sanitizeMessagePage(
-    await listMessagesRaw(conversationId, effectiveBefore, 0, limit), userId,
-  );
+  // The identity and page reads are independent spawns: concurrent (task-42 —
+  // opening a conversation must settle after one spawn's latency, not two).
+  const [userId, rawPage] = await Promise.all([
+    readPolyforgeUserId(),
+    listMessagesRaw(conversationId, effectiveBefore, 0, limit),
+  ]);
+  const page = sanitizeMessagePage(rawPage, userId);
   return pageWithOldestFlag(page, limit);
 }
 
@@ -394,11 +426,14 @@ export async function readPolyforgeNewestPage(conversationId: string): Promise<P
   if (!isPolyforgeConversationId(conversationId)) {
     throw new PolyforgeMessagesError("conversation must be a conversation id", "CORE-400");
   }
-  const userId = await readPolyforgeUserId();
-  const page = sanitizeMessagePage(await runPfJson([
-    "--json", "msg", "list", "--conversation", conversationId,
-    "--before", NEWEST_BEFORE, "--limit", String(DEFAULT_PAGE_SIZE),
-  ]), userId);
+  const [userId, rawPage] = await Promise.all([
+    readPolyforgeUserId(),
+    runPfJson([
+      "--json", "msg", "list", "--conversation", conversationId,
+      "--before", NEWEST_BEFORE, "--limit", String(DEFAULT_PAGE_SIZE),
+    ]),
+  ]);
+  const page = sanitizeMessagePage(rawPage, userId);
   return pageWithOldestFlag(page, DEFAULT_PAGE_SIZE);
 }
 
@@ -409,8 +444,11 @@ export async function readPolyforgeNewerMessages(
   after: number,
 ): Promise<PolyforgeMessage[]> {
   if (!isPolyforgeConversationId(conversationId) || !isPositiveSeq(after)) return [];
-  const userId = await readPolyforgeUserId();
-  const page = sanitizeMessagePage(await listMessagesRaw(conversationId, 0, after, 50), userId);
+  const [userId, rawPage] = await Promise.all([
+    readPolyforgeUserId(),
+    listMessagesRaw(conversationId, 0, after, 50),
+  ]);
+  const page = sanitizeMessagePage(rawPage, userId);
   return page.messages;
 }
 

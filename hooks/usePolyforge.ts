@@ -15,8 +15,9 @@ import {
  * Messages tab.
  *
  * - One status fetch at mount decides presence (`pfPresent`); a pf-less
- *   install never polls again — the only HTTP it ever sees is that single
- *   2xx request, so unrelated e2e flows log no console errors.
+ *   install never polls again — the only HTTP it ever sees is that status
+ *   probe plus exactly one messages read at mount (both 2xx), so unrelated
+ *   e2e flows log no console errors.
  * - With pf present: the status route is polled every 3s while the panel is
  *   open and every 30s while closed (badge).
  * - While open with a selection: the watch route is polled every 3s. A null
@@ -61,7 +62,7 @@ export function nextWatchSnapshot(
   return body?.status ?? previous;
 }
 
-export type PolyforgeTab = "jobs" | "messages";
+export type PolyforgeTab = "jobs" | "messages" | "memory";
 
 export interface SendMessageInput {
   to: string;
@@ -101,11 +102,26 @@ export function usePolyforge(panelOpen: boolean) {
   const statusSeq = useRef(0);
   const watchSeq = useRef(0);
   const messagesSeq = useRef(0);
-  const pageSeq = useRef(0);
+  // The seq of the newest messages response that has LANDED (see
+  // refreshMessages: acceptance is by landing order, not start order).
+  const messagesLandedSeq = useRef(0);
+  // Mirrors selectedConversation for the page writes' identity guard (task-42):
+  // a page write applies only to the conversation it belongs to while that
+  // conversation is the open one — a response from a previous selection can
+  // never land under the current one, and switching conversations no longer
+  // invalidates the new selection's own in-flight first page (the old
+  // page-generation counter did both, and the second half was a defect the
+  // two-column layout exposed: opening Y while X is open blanked Y's page).
+  const selectedConversationRef = useRef<string | null>(null);
   const messagesRef = useRef<PolyforgeMessage[]>([]);
   const lastAcked = useRef<Record<string, number>>({});
 
-  useEffect(() => { messagesRef.current = messages; }, [messages]);
+  // messagesRef mirrors the rendered page for the newest-seq reads (the
+  // scroll-up and forward-refresh cursors). Every writer (open, scroll-up,
+  // forward refresh) syncs here, one place.
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
 
   // Returns the settle promise so a manual refresh caller (the panel's
   // refresh button, pi#113) can show in-flight state; the interval and mount
@@ -149,12 +165,26 @@ export function usePolyforge(panelOpen: boolean) {
   // The conversation list rides the same dock cadence: one read at mount and
   // on every open/closed interval tick. Below the floor the route answers a
   // capability field and spawns no message verb.
+  //
+  // Every call starts its OWN read (task-42 review): no in-flight slot is
+  // shared, so sendMessage's awaited refresh always resolves with a read
+  // that started after the send landed (read-your-write — a new
+  // conversation's row and header name render immediately, not at the next
+  // poll). The mount/dock-open/tab burst simply fires concurrent reads.
+  //
+  // Acceptance is by LANDING order, not start order: a start-order guard
+  // would discard the first response of that burst — blanking the list until
+  // the last one lands — even though it carries fresh data (task-42: the list
+  // and the picker must render as soon as the first response arrives). A
+  // response whose seq is below one that already landed is still discarded,
+  // so a late stale poll can never overwrite a newer read.
   const refreshMessages = useCallback(() => {
     const seq = ++messagesSeq.current;
     return fetch("/api/polyforge/messages")
       .then(async (response) => {
         const body = await response.json() as MessagesResponse;
-        if (seq !== messagesSeq.current) return null;
+        if (seq <= messagesLandedSeq.current) return null;
+        messagesLandedSeq.current = seq;
         setMessagesCapable(body.capable !== false);
         setMessagesReason(body.reason ?? null);
         setConversations(Array.isArray(body.conversations) ? body.conversations : []);
@@ -164,7 +194,8 @@ export function usePolyforge(panelOpen: boolean) {
         return body;
       })
       .catch(() => {
-        if (seq !== messagesSeq.current) return null;
+        if (seq <= messagesLandedSeq.current) return null;
+        messagesLandedSeq.current = seq;
         setMessagesError("messages are unreachable");
         return null;
       });
@@ -201,9 +232,18 @@ export function usePolyforge(panelOpen: boolean) {
   }, [probed, pfPresent, panelOpen, refreshStatus]);
 
   // Messages use the same interval (3s open / 30s closed), never a new timer.
+  // The immediate read is NOT gated on the presence probe: the route itself
+  // degrades (pf absent, below the floor) and spawns no message verb below
+  // the floor, so the first list can start at mount and land as early as a
+  // fresh page can render it (task-42 — the list, its rows and the picker).
+  // Once the probe has answered "absent" the effect reads nothing more (its
+  // re-runs on the probe landing and on dock toggles stay silent), so a
+  // pf-less install issues exactly the one mount read; the interval needs
+  // presence: a pf-less install must not poll forever.
   useEffect(() => {
-    if (!probed || !pfPresent) return;
+    if (probed && !pfPresent) return;
     refreshMessages();
+    if (!probed || !pfPresent) return;
     const interval = setInterval(refreshMessages, panelOpen ? OPEN_STATUS_POLL_MS : CLOSED_STATUS_POLL_MS);
     return () => clearInterval(interval);
   }, [probed, pfPresent, panelOpen, refreshMessages]);
@@ -226,34 +266,45 @@ export function usePolyforge(panelOpen: boolean) {
   // ---- Messages actions ----
 
   const loadNewestPage = useCallback((conversationId: string) => {
-    const seq = ++pageSeq.current;
     return fetch(`/api/polyforge/messages/${encodeURIComponent(conversationId)}`)
       .then(async (response) => {
         const body = await response.json() as PageResponse;
-        if (seq !== pageSeq.current) return;
         const page = Array.isArray(body.messages) ? body.messages : [];
+        const hasOlder = body.has_older === true;
+        if (selectedConversationRef.current !== conversationId) return;
         setMessages(page);
-        setHasOlder(body.has_older === true);
+        setHasOlder(hasOlder);
         setMessagesError(body.error ?? null);
       })
       .catch(() => {
-        if (seq !== pageSeq.current) return;
+        if (selectedConversationRef.current !== conversationId) return;
         setMessagesError("messages are unreachable");
       })
       .finally(() => {
         // The panel may position the history at the bottom of this first page
         // even while a local job is blocked (only arrivals are suppressed).
-        if (seq === pageSeq.current) setInitialPageLoaded(conversationId);
+        if (selectedConversationRef.current === conversationId) setInitialPageLoaded(conversationId);
       });
   }, []);
 
   const selectConversation = useCallback((conversationId: string | null) => {
     setSelectedConversation(conversationId);
+    selectedConversationRef.current = conversationId;
+    if (!conversationId) {
+      setMessages([]);
+      setHasOlder(false);
+      setInitialPageLoaded(null);
+      return;
+    }
+    // Opening — and re-opening — always fetches the conversation's newest
+    // page (task-42 review): a kept page predates whatever arrived while the
+    // user was away, so the fresh read is the only source of now. The
+    // identity guard keeps a previous selection's in-flight page from
+    // landing under this one.
     setMessages([]);
     setHasOlder(false);
     setInitialPageLoaded(null);
-    ++pageSeq.current;
-    if (conversationId) void loadNewestPage(conversationId);
+    void loadNewestPage(conversationId);
   }, [loadNewestPage]);
 
   const loadOlder = useCallback(() => {
@@ -261,12 +312,11 @@ export function usePolyforge(panelOpen: boolean) {
     const current = messagesRef.current;
     if (!conversationId || !hasOlder || loadingOlder || current.length === 0) return;
     const oldest = current[0].seq;
-    const seq = ++pageSeq.current;
     setLoadingOlder(true);
     fetch(`/api/polyforge/messages/${encodeURIComponent(conversationId)}?before=${oldest}`)
       .then(async (response) => {
         const body = await response.json() as PageResponse;
-        if (seq !== pageSeq.current) return;
+        if (selectedConversationRef.current !== conversationId) return;
         const older = Array.isArray(body.messages) ? body.messages : [];
         setMessages((previous) => mergeOlderPage(previous, older));
         setHasOlder(body.has_older === true);
@@ -275,7 +325,7 @@ export function usePolyforge(panelOpen: boolean) {
         // A failed older page leaves the loaded history intact.
       })
       .finally(() => {
-        if (seq === pageSeq.current) setLoadingOlder(false);
+        if (selectedConversationRef.current === conversationId) setLoadingOlder(false);
       });
   }, [selectedConversation, hasOlder, loadingOlder]);
 
@@ -292,6 +342,10 @@ export function usePolyforge(panelOpen: boolean) {
         const body = await response.json() as PageResponse;
         const newer = Array.isArray(body.messages) ? body.messages : [];
         if (newer.length === 0) return;
+        // Identity guard: a refresh of a previous selection never merges
+        // under the current one (task-42 — this replaces the page-generation
+        // counter the effect cleanup used to bump).
+        if (selectedConversationRef.current !== conversationId) return;
         setMessages((previous) => mergeNewestPage(previous, newer));
       })
       .catch(() => {
@@ -302,7 +356,7 @@ export function usePolyforge(panelOpen: boolean) {
   useEffect(() => {
     if (!panelOpen || !selectedConversation) return;
     const interval = setInterval(() => refreshOpen(selectedConversation), OPEN_WATCH_POLL_MS);
-    return () => { ++pageSeq.current; clearInterval(interval); };
+    return () => clearInterval(interval);
   }, [panelOpen, selectedConversation, refreshOpen]);
 
   const acknowledge = useCallback((conversationId: string, seq: number) => {
@@ -385,19 +439,22 @@ export function usePolyforge(panelOpen: boolean) {
     if (!response.ok || body.error) {
       throw new Error(body.error ?? "the message was refused");
     }
-    const listBody = await refreshMessages();
-    if (selectedConversation) {
+    await refreshMessages();
+    const sent = body.message ?? null;
+    // The send's own answer names the conversation it landed in (task-42): open
+    // it when it is not the one already open — a compose-entry send to a new
+    // peer opens the started conversation even while another one is open
+    // beside it — and refresh the open one when it is. The conversation id
+    // comes from the answer itself, never from a raced list read.
+    const openedId = sent?.conversation_id ?? null;
+    if (openedId && openedId !== selectedConversation) {
+      selectConversation(openedId);
+    } else if (selectedConversation) {
       // Await the open conversation's refresh so the sent message (and a
       // reply's rendered quote) is in the history before the caller resolves.
       await refreshOpen(selectedConversation);
-    } else {
-      // A send from the list's new-message entry starts (or reuses) the direct
-      // conversation; open the refreshed row so the sent message is visible.
-      const rows = Array.isArray(listBody?.conversations) ? listBody.conversations : [];
-      const match = rows.find((row) => row.peer === input.to);
-      if (match) selectConversation(match.id);
     }
-    return body.message ?? null;
+    return sent;
   }, [refreshMessages, refreshOpen, selectedConversation, selectConversation]);
 
   const analyzeMessage = useCallback(async (messageId: string) => {

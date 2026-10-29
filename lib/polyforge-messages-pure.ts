@@ -8,7 +8,11 @@
 export interface PolyforgeConversation {
   id: string;
   kind: string;
+  /** The peer user id — the send address, never rendered. */
   peer?: string;
+  /** The peer's display name; absent/empty renders as the unknown-user
+   *  placeholder, never an id fallback. */
+  peer_name?: string;
   last_seq: number;
   unread: number;
   created_at: string;
@@ -20,6 +24,9 @@ export interface PolyforgeMessage {
   text: string;
   about_wi?: string;
   reply_to?: string;
+  /** The conversation the message lives in — a send's answer carries it so
+   *  the resulting conversation can be opened without re-reading the list. */
+  conversation_id?: string;
   created_at: string;
   mine: boolean;
 }
@@ -81,7 +88,10 @@ export function mergeNewestPage(
  *  blocked-job suppression. */
 export interface AckDecisionInput {
   panelOpen: boolean;
-  activeTab: "jobs" | "messages";
+  /** The dock's tab ( adds "memory"): only "messages" may
+   *  auto-ack — the widened union keeps the hook's tab state passing
+   *  through unchanged. */
+  activeTab: "jobs" | "messages" | "memory";
   conversationId: string | null;
   blocked: boolean;
   newestDisplayedSeq: number;
@@ -110,4 +120,46 @@ export function splitAnchor(anchor: string): { ref: string; rest: string } {
   const rest = value.slice(ref.length);
   if (rest && !rest.startsWith("/")) return { ref: "", rest: value };
   return { ref, rest };
+}
+
+// ---- the Slack-like layout's identity helpers ----
+
+/** The conversation's display name (the peer's), trimmed; "" when absent,
+ *  empty or blank. The caller renders the unknown-user placeholder for "" —
+ *  never a raw id fallback. Pure. */
+export function conversationName(conversation: PolyforgeConversation): string {
+  return (conversation.peer_name ?? "").trim();
+}
+
+/** The avatar initial: the first code point of the display name, upper-cased
+ *  (code-point safe, not UTF-16 unit); "?" when there is no name. Pure. */
+export function avatarInitial(name: string): string {
+  const first = [...name.trim()][0];
+  return first ? first.toUpperCase() : "?";
+}
+
+/** A deterministic per-user colour (FNV-1a hash of the stable peer id →
+ *  hue). The result is a CSS colour string only — the seed is never rendered
+ *  as text. Pure. */
+export function avatarColor(seed: string): string {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < seed.length; i++) {
+    hash ^= seed.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return `hsl(${hash % 360}, 45%, 45%)`;
+}
+
+/** Split the list into the direct (单聊) and group (群聊 — any other kind)
+ *  sections, preserving order. Pure. */
+export function groupConversations(
+  list: PolyforgeConversation[],
+): { direct: PolyforgeConversation[]; groups: PolyforgeConversation[] } {
+  const direct: PolyforgeConversation[] = [];
+  const groups: PolyforgeConversation[] = [];
+  for (const conversation of list) {
+    if (conversation.kind === "direct") direct.push(conversation);
+    else groups.push(conversation);
+  }
+  return { direct, groups };
 }

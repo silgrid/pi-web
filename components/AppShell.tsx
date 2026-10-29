@@ -3470,6 +3470,7 @@ export function AppShell() {
                     onRefresh={refreshPolyforgeStatus}
                     activeTab={pfActiveTab}
                     onActiveTab={setPfActiveTab}
+                    memoryCwd={projectTrustCwd}
                     messagesSurface={pfMessagesSurface}
                   />
                 </div>
@@ -3510,6 +3511,7 @@ export function AppShell() {
                   onRefresh={refreshPolyforgeStatus}
                   activeTab={pfActiveTab}
                   onActiveTab={setPfActiveTab}
+                  memoryCwd={projectTrustCwd}
                   messagesSurface={pfMessagesSurface}
                 />
               </div>

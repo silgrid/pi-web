@@ -1,20 +1,28 @@
-// — pi-web Messages tab: dual-user stateful pf-stub end-to-end pass.
+// — pi-web Messages panel redo (Slack-like), dual-user stub-pf e2e.
 //
-// Authored pre-code against artifacts/spec.md (+ artifacts/plan.md decisions);
-// the capsule's artifacts/e2e-scenarios.md mirrors its scenario blocks
-// (PM1..PM8). The suite starts its own `next dev` on a stub `pf` first on
-// PATH. The stub is a real state machine for TWO human users: it keeps each
-// conversation's messages and per-user unread, records every send/ack/analyze
-// argv in a ledger, and can switch the acting identity (`self`), so the suite
-// drives both sides of one conversation through the UI alone.
+// Originally authored for against artifacts/spec.md; this revision
+// is authored BEFORE `code` against's artifacts/spec.md (the
+// Slack-like layout, display names, zero raw id, the 2.20.10 floor). The suite
+// starts its own `next dev` with a stub `pf` first on PATH. The stub is a real
+// state machine for TWO human users: it keeps each conversation's messages and
+// per-user unread, records every send/ack/analyze argv in a ledger, models the
+// real aihub conversation row (members + member_names, never a `peer` field),
+// and keeps the acting identity (`self`) server-side, so the suite drives one
+// conversation through the UI alone.
 //
-// Baseline posture: the Messages surface does not exist yet, so every scenario
-// is an assertion-level red (no Messages tab, no conversations, no ack in the
-// ledger) — never a build or fixture error.
+// Scenario table: PM1..PM8 are the #56 scenarios, kept and adapted to the new
+// markup with no relaxed assertion (their layout-specific selectors follow the
+// new panel); PM9..PM18 are this work item's new-behaviour scenarios. The
+// capsule document artifacts/e2e-scenarios.md mirrors them.
+//
+// Baseline posture: the new layout/names/floor do not exist yet, so every
+// authored scenario is an assertion-level red (no 单聊/群聊 column, no display
+// name, an id where a name must be, the old 2.20.7 floor) — never a build or
+// fixture error.
 //
 //   node e2e/polyforge-messages.mjs
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
@@ -39,17 +47,23 @@ const writeSession = (body) => writeFileSync(sessionFile, [
 ].map((entry) => JSON.stringify(entry)).join("\n") + "\n");
 writeSession("E2E pf messages host session");
 
-// Sentinels: the operator identity, credential, server address and an
-// environment name must never leave the server; a message body must never
-// reach the pi-web server log.
+// Sentinels: the operator identity and its display name, the credential, the
+// server address and an environment name must never leave the server; a
+// message body must never reach the pi-web server log. SELF_NAME is the new
+// disclosure surface of this work item: aihub returns it in member_names, so
+// the pi-web messages routes must drop it with the self id (PM7 unchanged).
 const KEY_SENTINEL = "E2E-PF-API-KEY-SENTINEL-56";
 const USER_SENTINEL = "u_e2e_sentinel_self";
+const SELF_NAME = "Self Operator Sentinel";
 const PEER = "u_e2e_peer";
+const PEER_NAME = "Alice Chen";
 const SERVER_SENTINEL = "http://10.9.9.56:8420";
 const ENV_SENTINEL = "E2E_ENV_NAME_SENTINEL_56";
 const BODY_SENTINEL = "E2E-BODY-SENTINEL-56";
 const SECRET_SENTINEL = "AKIAE2ESECRETSENTINEL56";
 const ANALYSIS_SENTINEL = "E2E-ANALYSIS-SENTINEL-56";
+const LONG_PEER = "u_e2e_long_peer";
+const LONG_NAME = "Bartholomew Featherstonehaugh Longname";
 writeFileSync(join(cliDir, "cli.toml"), `server = "${SERVER_SENTINEL}"\napi_key = "${KEY_SENTINEL}"\nuser_id = "${USER_SENTINEL}"\n`);
 
 // ---- stateful dual-user pf stub (state.json + argv.log in its own dir) ----
@@ -58,33 +72,73 @@ mkdirSync(stubDir);
 const stateFile = join(stubDir, "state.json");
 const argvLog = join(stubDir, "argv.log");
 const msg = (seq, sender, text, extra = {}) => ({ id: `msg_${seq}_${sender}`, seq, sender, text, about_wi: "", reply_to: "", ...extra });
-const conversation = (id, peer, messages) => ({ id, peer, messages, lastSeq: messages[messages.length - 1].seq });
-const PAGED = conversation("conv_paged", "u_e2e_paged_peer", Array.from({ length: 120 }, (_, i) =>
+// A conversation mirrors the real aihub row inputs: the peer, its display
+// name, and the messages. `peerName: null` models the transient old-aihub
+// answer (no member_names at all); "" models an empty users.display_name.
+const conversation = (id, peer, peerName, messages) => ({ id, peer, peerName, messages, lastSeq: messages.length ? messages[messages.length - 1].seq : 0 });
+const PAGED = conversation("conv_paged", "u_e2e_paged_peer", "Pat Paged", Array.from({ length: 120 }, (_, i) =>
   // Numbered globally (not 1001..1120 per conversation) so paging cannot
   // pass by assuming a conversation's first seq is 1 (the review finding).
   msg(1001 + i, i % 2 ? "peer" : "self", `MSG-${String(i + 1).padStart(3, "0")}`)));
-const ANCHOR = conversation("conv_anchor", PEER, [
+const ANCHOR = conversation("conv_anchor", PEER, PEER_NAME, [
   msg(1, "peer", "ANCHOR-ONE", { about_wi: "task-42" }),
   msg(2, "peer", "ANCHOR-DEEP", { about_wi: "task-42/artifacts/spec.md" }),
   msg(3, "peer", BODY_SENTINEL + " UNANCHORED-ONE"),
   msg(4, "self", "OWN-MESSAGE"),
 ]);
+// PM15's stream: one own message, then a four-message peer run (the reply at
+// the end quotes the run's first message), plus an anchor quote in the run.
+const BUBBLES = conversation("conv_bubbles", "u_e2e_bubbles_peer", "Bea Run", [
+  msg(1, "self", "OWN-BUBBLE"),
+  msg(2, "peer", "PEER-RUN-ONE"),
+  msg(3, "peer", "PEER-RUN-TWO"),
+  msg(4, "peer", "PEER-ANCHORED", { about_wi: "task-42" }),
+  msg(5, "peer", "PEER-REPLY", { reply_to: "msg_2_peer" }),
+]);
+const DOT = conversation("conv_dot", "u_e2e_dot_peer", "Dot Rowan", [msg(1, "peer", "DOT-UNREAD-ONE")]);
+const LONG = conversation("conv_long", LONG_PEER, LONG_NAME, [msg(1, "peer", "LONG-ONE")]);
+// PM11: an empty display name (legitimate data) and the old-aihub answer that
+// carries no member_names at all — both render 未知用户 with a ? avatar.
+const NAMELESS = conversation("conv_nameless", "u_e2e_nameless_peer", "", [
+  msg(1, "peer", "NAMELESS-ONE"),
+  msg(2, "peer", "NAMELESS-TWO"),
+]);
+const ABSENT = conversation("conv_absent", "u_e2e_absent_peer", null, [msg(1, "peer", "ABSENT-ONE")]);
 const baseState = () => ({
-  version: "v2.20.7", mode: "ok", self: USER_SENTINEL, running: 2, blocked: false, sendError: "",
-  conversations: [
-    conversation("conv_dot", "u_e2e_dot_peer", [msg(1, "peer", "DOT-UNREAD-ONE")]),
-    PAGED,
-    ANCHOR,
-  ],
-  acked: { conv_paged: 120, conv_anchor: 4 },
+  version: "v2.20.10", mode: "ok", self: USER_SENTINEL, selfName: SELF_NAME, running: 2, blocked: false, sendError: "",
+  conversations: [DOT, PAGED, ANCHOR, BUBBLES, LONG],
+  // acked seeds name each conversation's newest sequence (task-42 owner ruling
+  // task-42-pm1-stub-acked-fixture): conv_paged's messages carry seqs 1001–1120,
+  // so its cursor is 1120 — the earlier 120 left every message permanently
+  // unread (120 of them) and contradicted PM1's zero-unread arm.
+  acked: { conv_paged: 1120, conv_anchor: 4, conv_bubbles: 5, conv_dot: 0, conv_long: 1 },
   sends: [], analyses: [],
 });
-const write = (state) => writeFileSync(stateFile, JSON.stringify(state));
+// The state lock (task-42 owner ruling: pin the seed/late-write race): the stub's
+// mutating handlers and every test-side state write hold an exclusive
+// O_EXCL lock on the same file, so a dying page's in-flight ack or send can
+// never read-modify-write across a fresh seed() — it either sees the new
+// state (and applies or 404s correctly) or waits for the write to finish.
+const stateLockPath = join(stubDir, "state-lock");
+const withStateLock = (fn) => {
+  const deadline = Date.now() + 5000;
+  let fd = null;
+  while (!fd) {
+    try { fd = openSync(stateLockPath, "wx"); }
+    catch { if (Date.now() > deadline) throw new Error("the stub state lock is held"); Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5); }
+  }
+  try { return fn(); } finally { rmSync(stateLockPath, { force: true }); }
+};
+const write = (state) => withStateLock(() => writeFileSync(stateFile, JSON.stringify(state)));
 const readState = () => JSON.parse(readFileSync(stateFile, "utf8"));
 const seed = (patch = {}) => {
   const next = { ...baseState(), ...patch };
   write(next);
-  writeFileSync(argvLog, "");
+  // The ledger is check-scoped by a marker, not a clear (task-42 owner ruling):
+  // a dying page's in-flight ack can append its argv after a plain clear and
+  // pollute the next check's counts. calls() reads only what follows the
+  // last marker, so a late argv written before this marker is invisible.
+  appendFileSync(argvLog, JSON.stringify(["__seed__"]) + "\n");
   return next;
 };
 seed();
@@ -96,57 +150,110 @@ writeFileSync(join(stubDir, "pf"), `#!${process.execPath}
 const fs = require("fs"); const path = require("path");
 const dir = path.dirname(fs.realpathSync(__filename));
 const args = process.argv.slice(2);
-fs.appendFileSync(path.join(dir, "argv.log"), JSON.stringify(args) + "\\n");
+// The ledger records argv per acting handler, not at spawn start (task-42 owner
+// ruling): a late ack from a dying page that the fresh seed's world does not
+// know must leave NO trace at all — no state write, no ledger line.
+const record = () => fs.appendFileSync(path.join(dir, "argv.log"), JSON.stringify(args) + "\\n");
 const s = JSON.parse(fs.readFileSync(path.join(dir, "state.json"), "utf8"));
-const save = () => fs.writeFileSync(path.join(dir, "state.json"), JSON.stringify(s));
 const out = (v) => { process.stdout.write(JSON.stringify(v) + "\\n"); process.exit(0); };
 const die = (code, text) => { process.stderr.write(text + "\\n"); process.exit(code); };
+// The state lock (see the test-side withStateLock): mutating handlers hold
+// it across their re-read→save, so a concurrent seed() write can never land
+// between them (task-42 owner ruling — the late-ack/seed race). The handler body
+// never exits inside the lock: it returns the answer, and out()/fail() run
+// after the lock is released (they call process.exit, which would skip the
+// cleanup).
+const withStateLock = (fn) => {
+  const lockPath = path.join(dir, "state-lock");
+  const deadline = Date.now() + 5000;
+  let lockFd = null;
+  while (!lockFd) {
+    try { lockFd = fs.openSync(lockPath, "wx"); }
+    catch { if (Date.now() > deadline) return { fail: ["CORE-409", "the stub state lock is held"] }; Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5); }
+  }
+  try { return fn(); } finally { try { fs.closeSync(lockFd); } catch (e) {} try { fs.unlinkSync(lockPath); } catch (e) {} }
+};
 const fail = (code, detail) => { process.stderr.write(JSON.stringify({ code, detail }) + "\\n"); process.exit(4); };
-if (args.includes("--version")) { process.stdout.write(s.version + "\\n"); process.exit(0); }
+if (args.includes("--version")) { record(); process.stdout.write(s.version + "\\n"); process.exit(0); }
 const rest = args.filter((a) => a !== "--json");
 const at = (name) => { const i = rest.indexOf(name); return i >= 0 ? rest[i + 1] : undefined; };
 const conv = (id) => s.conversations.find((c) => c.id === id);
-const listRow = (c) => ({
-  id: c.id, kind: "direct", members: [s.self, c.peer], peer: c.peer, created_at: "2026-10-18T00:00:00Z",
-  last_seq: c.lastSeq, unread: c.messages.filter((m) => m.sender !== s.self && m.seq > (s.acked[c.id] || 0)).length,
-});
+// The real aihub conversation row: members plus their display names, no
+// invented peer field (the pi-web server derives the peer from members).
+const listRow = (c) => {
+  const row = {
+    id: c.id, kind: "direct", members: [s.self, c.peer].sort(), created_at: "2026-10-18T00:00:00Z",
+    last_seq: c.lastSeq, unread: c.messages.filter((m) => m.sender !== s.self && m.seq > (s.acked[c.id] || 0)).length,
+  };
+  if (c.peerName !== null) row.member_names = { [s.self]: s.selfName, [c.peer]: c.peerName };
+  return row;
+};
 if (rest[0] === "ops" && rest[1] === "status") {
+  record();
   if (s.mode === "down") die(1, "pf: daemon not reachable (connection refused)");
   const jobs = [{ work_item_id: "wi_e2e_39", slug: "task-42", status: "running", spawn_n: 1, step_age_sec: 30, last_work_ago_sec: 3, candidate: "pi:e2e" }];
   if (s.blocked) jobs.push({ work_item_id: "wi_e2e_blocked", slug: "blocked-job", status: "needs_input", spawn_n: 1, step_age_sec: 900, last_work_ago_sec: 880, candidate: "pi:e2e" });
   out({ machine_id: "m-e2e", workspaces: ["/srv/e2e-workspace"], workflows_dir: "/srv/e2e-workspace/wf",
     env_names: ["${ENV_SENTINEL}"], jobs, queue: { pending: 0, running: s.running, max_concurrent: 4 } });
 }
-if (rest[0] === "config" && rest[1] === "list") out({ items: [
+if (rest[0] === "config" && rest[1] === "list") { record(); out({ items: [
   { key: "server", value: "${SERVER_SENTINEL}", source: "file" }, { key: "api_key", set: true, source: "file" },
-  { key: "user_id", value: "${USER_SENTINEL}", source: "file" }] });
-if (rest[0] === "watch") out(JSON.parse(fs.readFileSync(path.join(dir, "state-watch.json"), "utf8")));
+  { key: "user_id", value: "${USER_SENTINEL}", source: "file" }] }); }
+if (rest[0] === "watch") { record(); out(JSON.parse(fs.readFileSync(path.join(dir, "state-watch.json"), "utf8"))); }
 if (rest[0] === "msg") {
   if (rest[1] === "analyze") {
+    record();
     if (s.mode === "analyzeFail") fail("DAEMON-500", "analyzer is not assembled on this machine");
     out({ message_id: rest[2], conclusion: "${ANALYSIS_SENTINEL} the peer asks for a review", model: "stub" });
   }
   if (rest[1] === "ack") {
-    const c = conv(rest[2]);
-    if (!c) fail("CORE-404", "conversation " + rest[2] + " is unknown");
-    const asked = at("--seq") !== undefined ? Number(at("--seq")) : c.lastSeq;
-    if (asked <= 0 || asked > c.lastSeq) fail("CORE-400", "seq " + asked + " is outside 1.." + c.lastSeq);
-    s.acked[c.id] = Math.max(s.acked[c.id] || 0, asked);
-    save(); out({ ok: true });
+    // Barrier (task-42 owner ruling): a dying page's in-flight ack can land
+    // after the next check's seed() rewrote state.json; mutating the startup
+    // snapshot would revert the fresh seed. Mutating a re-read taken at
+    // handling time shrinks the stale window to the re-read→save span, and a
+    // late ack for a conversation the new seed dropped 404s instead of
+    // resurrecting old state.
+    const acked = withStateLock(() => {
+      const fresh = JSON.parse(fs.readFileSync(path.join(dir, "state.json"), "utf8"));
+      const c = (fresh.conversations || []).find((x) => x.id === rest[2]);
+      // A conversation the fresh seed does not know is a late ack from a
+      // dying page: no state write and no ledger line (owner ruling).
+      if (!c) return { fail: ["CORE-404", "conversation " + rest[2] + " is unknown"] };
+      record();
+      const asked = at("--seq") !== undefined ? Number(at("--seq")) : c.lastSeq;
+      if (asked <= 0 || asked > c.lastSeq) return { fail: ["CORE-400", "seq " + asked + " is outside 1.." + c.lastSeq] };
+      fresh.acked[c.id] = Math.max(fresh.acked[c.id] || 0, asked);
+      fs.writeFileSync(path.join(dir, "state.json"), JSON.stringify(fresh));
+      return { ok: true };
+    });
+    if (acked.fail) fail(acked.fail[0], acked.fail[1]);
+    out(acked);
   }
   if (rest[1] === "send") {
-    if (s.sendError) fail(s.sendError, "message refused: secret-shaped content (aws_key) is never stored or sent");
-    const to = at("--to"); const text = at("--text");
-    if (!to || !text) fail("CORE-400", "--to and --text are required");
-    let c = s.conversations.find((x) => x.peer === to);
-    if (!c) { c = { id: "conv_new_" + Date.now(), peer: to, messages: [], lastSeq: 0 }; s.conversations.push(c); }
-    const row = { id: "msg_sent_" + (c.lastSeq + 1), seq: c.lastSeq + 1, sender: "self", text,
-      about_wi: at("--about-wi") || "", reply_to: at("--reply-to") || "" };
-    c.messages.push(row); c.lastSeq = row.seq; s.sends.push({ to, text, aboutWi: row.about_wi, replyTo: row.reply_to });
-    save(); out({ id: row.id, seq: row.seq, conversation_id: c.id, sender_id: s.self, text: row.text,
-      about_wi: row.about_wi, reply_to: row.reply_to });
+    // Same barrier as ack: mutate a re-read state, never the startup
+    // snapshot, so a late send cannot revert a fresh seed either.
+    const sent = withStateLock(() => {
+      record();
+      const fresh = JSON.parse(fs.readFileSync(path.join(dir, "state.json"), "utf8"));
+      if (fresh.sendError) return { fail: [fresh.sendError, "message refused: secret-shaped content (aws_key) is never stored or sent"] };
+      const to = at("--to"); const text = at("--text");
+      if (!to || !text) return { fail: ["CORE-400", "--to and --text are required"] };
+      let c = fresh.conversations.find((x) => x.peer === to);
+      // A first contact has no directory entry, so aihub knows no display name:
+      // the row carries an empty name (未知用户), never the id as a name.
+      if (!c) { c = { id: "conv_new_" + Date.now(), peer: to, peerName: "", messages: [], lastSeq: 0 }; fresh.conversations.push(c); }
+      const row = { id: "msg_sent_" + (c.lastSeq + 1), seq: c.lastSeq + 1, sender: "self", text,
+        about_wi: at("--about-wi") || "", reply_to: at("--reply-to") || "" };
+      c.messages.push(row); c.lastSeq = row.seq; fresh.sends.push({ to, text, aboutWi: row.about_wi, replyTo: row.reply_to });
+      fs.writeFileSync(path.join(dir, "state.json"), JSON.stringify(fresh));
+      return { id: row.id, seq: row.seq, conversation_id: c.id, sender_id: s.self, text: row.text,
+        about_wi: row.about_wi, reply_to: row.reply_to };
+    });
+    if (sent.fail) fail(sent.fail[0], sent.fail[1]);
+    out(sent);
   }
   if (rest[1] === "list" && at("--conversation")) {
+    record();
     const c = conv(at("--conversation"));
     if (!c) fail("CORE-404", "conversation is unknown");
     const before = Number(at("--before") || 0); const after = Number(at("--after") || 0); const limit = Number(at("--limit") || 50);
@@ -160,18 +267,29 @@ if (rest[0] === "msg") {
       created_at: "2026-10-18T00:00:00Z",
     })), last_seq: c.lastSeq });
   }
-  if (rest[1] === "list") out({ conversations: s.conversations.map(listRow) });
+  if (rest[1] === "list") { record(); out({ conversations: s.conversations.map(listRow) }); }
   fail("CORE-400", "msg: unknown action " + rest[1]);
 }
 die(2, "pf: unknown command");
 `);
 chmodSync(join(stubDir, "pf"), 0o755);
-const calls = () => (existsSync(argvLog) ? readFileSync(argvLog, "utf8").trim().split("\n").filter(Boolean)
-  .map((line) => JSON.parse(line).filter((part) => part !== "--json")) : []);
+const calls = () => (existsSync(argvLog) ? readFileSync(argvLog, "utf8").trim().split("\n").filter(Boolean) : [])
+  // Only the current check's argv: everything after the last __seed__ marker.
+  // A marker resets the accumulator, so late argv lines from the previous
+  // check's dying page cannot leak into this check's spawn counts.
+  .reduce((acc, line) => {
+    try {
+      const argv = JSON.parse(line);
+      if (Array.isArray(argv) && argv[0] === "__seed__") return [];
+      if (Array.isArray(argv)) acc.push(argv.filter((part) => part !== "--json"));
+    } catch { /* a torn append from a concurrent spawn never counts */ }
+    return acc;
+  }, []);
 const msgCalls = () => calls().filter((a) => a[0] === "msg");
 const acks = () => msgCalls().filter((a) => a[1] === "ack");
 const sends = () => msgCalls().filter((a) => a[1] === "send");
 const argAfter = (argv, name) => { const i = argv.indexOf(name); return i >= 0 ? argv[i + 1] : undefined; };
+const appearsIn = (haystack, needle) => haystack.some((value) => (value || "").includes(needle));
 
 // ---- scenario bookkeeping ----
 const T = {
@@ -179,10 +297,20 @@ const T = {
   PM2: "PM2: opening a conversation shows the newest page at the bottom and scroll-up prepends the page immediately above with no gap or duplicate, stopping at the oldest message",
   PM3: "PM3: a visible conversation acks exactly the newest displayed sequence once and clears unread, and a newer unseen sequence is never the acked one",
   PM4: "PM4: a hidden conversation and a locally blocked job suppress automatic ack, and an explicit conversation click acks the newest displayed sequence",
-  PM5: "PM5: a send spawns exactly one pf msg send (with its anchor), a reply passes --reply-to and quotes the loaded original, and a refused send answers a 4xx with the documented text",
+  PM5: "PM5: a send spawns exactly one pf msg send (with its anchor), a reply passes --reply-to and quotes the loaded original, a first contact uses the typed id, and a refused send answers a 4xx with the documented text",
   PM6: "PM6: a work-item anchor opens the existing Jobs detail through the watch read, a deep reference exposes only its work-item part, the analyzer appears only on received messages and its conclusion is transient, and incoming messages never enter chat or the composer",
-  PM7: "PM7: no messages route response or server log carries the operator key, identity, server address or a message body, and a CORE-422-refused send leaves no trace",
-  PM8: "PM8: below the pf Messages floor the tab shows an upgrade-needed state and spawns no message verb",
+  PM7: "PM7: no messages route response or server log carries the operator key, the self id or self display name, the server address or a message body, and a CORE-422-refused send leaves no trace",
+  PM8: "PM8: below the pf 2.20.10 Messages floor the tab shows an upgrade-needed state and spawns no message verb, and at the floor the panel works with names",
+  PM9: "PM9: the two-user panel's text, titles and aria-labels carry neither the peer id nor the self id",
+  PM10: "PM10: the list row, chat header, bubble attribution and recipient picker identify the peer by display name and initial avatar",
+  PM11: "PM11: an unnamed peer renders 未知用户 with a ? avatar on every surface and never an id",
+  PM12: "PM12: opening Messages selects nothing and acks nothing, and a click opens the conversation and acknowledges it",
+  PM13: "PM13: the conversation list is a right-hand column of 120–220px with avatars, names, unread badges, 单聊/群聊 sections, 尚无群聊 and the compose entry on top",
+  PM14: "PM14: the open conversation header shows the peer's avatar and display name",
+  PM15: "PM15: own bubbles sit right without attribution while peer bubbles sit left with avatar and name on the first of a run, keeping timestamps, anchor quotes and reply quotes",
+  PM16: "PM16: desktop keeps two columns at the default and the minimum dock width and mobile stays a single view with a back control",
+  PM17: "PM17: the recipient picker offers exactly the existing peers by display name and first contact stays a typed user id",
+  PM18: "PM18: the conversation route keeps peer as the send address and adds peer_name, and a send still addresses the peer id",
 };
 const failures = new Map(Object.values(T).map((title) => [title, []]));
 async function check(title, label, fn) {
@@ -204,9 +332,13 @@ async function startServer(name, version) {
   });
   base = started.base; stop = started.stop;
 }
-async function openPage() {
-  const context = await browser.newContext({ viewport: { width: 1280, height: 800 }, locale: "en-US" });
-  await context.addInitScript(() => { try { localStorage.setItem("pi-web:split-view-enabled", "false"); localStorage.setItem("pi-locale", "en"); } catch {} });
+// The panel must speak the spec's contract strings (单聊/群聊/尚无群聊/
+// 选择一个会话/未知用户), so every page runs in zh-CN; wording reused from
+// existing keys is matched locale-tolerantly.
+async function openPage(options = {}) {
+  const viewport = options.viewport ?? { width: 1280, height: 800 };
+  const context = await browser.newContext({ viewport, locale: "zh-CN" });
+  await context.addInitScript(() => { try { localStorage.setItem("pi-web:split-view-enabled", "false"); localStorage.setItem("pi-locale", "zh-CN"); } catch {} });
   const page = await context.newPage();
   page.setDefaultTimeout(10_000);
   page.on("pageerror", (error) => errors.push(error.message));
@@ -219,39 +351,62 @@ async function openPage() {
 const get = (path) => fetch(`${base}${path}`, { signal: AbortSignal.timeout(60_000) }).then(async (r) => ({ status: r.status, text: await r.text() }));
 const post = (path, body) => fetch(`${base}${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body ?? {}), signal: AbortSignal.timeout(60_000) })
   .then(async (r) => ({ status: r.status, text: await r.text() }));
-const withPage = async (fn) => { const page = await openPage(); try { return await fn(page); } finally { await page.context().close(); } };
+const withPage = async (fn, options) => { const page = await openPage(options); try { return await fn(page); } finally { await page.context().close(); } };
 const pfButton = (page) => page.getByRole("button", { name: /^(?!.*close).*polyforge/i }).first();
-const dock = (page) => page.locator("#polyforge-dock");
+// The desktop dock and the mobile sheet share one panel component.
+const dock = (page) => page.locator("#polyforge-dock, [role='dialog'][aria-label='Polyforge']").first();
 const tab = (page, name) => dock(page).getByRole("tab", { name }).or(dock(page).getByRole("button", { name })).first();
-const unreadDots = (root) => root.locator('[aria-label*="unread" i], [title*="unread" i], [data-testid="unread-dot"], [data-unread-dot]');
+const unreadDots = (root) => root.locator('[aria-label*="unread" i], [aria-label*="未读"], [title*="unread" i], [title*="未读"], [data-testid="unread-dot"], [data-unread-dot]');
 async function openDock(page) { await pfButton(page).click(); await dock(page).waitFor(); return dock(page); }
-async function messagesTab(page) { const t = tab(page, /^messages/i); await t.waitFor({ timeout: 15_000 }); await t.click(); return t; }
-async function openConversation(page, conv) {
+async function messagesTab(page) { const t = tab(page, /^(messages|消息)/i); await t.waitFor({ timeout: 15_000 }); await t.click(); return t; }
+
+// ---- panel locators (spec strings; shared keys locale-tolerant) ----
+const selectEmpty = (panel) => panel.getByText(/选择一个会话|Select a conversation/).first();
+const sectionDirect = (panel) => panel.getByText("单聊", { exact: true }).first();
+const sectionGroups = (panel) => panel.getByText("群聊", { exact: true }).first();
+const noGroupsText = (panel) => panel.getByText("尚无群聊", { exact: true }).first();
+const unknownText = (panel) => panel.getByText("未知用户", { exact: true });
+const composeEntry = (panel) => panel.getByRole("button", { name: /新消息|New message/ }).first();
+const historyRegion = (panel) => panel.getByLabel(/会话记录|Conversation history/).first();
+const messageTextField = (panel) => panel.getByLabel("消息", { exact: true }).first();
+const anchorField = (panel) => panel.getByLabel("工作项锚点", { exact: true }).first();
+const recipientField = (panel) => panel.getByLabel("收件人", { exact: true }).first();
+const sendButton = (panel) => panel.getByRole("button", { name: /^发送$|^Send$/i }).first();
+const analyzeButtons = (panel) => panel.getByRole("button", { name: /^分析$|^Analyze$/i });
+const replyButtons = (panel) => panel.getByRole("button", { name: /^回复$|^Reply$/i });
+const avatarInitialOf = (name) => (name ? [...name.trim()][0].toUpperCase() : "?");
+
+async function requireVisible(locator, what) {
+  const count = await locator.count();
+  assert.ok(count > 0, `${what} is not rendered`);
+  return locator.first();
+}
+
+// Open a conversation through the list. `labels` carries the names the new
+// layout must show; the peer id is appended as a fallback so the pre-change
+// tree can still be driven to an assertion instead of a wiring error.
+async function openConversation(page, conv, extraLabels = []) {
   const panel = dock(page);
-  const needle = conv.messages[conv.messages.length - 1].text;
-  // A direct conversation is identified by its peer (one per user pair); the
-  // list no longer carries a message preview to match on. Retry the click: a
-  // list poll may replace the row between locating it and clicking it.
+  const needle = conv.messages.length ? conv.messages[conv.messages.length - 1].text : "";
+  const labels = [conv.peerName, ...extraLabels, conv.peer].filter((label) => typeof label === "string" && label !== "");
+  const historyShows = async () => needle !== "" && (await panel.getByText(needle, { exact: false }).count()) > 0;
   const deadline = Date.now() + 45_000;
+  let lastFailure = "no label matched";
   while (Date.now() < deadline) {
-    // If a previously opened conversation is still showing, return to the list
-    // first: the header also carries the peer text, which is not a list row.
-    const back = panel.getByRole("button", { name: /←/ }).first();
-    if (await back.count()) await back.click().catch(() => {});
-    for (const want of [conv.peer, needle]) {
-      const item = panel.getByText(want, { exact: false }).first();
-      try { await item.waitFor({ timeout: 5000 }); } catch { continue; }
-      await item.click({ timeout: 5000 }).catch(() => {});
-      try {
-        await panel.getByText(needle, { exact: false }).last().waitFor({ timeout: 5000 });
-        return;
-      } catch {
-        // The click was lost to a list refresh; retry below.
+    if (needle && await historyShows()) return;
+    for (const label of labels) {
+      const matches = panel.getByText(label, { exact: false });
+      const count = await matches.count().catch(() => 0);
+      for (let i = 0; i < Math.min(count, 6); i++) {
+        lastFailure = `the click on ${label} did not open ${conv.id}`;
+        await matches.nth(i).click({ timeout: 4000 }).catch(() => {});
+        if (!needle || await historyShows()) return;
       }
     }
   }
-  throw new Error(`conversation ${conv.id} is not in the Messages list`);
+  throw new Error(`conversation ${conv.id} is not in the Messages list: ${lastFailure}`);
 }
+
 // The history scroll region: the deepest scrollable element containing the newest text.
 const historyInfo = (panel, needle) => panel.evaluate((root, needle) => {
   const candidates = [...root.querySelectorAll("*")].filter((el) => {
@@ -282,17 +437,89 @@ const emphasis = (panel, needle) => panel.evaluate((root, needle) => {
   const fg = lum(getComputedStyle(el).color); return fg === null ? null : Math.abs(fg - bg) * opacity;
 }, needle);
 
+// The panel's whole visible text plus every title/aria-label (the spec's
+// disclosure surface: innerText, title, aria-label).
+const disclosure = (panel) => panel.evaluate((root) => {
+  const labels = [];
+  for (const node of root.querySelectorAll("*")) {
+    for (const attribute of ["title", "aria-label"]) {
+      const value = node.getAttribute(attribute);
+      if (value) labels.push(value);
+    }
+  }
+  return { text: root.innerText || root.textContent || "", labels };
+});
+
+// Bounding boxes of every leaf element whose trimmed text is exactly `text`.
+const leafBoxes = (panel, text) => panel.evaluate((dom, text) => [...dom.querySelectorAll("*")]
+  .filter((node) => (node.textContent || "").trim() === text && ![...node.children].some((child) => (child.textContent || "").trim() === text))
+  .map((node) => { const box = node.getBoundingClientRect(); return { x: box.x, y: box.y, width: box.width, height: box.height, right: box.x + box.width, bottom: box.y + box.height }; }), text);
+
+// Avatar elements: a small, roughly square leaf whose text is `initial` and
+// which carries a real background colour.
+const avatarElements = (root, initial) => root.evaluate((node, initial) => {
+  const hits = [];
+  for (const el of node.querySelectorAll("*")) {
+    if ((el.textContent || "").trim() !== initial) continue;
+    if ([...el.children].some((child) => (child.textContent || "").trim() === initial)) continue;
+    const box = el.getBoundingClientRect();
+    if (box.width < 12 || box.width > 42 || Math.abs(box.width - box.height) > 10) continue;
+    const bg = getComputedStyle(el).backgroundColor;
+    if (!bg || bg === "transparent" || /rgba\(\s*0\s*,\s*0\s*,\s*0\s*,\s*0\s*\)/.test(bg)) continue;
+    hits.push({ bg, x: box.x, y: box.y, width: box.width, height: box.height, centre: box.y + box.height / 2 });
+  }
+  return hits;
+}, initial);
+
+// An avatar rendered immediately beside a name (same row, left of the text).
+const avatarBeside = (root, text, initial) => root.evaluate((node, [text, initial]) => {
+  const leaf = [...node.querySelectorAll("*")].find((el) => (el.textContent || "").trim() === text
+    && ![...el.children].some((child) => (child.textContent || "").trim() === text));
+  if (!leaf) return null;
+  const anchor = leaf.getBoundingClientRect();
+  const hits = [];
+  for (const el of node.querySelectorAll("*")) {
+    if ((el.textContent || "").trim() !== initial) continue;
+    if ([...el.children].some((child) => (child.textContent || "").trim() === initial)) continue;
+    const box = el.getBoundingClientRect();
+    if (box.width < 12 || box.width > 42 || Math.abs(box.width - box.height) > 10) continue;
+    const bg = getComputedStyle(el).backgroundColor;
+    if (!bg || bg === "transparent" || /rgba\(\s*0\s*,\s*0\s*,\s*0\s*,\s*0\s*\)/.test(bg)) continue;
+    if (Math.abs((box.y + box.height / 2) - (anchor.y + anchor.height / 2)) > 16) continue;
+    if (box.x >= anchor.x) continue;
+    hits.push({ bg, x: box.x, y: box.y, width: box.width, height: box.height });
+  }
+  return hits;
+}, [text, initial]);
+
+// The list column: the innermost element holding the compose entry and both
+// section headers. Its box is measured for the geometry assertions.
+const listColumn = (panel) => panel.evaluate((root) => {
+  const has = (node, needle) => (node.textContent || "").includes(needle);
+  const header = [...root.querySelectorAll("*")].find((node) => (node.textContent || "").trim() === "单聊");
+  if (!header) return null;
+  for (let node = header; node && node !== root; node = node.parentElement) {
+    if (has(node, "新消息") && has(node, "群聊") && has(node, "尚无群聊")) {
+      const box = node.getBoundingClientRect();
+      return { x: box.x, y: box.y, width: box.width, height: box.height, right: box.x + box.width };
+    }
+  }
+  return null;
+});
+
+const clamp = (value, low, high) => Math.min(high, Math.max(low, value));
+
 try {
   browser = await chromium.launch();
   await startServer("main");
 
+  seed();
   await check(T.PM1, "PM1 dot beside the running badge", () => withPage(async (page) => {
-    seed();
     await openDock(page);
     const button = pfButton(page);
     assert.ok((await button.textContent() || "").includes("2"), "the topbar button must still show the running count 2");
     const messages = await messagesTab(page);
-    assert.ok((await unreadDots(messages).count()) >= 1 || /unread/i.test(await messages.getAttribute("aria-label") || ""), "the Messages tab must show an unread dot");
+    assert.ok((await unreadDots(messages).count()) >= 1 || /unread|未读/i.test(await messages.getAttribute("aria-label") || ""), "the Messages tab must show an unread dot");
     assert.ok((await unreadDots(button).count()) >= 1, "the topbar button must show the unread dot beside the running count");
     assert.ok((await button.textContent() || "").includes("2"), "the unread dot must not replace the running-count badge");
     // Zero unread: a fresh page with the dot's conversation acknowledged.
@@ -307,8 +534,8 @@ try {
     } finally { await page2.context().close(); }
   }));
 
+  seed();
   await check(T.PM2, "PM2 newest page then scroll-up paging", () => withPage(async (page) => {
-    seed();
     await openDock(page); await messagesTab(page); await openConversation(page, PAGED);
     const panel = dock(page);
     await panel.getByText("MSG-120", { exact: false }).first().waitFor({ timeout: 20_000 });
@@ -334,9 +561,9 @@ try {
     assert.equal(msgCalls().filter((a) => a[1] === "list" && argAfter(a, "--before")).length, beforeCount, "the oldest message must end paging");
   }));
 
+  seed({ conversations: [conversation("conv_ack", PEER, PEER_NAME, [msg(1, "self", "ACK-ONE"), msg(2, "self", "ACK-TWO"), msg(3, "peer", "ACK-THREE")])],
+    acked: { conv_ack: 2 } });
   await check(T.PM3, "PM3 visible auto-ack names the newest displayed seq", () => withPage(async (page) => {
-    seed({ conversations: [conversation("conv_ack", PEER, [msg(1, "self", "ACK-ONE"), msg(2, "self", "ACK-TWO"), msg(3, "peer", "ACK-THREE")])],
-      acked: { conv_ack: 2 } });
     await openDock(page); await messagesTab(page); await openConversation(page, readState().conversations[0]);
     for (let i = 0; i < 20 && !acks().length; i++) await delay(500);
     const first = acks();
@@ -357,15 +584,15 @@ try {
     assert.ok(acks().some((a) => argAfter(a, "--seq") === "4"), "once sequence 4 is displayed it must be acked");
   }));
 
+  seed({ conversations: [conversation("conv_hidden", PEER, PEER_NAME, [msg(1, "self", "HIDDEN-ONE"), msg(2, "peer", "HIDDEN-TWO")])], acked: { conv_hidden: 1 } });
   await check(T.PM4, "PM4 hidden and blocked suppress auto-ack", () => withPage(async (page) => {
-    seed({ conversations: [conversation("conv_hidden", PEER, [msg(1, "self", "HIDDEN-ONE"), msg(2, "peer", "HIDDEN-TWO")])], acked: { conv_hidden: 1 } });
     await openDock(page);
     // The panel is open but the Messages tab is not active: arrivals never ack.
     let state = readState(); state.conversations[0].messages.push(msg(3, "peer", "HIDDEN-THREE")); state.conversations[0].lastSeq = 3; write(state);
     await delay(4200);
     assert.equal(acks().length, 0, "another tab must not acknowledge an arrival");
     // Panel closed: still nothing.
-    await page.getByRole("button", { name: /close polyforge/i }).first().click();
+    await page.getByRole("button", { name: /close polyforge|关闭 polyforge/i }).first().click();
     state = readState(); state.conversations[0].messages.push(msg(4, "peer", "HIDDEN-FOUR")); state.conversations[0].lastSeq = 4; write(state);
     await delay(4200);
     assert.equal(acks().length, 0, "a closed panel must not acknowledge an arrival");
@@ -384,84 +611,79 @@ try {
   }));
 
   await check(T.PM4, "PM4 arrival while visible and blocked keeps unread and scroll", () => {
-    const blockedConversation = conversation("conv_blocked", PEER, Array.from({ length: 60 }, (_, i) =>
+    const blockedConversation = conversation("conv_blocked", PEER, PEER_NAME, Array.from({ length: 60 }, (_, i) =>
       msg(i + 1, i % 2 ? "peer" : "self", `BLOCKED-${String(i + 1).padStart(3, "0")}`)));
     seed({ conversations: [blockedConversation], acked: { conv_blocked: 60 }, blocked: true });
     return withPage(async (page) => {
-    await openDock(page); await messagesTab(page); await openConversation(page, blockedConversation);
-    const panel = dock(page);
-    await panel.getByText("BLOCKED-060", { exact: false }).first().waitFor({ timeout: 20_000 });
-    const before = await historyInfo(panel, "BLOCKED-060");
-    assert.ok(before && before.height > before.client + 20, "the blocked conversation needs an overflowing history");
+      await openDock(page); await messagesTab(page); await openConversation(page, blockedConversation);
+      const panel = dock(page);
+      await panel.getByText("BLOCKED-060", { exact: false }).first().waitFor({ timeout: 20_000 });
+      const before = await historyInfo(panel, "BLOCKED-060");
+      assert.ok(before && before.height > before.client + 20, "the blocked conversation needs an overflowing history");
 
-    // A new message arrives while that overflowing conversation is visible and
-    // a local job is blocked: no ack and no auto-scroll.
-    const state = readState();
-    state.conversations[0].messages.push(msg(61, "peer", "BLOCKED-061"));
-    state.conversations[0].lastSeq = 61;
-    write(state);
-    await delay(4200);
-    assert.equal(acks().length, 0, "a blocked arrival while visible must not be acknowledged");
-    // Seed acked conv_blocked at 60, so the blocked arrival takes unread from
-    // 0 to 1: this sub-case must prove the unread growth, not just the no-ack.
-    const listed = JSON.parse((await get("/api/polyforge/messages")).text);
-    assert.equal(listed.conversations.find((row) => row.id === "conv_blocked")?.unread, 1,
-      "the blocked arrival must remain unread (unread count rises from 0 to 1)");
-    const after = await historyInfo(panel, "BLOCKED-060");
-    assert.ok(after, "the history must stay rendered");
-    assert.equal(after.top, before.top, "a blocked job must suppress auto-scroll");
+      // A new message arrives while that overflowing conversation is visible and
+      // a local job is blocked: no ack and no auto-scroll.
+      const state = readState();
+      state.conversations[0].messages.push(msg(61, "peer", "BLOCKED-061"));
+      state.conversations[0].lastSeq = 61;
+      write(state);
+      await delay(4200);
+      assert.equal(acks().length, 0, "a blocked arrival while visible must not be acknowledged");
+      // Seed acked conv_blocked at 60, so the blocked arrival takes unread from
+      // 0 to 1: this sub-case must prove the unread growth, not just the no-ack.
+      const listed = JSON.parse((await get("/api/polyforge/messages")).text);
+      assert.equal(listed.conversations.find((row) => row.id === "conv_blocked")?.unread, 1,
+        "the blocked arrival must remain unread (unread count rises from 0 to 1)");
+      const after = await historyInfo(panel, "BLOCKED-060");
+      assert.ok(after, "the history must stay rendered");
+      assert.equal(after.top, before.top, "a blocked job must suppress auto-scroll");
     });
   });
 
-  await check(T.PM5, "PM5 list-view new message starts a conversation", () => withPage(async (page) => {
+  await check(T.PM5, "PM5 list-view first contact starts a conversation", () => withPage(async (page) => {
     const FIRST_PEER = "u_e2e_first_peer";
     seed({ conversations: [], acked: {} });
     await openDock(page); await messagesTab(page);
     const panel = dock(page);
-    // The empty list still carries the new-message entry: a user with no
-    // conversation can send the first message.
-    await panel.getByText(/no conversations/i).first().waitFor({ timeout: 15_000 });
-    const to = panel.getByLabel(/recipient|^to\b/i).or(panel.getByPlaceholder(/user|recipient/i)).first();
-    const text = panel.getByLabel(/^message|message text/i).or(panel.getByPlaceholder(/message|write/i)).first();
-    const anchor = panel.getByLabel(/work item|anchor/i).or(panel.getByPlaceholder(/workitem|work item|anchor/i)).first();
+    // The empty list still carries the compose entry: a user with no
+    // conversation can send the first message to a typed user id.
+    if (await composeEntry(panel).count()) await composeEntry(panel).click();
+    const to = recipientField(panel).or(panel.getByLabel(/recipient|^to\b/i)).first();
+    const text = messageTextField(panel).or(panel.getByLabel(/^message|message text/i)).first();
+    const anchor = anchorField(panel).or(panel.getByLabel(/work item|anchor/i)).first();
     await to.fill(FIRST_PEER);
     await text.fill("FIRST-MESSAGE");
     if (await anchor.count()) await anchor.fill("task-42");
-    await panel.getByRole("button", { name: /^send/i }).first().click();
+    await sendButton(panel).click();
     for (let i = 0; i < 20 && !sends().length; i++) await delay(500);
     assert.equal(sends().length, 1, `a list-view send must spawn exactly one pf msg send, got ${JSON.stringify(sends())}`);
     assert.equal(argAfter(sends()[0], "--to"), FIRST_PEER);
     assert.equal(argAfter(sends()[0], "--text"), "FIRST-MESSAGE");
     assert.equal(argAfter(sends()[0], "--about-wi"), "task-42");
     assert.equal(readState().sends.length, 1, "the stub ledger must record exactly one send");
-    // The code opens the conversation the send created; its history carries
-    // the message, and the refreshed list carries the new conversation row.
+    // The created conversation has no display name yet: the list and the
+    // header show 未知用户, never the typed user id.
     await panel.getByText("FIRST-MESSAGE", { exact: false }).first().waitFor({ timeout: 15_000 });
-    await panel.getByRole("button", { name: /←/ }).first().click();
-    await panel.getByText(FIRST_PEER, { exact: false }).first().waitFor({ timeout: 15_000 });
+    await requireVisible(unknownText(panel), "the unknown-name placeholder for the created conversation");
     const created = readState().conversations.find((conversation) => conversation.peer === FIRST_PEER);
     assert.ok(created, "the stub must have created the direct conversation");
-    assert.ok(await panel.getByText(FIRST_PEER, { exact: false }).count() >= 1,
-      "the new conversation row must appear in the list");
-    // Reopening the row shows the sent message as its history.
-    await openConversation(page, created);
-    await panel.getByText("FIRST-MESSAGE", { exact: false }).first().waitFor({ timeout: 15_000 });
+    const shown = await disclosure(panel);
+    assert.ok(!shown.text.includes(FIRST_PEER), "a created conversation must not render the typed user id");
+    assert.ok(!appearsIn(shown.labels, FIRST_PEER), "no title or aria-label may carry the typed user id");
   }));
 
+  seed({ conversations: [conversation("conv_anchor", PEER, PEER_NAME, ANCHOR.messages)], acked: { conv_anchor: 4 } });
   await check(T.PM5, "PM5 one send, reply id, documented refusal", () => withPage(async (page) => {
-    seed({ conversations: [conversation("conv_anchor", PEER, ANCHOR.messages)], acked: { conv_anchor: 4 } });
     await openDock(page); await messagesTab(page); await openConversation(page, ANCHOR);
     const panel = dock(page);
-    const to = panel.getByLabel(/recipient|^to\b/i).or(panel.getByPlaceholder(/user|recipient/i)).first();
-    const text = panel.getByLabel(/^message|message text/i).or(panel.getByPlaceholder(/message|write/i)).first();
-    const anchor = panel.getByLabel(/work item|anchor/i).or(panel.getByPlaceholder(/workitem|work item|anchor/i)).first();
-    await to.fill(PEER);
+    const text = messageTextField(panel);
+    const anchor = anchorField(panel);
     await text.fill("SENT-ONE");
-    if (await anchor.count()) await anchor.fill("task-42");
-    await panel.getByRole("button", { name: /^send/i }).first().click();
+    await anchor.fill("task-42");
+    await sendButton(panel).click();
     for (let i = 0; i < 20 && !sends().length; i++) await delay(500);
     assert.equal(sends().length, 1, `a send must spawn exactly one pf msg send, got ${JSON.stringify(sends())}`);
-    assert.equal(argAfter(sends()[0], "--to"), PEER);
+    assert.equal(argAfter(sends()[0], "--to"), PEER, "the open conversation's send must address the route's peer id");
     assert.equal(argAfter(sends()[0], "--text"), "SENT-ONE");
     assert.equal(argAfter(sends()[0], "--about-wi"), "task-42");
     assert.equal(readState().sends.length, 1, "the stub ledger must record exactly one send");
@@ -472,12 +694,11 @@ try {
     assert.equal(await text.inputValue(), "", "the composer must clear after a successful send");
 
     // Reply to a loaded original: the original is quoted and its id is passed.
-    await panel.getByRole("button", { name: /reply/i }).first().click();
+    await replyButtons(panel).first().click();
     const original = panel.getByText("ANCHOR-ONE", { exact: false });
     assert.ok(await original.count() >= 2, "a loaded original must render as a quote while replying");
-    const composer = panel.getByLabel(/^message|message text/i).or(panel.getByPlaceholder(/message|write/i)).last();
-    await composer.fill("REPLY-ONE");
-    await panel.getByRole("button", { name: /^send/i }).first().click();
+    await messageTextField(panel).fill("REPLY-ONE");
+    await sendButton(panel).click();
     for (let i = 0; i < 20 && sends().length < 2; i++) await delay(500);
     const reply = sends()[1] || [];
     assert.equal(argAfter(reply, "--reply-to"), "msg_1_peer", "a reply must pass --reply-to <original id>");
@@ -491,16 +712,15 @@ try {
     assert.match(refused.text, /CORE-422|secret-shaped/i, "the refusal must surface pf's documented text");
   }));
 
+  seed({ conversations: [conversation("conv_anchor", PEER, PEER_NAME, ANCHOR.messages)], acked: { conv_anchor: 4 } });
   await check(T.PM6, "PM6 anchor, analyzer, chat discipline", () => withPage(async (page) => {
-    seed({ conversations: [conversation("conv_anchor", PEER, ANCHOR.messages)], acked: { conv_anchor: 4 } });
     const beforeSession = readFileSync(sessionFile, "utf8");
     await openDock(page); await messagesTab(page); await openConversation(page, ANCHOR);
     const panel = dock(page);
     // Analyzer: one control per received message, none on the user's own message.
-    const analyze = panel.getByRole("button", { name: /analy/i });
-    assert.equal(await analyze.count(), 3, "the analyzer control must appear only on the three received messages");
+    assert.equal(await analyzeButtons(panel).count(), 3, "the analyzer control must appear only on the three received messages");
     assert.equal(await panel.getByText("OWN-MESSAGE", { exact: false }).count() > 0, true);
-    await analyze.first().click();
+    await analyzeButtons(panel).first().click();
     await panel.getByText(ANALYSIS_SENTINEL, { exact: false }).first().waitFor({ timeout: 10_000 });
     for (const store of ["localStorage", "sessionStorage"]) {
       const dump = await page.evaluate((s) => JSON.stringify(globalThis[s]), store);
@@ -510,7 +730,7 @@ try {
       .map((f) => join(agentDir, f)).filter((p) => { try { return readFileSync(p, "utf8").includes(ANALYSIS_SENTINEL); } catch { return false; } });
     assert.deepEqual(written, [], "the conclusion must not be written to disk");
     // Transient: closing and reopening the dock drops the conclusion.
-    await page.getByRole("button", { name: /close polyforge/i }).first().click();
+    await page.getByRole("button", { name: /close polyforge|关闭 polyforge/i }).first().click();
     await openDock(page); await messagesTab(page); await openConversation(page, ANCHOR);
     assert.equal(await panel.getByText(ANALYSIS_SENTINEL, { exact: false }).count(), 0, "the conclusion must not persist across a reopen");
 
@@ -536,15 +756,21 @@ try {
     assert.ok(anchored !== null && unanchored !== null && unanchored < anchored, `the unanchored message must be de-emphasized (${unanchored} !< ${anchored})`);
   }));
 
+  seed();
   await check(T.PM7, "PM7 sentinels", () => withPage(async (page) => {
-    seed();
     const listed = await get("/api/polyforge/messages");
     assert.equal(listed.status, 200, `the messages list route answered ${listed.status}: ${listed.text.slice(0, 160)}`);
-    for (const sentinel of [KEY_SENTINEL, USER_SENTINEL, SERVER_SENTINEL, ENV_SENTINEL]) {
+    // The new name field is present where it belongs (a peer's name) …
+    assert.ok(listed.text.includes(PEER_NAME), "the messages route must carry the peer's display name");
+    // … and the self id, the self display name and the credentials never are.
+    for (const sentinel of [KEY_SENTINEL, USER_SENTINEL, SELF_NAME, SERVER_SENTINEL, ENV_SENTINEL]) {
       assert.ok(!listed.text.includes(sentinel), `the messages route must not carry ${sentinel}`);
     }
     const history = await get("/api/polyforge/messages/conv_anchor?before=999");
     assert.equal(history.status, 200, `the conversation history route answered ${history.status}`);
+    for (const sentinel of [KEY_SENTINEL, USER_SENTINEL, SELF_NAME, SERVER_SENTINEL, ENV_SENTINEL]) {
+      assert.ok(!history.text.includes(sentinel), `the history route must not carry ${sentinel}`);
+    }
     // A refused secret-shaped send leaves the sentinel out of the answer.
     const state = readState(); state.sendError = "CORE-422"; write(state);
     const refused = await post("/api/polyforge/messages", { to: PEER, text: `leak ${SECRET_SENTINEL}` });
@@ -552,11 +778,11 @@ try {
     assert.ok(!refused.text.includes(SECRET_SENTINEL), "the refused body sentinel must not appear in the answer");
     // Message bodies and credentials never reach the pi-web server log.
     await openDock(page); await messagesTab(page); await openConversation(page, ANCHOR);
-    await dock(page).getByRole("button", { name: /analy/i }).first().click().catch(() => {});
+    await analyzeButtons(dock(page)).first().click().catch(() => {});
     await delay(500);
     for (const logFile of serverLogs) {
       const log = readFileSync(logFile, "utf8");
-      for (const sentinel of [KEY_SENTINEL, USER_SENTINEL, SERVER_SENTINEL, ENV_SENTINEL, BODY_SENTINEL, SECRET_SENTINEL]) {
+      for (const sentinel of [KEY_SENTINEL, USER_SENTINEL, SELF_NAME, SERVER_SENTINEL, ENV_SENTINEL, BODY_SENTINEL, SECRET_SENTINEL]) {
         assert.ok(!log.includes(sentinel), `the pi-web server log must not carry ${sentinel}`);
       }
     }
@@ -565,21 +791,364 @@ try {
 
   await check(T.PM8, "PM8 below-floor upgrade state", async () => {
     // A fresh server process re-probes pf, so the floor is seen (the probe is
-    // cached per process); no message verb may be spawned below it.
+    // cached per process); no message verb may be spawned below 2.20.10.
     await stop();
     writeFileSync(argvLog, "");
-    await startServer("floor", "v2.20.6");
+    await startServer("floor", "v2.20.9");
     const floor = await get("/api/polyforge/messages");
     assert.equal(floor.status, 200, `the below-floor messages route answered ${floor.status}`);
     assert.match(floor.text, /"capable"\s*:\s*false/, "below the floor the route must report capable:false");
-    assert.match(floor.text, /2\.20\.7|upgrade/i, "below the floor the reason must name the upgrade");
+    assert.match(floor.text, /2\.20\.10|upgrade|升级/i, "below the floor the reason must name the 2.20.10 upgrade");
     assert.equal(msgCalls().length, 0, "below the floor no message verb may be spawned");
     const page3 = await openPage();
     try {
       await openDock(page3); await messagesTab(page3);
-      assert.ok(await dock(page3).getByText(/upgrade/i).count() > 0, "below the floor the tab must show the upgrade-needed state");
+      assert.ok(await dock(page3).getByText(/upgrade|升级/i).count() > 0, "below the floor the tab must show the upgrade-needed state");
+      assert.equal(await dock(page3).getByText("单聊", { exact: true }).count(), 0, "below the floor no conversation list may render");
     } finally { await page3.context().close(); }
+    // At or above the floor (2.20.10) the panel is usable with names.
+    await stop();
+    writeFileSync(argvLog, "");
+    await startServer("supported", "v2.20.10");
+    const supported = await get("/api/polyforge/messages");
+    assert.match(supported.text, /"capable"\s*:\s*true/, "at 2.20.10 the route must report capable:true");
+    const page4 = await openPage();
+    try {
+      await openDock(page4); await messagesTab(page4);
+      await requireVisible(dock(page4).getByText("单聊", { exact: true }), "the 单聊 section at the supported floor");
+    } finally { await page4.context().close(); }
   });
+
+  seed({ conversations: [ANCHOR, BUBBLES], acked: { conv_anchor: 4, conv_bubbles: 5 } });
+  await check(T.PM9, "PM9 zero raw id in the panel", () => withPage(async (page) => {
+    await openDock(page); await messagesTab(page); await openConversation(page, ANCHOR);
+    const panel = dock(page);
+    // Open the compose entry too, so the picker and the typed field are part
+    // of the inspected surface.
+    if (await composeEntry(panel).count()) await composeEntry(panel).click();
+    const shown = await disclosure(panel);
+    assert.ok(shown.text.includes(PEER_NAME), "the peer display name must be rendered (the panel is on its names)");
+    for (const id of [PEER, USER_SENTINEL]) {
+      assert.ok(!shown.text.includes(id), `the panel text must not carry the raw user id ${id}`);
+      assert.ok(!appearsIn(shown.labels, id), `no title or aria-label may carry the raw user id ${id}`);
+    }
+  }));
+
+  seed({ conversations: [ANCHOR, BUBBLES], acked: { conv_anchor: 4, conv_bubbles: 5 } });
+  await check(T.PM10, "PM10 names and avatars on every surface", () => withPage(async (page) => {
+    await openDock(page); await messagesTab(page); await openConversation(page, ANCHOR);
+    const panel = dock(page);
+    const column = await listColumn(panel);
+    assert.ok(column, "the conversation list column is not rendered");
+    const historyBox = await (await requireVisible(historyRegion(panel), "the conversation history")).boundingBox();
+    assert.ok(historyBox, "the history must have a box");
+
+    // Every surface inside the panel: the list row, the chat header, the peer
+    // bubble attribution, and the recipient picker.
+    const boxes = await leafBoxes(panel, PEER_NAME);
+    assert.ok(boxes.length > 0, `the peer display name ${PEER_NAME} is not rendered anywhere`);
+    assert.ok(boxes.some((box) => box.x >= column.x - 2), "the list row must show the peer display name");
+    assert.ok(boxes.some((box) => box.bottom <= historyBox.y + 2), "the chat header must show the peer display name");
+    assert.ok(boxes.some((box) => box.y >= historyBox.y), "the first peer bubble of the run must show the display name");
+    assert.ok((await avatarBeside(panel, PEER_NAME, avatarInitialOf(PEER_NAME))).length > 0,
+      "an initial avatar must sit beside every rendered display name");
+
+    const beforePicker = (await leafBoxes(panel, "Bea Run")).length;
+    await requireVisible(composeEntry(panel), "the 新消息 compose entry").then((entry) => entry.click());
+    await requireVisible(recipientField(panel), "the typed recipient field");
+    const afterPicker = (await leafBoxes(panel, "Bea Run")).length;
+    assert.ok(afterPicker > beforePicker, "the recipient picker must list the existing peers by display name");
+    assert.ok((await avatarBeside(panel, "Bea Run", avatarInitialOf("Bea Run"))).length > 0,
+      "a picker row must show the peer's initial avatar");
+  }));
+
+  seed({ conversations: [NAMELESS, ABSENT], acked: {} });
+  await check(T.PM11, "PM11 unknown name placeholder and no id fallback", () => withPage(async (page) => {
+    await openDock(page); await messagesTab(page);
+    const panel = dock(page);
+    // List: one 未知用户 row per unnamed conversation, each with a ? avatar.
+    assert.equal(await unknownText(panel).count(), 2, "each unnamed conversation row must render 未知用户");
+    assert.ok((await avatarElements(panel, "?")).length >= 2, "an unnamed peer must get a ? avatar in its row");
+    const listed = await disclosure(panel);
+    for (const id of [NAMELESS.peer, ABSENT.peer]) {
+      assert.ok(!listed.text.includes(id), `the list must not substitute the raw id ${id} for the name`);
+      assert.ok(!appearsIn(listed.labels, id), `no title or aria-label may carry the raw id ${id}`);
+    }
+
+    // Header and bubble attribution for an empty display name.
+    await openConversation(page, NAMELESS, ["未知用户"]);
+    const historyBox = await (await requireVisible(historyRegion(panel), "the conversation history")).boundingBox();
+    assert.ok(historyBox, "the history must have a box");
+    const boxes = await leafBoxes(panel, "未知用户");
+    assert.ok(boxes.some((box) => box.bottom <= historyBox.y + 2), "the header must show 未知用户 for the unnamed peer");
+    assert.ok(boxes.some((box) => box.y >= historyBox.y), "the peer bubble attribution must show 未知用户");
+    assert.ok((await avatarBeside(panel, "未知用户", "?")).length > 0, "the header/attribution must show the ? avatar");
+
+    // Picker: both unnamed peers are offered as 未知用户, still without ids.
+    await requireVisible(composeEntry(panel), "the 新消息 compose entry").then((entry) => entry.click());
+    await requireVisible(recipientField(panel), "the typed recipient field");
+    assert.ok((await avatarElements(panel, "?")).length >= 2, "the picker must show a ? avatar for an unnamed peer");
+    const shown = await disclosure(panel);
+    for (const id of [NAMELESS.peer, ABSENT.peer, USER_SENTINEL]) {
+      assert.ok(!shown.text.includes(id), `no surface may render the raw id ${id}`);
+      assert.ok(!appearsIn(shown.labels, id), `no title or aria-label may carry the raw id ${id}`);
+    }
+  }));
+
+  seed({ conversations: [DOT, ANCHOR], acked: { conv_anchor: 4, conv_dot: 0 } });
+  await check(T.PM12, "PM12 tab open selects and acks nothing", () => withPage(async (page) => {
+    await openDock(page); await messagesTab(page);
+    const panel = dock(page);
+    await requireVisible(selectEmpty(panel), "the 选择一个会话 empty state");
+    assert.equal(await historyRegion(panel).count(), 0, "opening the tab must not open a conversation");
+    assert.equal(await panel.getByText("DOT-UNREAD-ONE", { exact: false }).count(), 0, "no message history may render before a click");
+    await delay(4200);
+    assert.equal(acks().length, 0, "opening the tab must not acknowledge any conversation");
+    // The click is the gesture: it opens the conversation and acknowledges the
+    // newest displayed sequence through the existing semantics.
+    await panel.getByText("Dot Rowan", { exact: true }).or(panel.getByText(DOT.peer, { exact: false })).first().click();
+    await panel.getByText("DOT-UNREAD-ONE", { exact: false }).first().waitFor({ timeout: 15_000 });
+    for (let i = 0; i < 20 && !acks().length; i++) await delay(500);
+    assert.equal(acks().length, 1, "the click must send exactly one acknowledgment");
+    assert.equal(argAfter(acks()[0], "--seq"), "1", "the click must acknowledge the newest displayed sequence");
+    assert.equal(readState().acked.conv_dot, 1, "the click must clear the unread state server-side");
+  }));
+
+  seed();
+  await check(T.PM13, "PM13 right-hand list column and rows", () => withPage(async (page) => {
+    await openDock(page); await messagesTab(page); await openConversation(page, ANCHOR);
+    const panel = dock(page);
+    const column = await listColumn(panel);
+    assert.ok(column, "the conversation list column (compose + 单聊/群聊 + 尚无群聊) is not rendered");
+    const panelBox = await panel.boundingBox();
+    const historyBox = await (await requireVisible(historyRegion(panel), "the bubble stream")).boundingBox();
+    assert.ok(panelBox && historyBox);
+    assert.ok(column.x >= historyBox.x + historyBox.width - 8, `the list must sit right of the bubble stream (${column.x} vs ${historyBox.x + historyBox.width})`);
+    assert.ok(column.x + column.width >= panelBox.x + panelBox.width - 18, "the list must be flush with the panel's right edge");
+    const expected = clamp(panelBox.width * 0.35, 120, 220);
+    assert.ok(column.width >= 118 && column.width <= 222, `the list width ${Math.round(column.width)}px must be clamped to 120–220px`);
+    assert.ok(Math.abs(column.width - expected) <= 22, `the list width ${Math.round(column.width)}px must be about 35% of ${Math.round(panelBox.width)}px (${Math.round(expected)}px)`);
+
+    // Row contents: initial avatar, display name and unread badge.
+    const dotBoxes = await leafBoxes(panel, "Dot Rowan");
+    assert.ok(dotBoxes.some((box) => box.x >= column.x - 2), "a row must show the peer display name");
+    assert.ok((await avatarBeside(panel, "Dot Rowan", avatarInitialOf("Dot Rowan"))).length > 0, "a row must show the initial-plus-colour avatar");
+    assert.ok(await unreadDots(panel.getByRole("button", { name: /Dot Rowan/ }).first()).count() > 0, "an unread row must show its unread badge");
+
+    // Sections in order, 群聊 empty with 尚无群聊, compose entry on top.
+    const directBox = await (await requireVisible(sectionDirect(panel), "the 单聊 section")).boundingBox();
+    const groupsBox = await (await requireVisible(sectionGroups(panel), "the 群聊 section")).boundingBox();
+    const noGroupsBox = await (await requireVisible(noGroupsText(panel), "the 尚无群聊 placeholder")).boundingBox();
+    assert.ok(directBox.y < groupsBox.y && groupsBox.y < noGroupsBox.y, "单聊, then 群聊, then 尚无群聊 must render in that order");
+    const entryBox = await (await requireVisible(composeEntry(panel), "the 新消息 compose entry")).boundingBox();
+    assert.ok(entryBox.y < directBox.y, "the compose entry must sit above the sections");
+    assert.ok(entryBox.x >= column.x - 2, "the compose entry must be inside the list column");
+
+    // Long names are ellipsized inside the column.
+    const ellipsis = await panel.evaluate((dom, name) => {
+      const leaf = [...dom.querySelectorAll("*")].find((el) => (el.textContent || "").trim() === name
+        && ![...el.children].some((child) => (child.textContent || "").trim() === name));
+      if (!leaf) return null;
+      for (let node = leaf; node && node !== dom; node = node.parentElement) {
+        const style = getComputedStyle(node);
+        if (style.textOverflow === "ellipsis") return { clipped: node.scrollWidth > node.clientWidth + 1, width: node.clientWidth };
+      }
+      return { clipped: false, width: leaf.clientWidth };
+    }, LONG_NAME);
+    assert.ok(ellipsis, `the long display name ${LONG_NAME} must render in its row`);
+    assert.ok(ellipsis.clipped, "a long display name must be ellipsized inside the 120–220px column");
+  }));
+
+  seed({ conversations: [BUBBLES], acked: { conv_bubbles: 5 } });
+  await check(T.PM14, "PM14 header shows avatar and name", () => withPage(async (page) => {
+    await openDock(page); await messagesTab(page); await openConversation(page, BUBBLES);
+    const panel = dock(page);
+    const historyBox = await (await requireVisible(historyRegion(panel), "the bubble stream")).boundingBox();
+    assert.ok(historyBox);
+    const boxes = await leafBoxes(panel, "Bea Run");
+    const header = boxes.find((box) => box.bottom <= historyBox.y + 2);
+    assert.ok(header, "the open conversation header must show the peer display name");
+    assert.ok((await avatarBeside(panel, "Bea Run", avatarInitialOf("Bea Run"))).length > 0, "the header must show the peer's initial avatar");
+    const headerSurface = await panel.evaluate((dom, name) => {
+      const leaf = [...dom.querySelectorAll("*")].find((el) => (el.textContent || "").trim() === name
+        && ![...el.children].some((child) => (child.textContent || "").trim() === name));
+      if (!leaf) return null;
+      let node = leaf;
+      for (let i = 0; i < 3 && node.parentElement && node.parentElement !== dom; i++) node = node.parentElement;
+      const labels = [];
+      for (const el of node.querySelectorAll("*")) for (const attribute of ["title", "aria-label"]) { const v = el.getAttribute(attribute); if (v) labels.push(v); }
+      return { text: node.innerText || node.textContent || "", labels };
+    }, "Bea Run");
+    assert.ok(headerSurface, "the header must render the peer name");
+    assert.ok(!headerSurface.text.includes(BUBBLES.peer), "the header must not carry the peer id");
+    assert.ok(!appearsIn(headerSurface.labels, BUBBLES.peer), "no header title or aria-label may carry the peer id");
+  }));
+
+  seed({ conversations: [BUBBLES], acked: { conv_bubbles: 5 } });
+  await check(T.PM15, "PM15 bubble alignment and attribution", () => withPage(async (page) => {
+    await openDock(page); await messagesTab(page); await openConversation(page, BUBBLES);
+    const panel = dock(page);
+    const history = historyRegion(panel);
+    await requireVisible(history, "the bubble stream");
+    const historyBox = await history.boundingBox();
+    assert.ok(historyBox);
+    const centre = historyBox.x + historyBox.width / 2;
+
+    const own = (await leafBoxes(panel, "OWN-BUBBLE"))[0];
+    const peer = (await leafBoxes(panel, "PEER-RUN-ONE"))[0];
+    assert.ok(own && peer, "both the own and the peer message must render");
+    assert.ok(own.x + own.width / 2 > centre, `an own bubble must sit right of the centre (${own.x + own.width / 2} vs ${centre})`);
+    assert.ok(peer.x + peer.width / 2 < centre, `a peer bubble must sit left of the centre (${peer.x + peer.width / 2} vs ${centre})`);
+
+    // The four consecutive peer messages name/avatar only on the first.
+    assert.equal(await history.getByText("Bea Run", { exact: true }).count(), 1, "the peer name must appear once for a consecutive run");
+    assert.equal((await avatarElements(history, avatarInitialOf("Bea Run"))).length, 1, "the peer avatar must appear once for a consecutive run");
+
+    // An own bubble carries no peer name and no avatar.
+    const ownRow = await history.evaluate((dom, needle) => {
+      const leaf = [...dom.querySelectorAll("*")].find((el) => (el.textContent || "").includes(needle)
+        && ![...el.children].some((child) => (child.textContent || "").includes(needle)));
+      if (!leaf) return null;
+      let node = leaf;
+      for (let i = 0; i < 3 && node.parentElement && node.parentElement !== dom; i++) node = node.parentElement;
+      let avatars = 0;
+      for (const el of node.querySelectorAll("*")) {
+        if ((el.textContent || "").trim() !== "B") continue;
+        const box = el.getBoundingClientRect();
+        const bg = getComputedStyle(el).backgroundColor;
+        if (box.width >= 12 && box.width <= 42 && Math.abs(box.width - box.height) <= 10 && bg && bg !== "transparent" && !/rgba\(\s*0\s*,\s*0\s*,\s*0\s*,\s*0\s*\)/.test(bg)) avatars++;
+      }
+      return { text: node.innerText || node.textContent || "", avatars };
+    }, "OWN-BUBBLE");
+    assert.ok(ownRow, "the own message must render");
+    assert.ok(!ownRow.text.includes("Bea Run"), "an own bubble must carry no peer name");
+    assert.equal(ownRow.avatars, 0, "an own bubble must carry no avatar");
+
+    // Timestamps, the work-item anchor quote and the reply quote remain.
+    const text = await history.innerText();
+    assert.match(text, /\b\d{2}:\d{2}\b/, "each message must still show its timestamp");
+    assert.ok(text.includes("task-42"), "the work-item anchor quote must still render");
+    assert.ok((await leafBoxes(panel, "PEER-RUN-ONE")).length >= 2, "the reply must quote its original message");
+  }));
+
+  seed();
+  await check(T.PM16, "PM16 desktop two columns and mobile single view", () => withPage(async (page) => {
+    await openDock(page); await messagesTab(page); await openConversation(page, ANCHOR);
+    const panel = dock(page);
+    const dockBox = await panel.boundingBox();
+    assert.ok(dockBox, "the dock must have a box");
+    assert.ok(Math.abs(dockBox.width - 460) <= 2, `the dock default width must stay 460px, got ${Math.round(dockBox.width)}`);
+    const twoColumns = async (where) => {
+      const column = await listColumn(panel);
+      assert.ok(column, `the list column must render at ${where}`);
+      const historyBox = await (await requireVisible(historyRegion(panel), `the bubble stream at ${where}`)).boundingBox();
+      assert.ok(historyBox, `the bubble stream must render at ${where}`);
+      assert.ok(column.x >= historyBox.x + historyBox.width - 8, `the list and the stream must be two columns at ${where}`);
+    };
+    await twoColumns("the default dock width");
+
+    // The dock's own separator jumps to the 340px minimum (Home): the two
+    // columns stay at the tightest dock width.
+    const handle = await requireVisible(page.locator('[data-resize-handle="polyforge-dock"]').first(), "the dock resize handle");
+    await handle.focus();
+    await handle.press("Home");
+    const narrow = await panel.boundingBox();
+    assert.ok(Math.abs(narrow.width - 340) <= 2, `the dock must clamp at its 340px minimum, got ${Math.round(narrow.width)}`);
+    await twoColumns("the minimum dock width");
+    const narrowColumn = await listColumn(panel);
+    const narrowExpected = clamp(narrow.width * 0.35, 120, 220);
+    assert.ok(Math.abs(narrowColumn.width - narrowExpected) <= 22,
+      `the column ${Math.round(narrowColumn.width)}px must stay within the clamp (${Math.round(narrowExpected)}px)`);
+  }, {}));
+
+  seed({ conversations: [DOT, ANCHOR], acked: { conv_anchor: 4, conv_dot: 1 } });
+  await check(T.PM16, "PM16 mobile single view with a back control", () => withPage(async (page) => {
+    await openDock(page); await messagesTab(page);
+    const panel = dock(page);
+    await requireVisible(sectionDirect(panel), "the list view on mobile");
+    assert.equal(await historyRegion(panel).count(), 0, "mobile must show one view at a time (the list, no history)");
+    await panel.getByText("Dot Rowan", { exact: true }).or(panel.getByText(DOT.peer, { exact: false })).first().click();
+    await requireVisible(historyRegion(panel), "the chat view on mobile");
+    assert.equal(await panel.getByText("单聊", { exact: true }).count(), 0, "the chat view must replace the list on mobile");
+    await requireVisible(panel.getByRole("button", { name: /←/ }).first(), "the mobile back control").then((back) => back.click());
+    await requireVisible(sectionDirect(panel), "the list view after going back");
+    assert.equal(await historyRegion(panel).count(), 0, "going back must return to the list-only view");
+  }, { viewport: { width: 600, height: 900 } }));
+
+  seed({ conversations: [ANCHOR, BUBBLES], acked: { conv_anchor: 4, conv_bubbles: 5 } });
+  await check(T.PM17, "PM17 recipient picker and typed first contact", () => withPage(async (page) => {
+    await openDock(page); await messagesTab(page);
+    const panel = dock(page);
+    const entry = await requireVisible(composeEntry(panel), "the 新消息 compose entry");
+    await entry.click();
+    await requireVisible(recipientField(panel), "the typed recipient field");
+
+    // The picker offers exactly the existing peers, by display name + avatar.
+    for (const name of [PEER_NAME, "Bea Run"]) {
+      assert.ok(await panel.getByText(name, { exact: true }).count() >= 1, `the picker must list ${name}`);
+      assert.ok((await avatarBeside(panel, name, avatarInitialOf(name))).length > 0, `the picker must show ${name}'s initial avatar`);
+    }
+    assert.equal(await unknownText(panel).count(), 0, "no unnamed peer exists in this seed");
+    const shown = await disclosure(panel);
+    for (const id of [PEER, "u_e2e_bubbles_peer", USER_SENTINEL]) {
+      assert.ok(!shown.text.includes(id), `the picker panel must not render the raw id ${id}`);
+      assert.ok(!appearsIn(shown.labels, id), `no title or aria-label may carry the raw id ${id}`);
+    }
+
+    // Picking a peer sends to that conversation's peer id (no name lookup).
+    await panel.getByRole("button", { name: new RegExp("Bea Run") }).first().click();
+    await messageTextField(panel).fill("PICKED-PEER");
+    await sendButton(panel).click();
+    for (let i = 0; i < 20 && !sends().length; i++) await delay(500);
+    assert.equal(sends().length, 1, `picking a peer must spawn exactly one send, got ${JSON.stringify(sends())}`);
+    assert.equal(argAfter(sends()[0], "--to"), "u_e2e_bubbles_peer", "a picked peer must be addressed by its user id, never its name");
+
+    // A first contact is a typed user id; the created row has no name.
+    if (!(await recipientField(panel).count()) && await composeEntry(panel).count()) await composeEntry(panel).click();
+    if (!(await recipientField(panel).count()) && await composeEntry(panel).count()) await composeEntry(panel).click();
+    const typed = await requireVisible(recipientField(panel), "the typed recipient field for a first contact");
+    await typed.fill("u_e2e_typed_peer");
+    await messageTextField(panel).fill("FIRST-CONTACT");
+    await sendButton(panel).click();
+    for (let i = 0; i < 20 && sends().length < 2; i++) await delay(500);
+    assert.equal(sends().length, 2, "a typed first contact must spawn exactly one more send");
+    assert.equal(argAfter(sends()[1], "--to"), "u_e2e_typed_peer", "the typed user id must be the send address");
+    assert.equal(argAfter(sends()[1], "--text"), "FIRST-CONTACT");
+    await panel.getByText("FIRST-CONTACT", { exact: false }).first().waitFor({ timeout: 15_000 });
+    await requireVisible(unknownText(panel), "the 未知用户 placeholder for the new unnamed peer");
+  }));
+
+  seed();
+  await check(T.PM18, "PM18 route peer/peer_name and send addressing", () => withPage(async (page) => {
+    const listed = await get("/api/polyforge/messages");
+    assert.equal(listed.status, 200, `the messages list route answered ${listed.status}: ${listed.text.slice(0, 160)}`);
+    const body = JSON.parse(listed.text);
+    assert.ok(Array.isArray(body.conversations) && body.conversations.length > 0, "the route must list conversations");
+    const anchorRow = body.conversations.find((row) => row.id === "conv_anchor");
+    assert.ok(anchorRow, "the route must carry the seeded conversation");
+    assert.equal(anchorRow.peer, PEER, "the route must keep peer as the send address");
+    assert.equal(anchorRow.peer_name, PEER_NAME, "the route must add peer_name with the display name");
+    for (const row of body.conversations) {
+      if (typeof row.peer_name !== "string" || row.peer_name === "") continue;
+      assert.ok(!row.peer_name.includes(row.peer), "peer_name must never be the raw id");
+    }
+    assert.ok(!listed.text.includes(USER_SENTINEL), "no messages route response may carry the self user id");
+    assert.ok(!listed.text.includes(SELF_NAME), "no messages route response may carry the self display name");
+
+    // A display name is never an address; the peer id is.
+    const byName = await post("/api/polyforge/messages", { to: PEER_NAME, text: "NAME-ADDRESS" });
+    assert.ok(byName.status >= 400 && byName.status < 500, `a display name must never be accepted as an address, got ${byName.status}`);
+    const sent = await post("/api/polyforge/messages", { to: PEER, text: "ROUTE-SEND" });
+    assert.equal(sent.status, 200, `a send addressed by peer id must succeed, got ${sent.status}: ${sent.text.slice(0, 160)}`);
+    for (let i = 0; i < 20 && !sends().length; i++) await delay(500);
+    assert.equal(sends().length, 1, "the route send must spawn exactly one pf msg send");
+    assert.equal(argAfter(sends()[0], "--to"), PEER, "the send must address the peer user id");
+    assert.equal(argAfter(sends()[0], "--text"), "ROUTE-SEND");
+    // The DOM never renders the address either (the list stays ids-free).
+    await openDock(page); await messagesTab(page);
+    const shown = await disclosure(dock(page));
+    assert.ok(!shown.text.includes(PEER), "the panel must not render the peer id it addresses sends to");
+  }));
 } catch (error) {
   console.error(error);
   for (const [title, list] of failures) if (!list.length) failures.set(title, [`suite: ${error?.message ?? error}`]);
