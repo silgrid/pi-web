@@ -9,7 +9,7 @@ const jiti = createJiti(import.meta.url, {
   tsconfigPaths: true,
 });
 const { PaneHeader } = await jiti.import("./PaneHeader.tsx");
-const { I18nProvider } = await jiti.import("../hooks/useI18n.tsx");
+const { I18nProvider } = await jiti.import("@/hooks/useI18n");
 
 const base = {
   id: "pane-1",

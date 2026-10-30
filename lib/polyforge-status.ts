@@ -64,17 +64,25 @@ const COMMAND_REDACTIONS: Array<[RegExp, string]> = [
   [/(--password\s)\S+/gi, "$1***"],
 ];
 
+/** Mask credential-shaped substrings (COMMAND_REDACTIONS), no truncation.
+ *  Shared by `progress.command` and the Jobs-tab card progress entries
+ *, which cap at their own length afterwards. Pure, never
+ *  throws. */
+export function maskPolyforgeCredentials(text: string): string {
+  let masked = text;
+  for (const [pattern, replacement] of COMMAND_REDACTIONS) {
+    masked = masked.replace(pattern, replacement);
+  }
+  return masked;
+}
+
 /** Mask credential-shaped substrings, then truncate to COMMAND_MAX — the
  *  only shape in which `progress.command` may leave the server. A clean
  *  command passes verbatim (the program+args shape is the point); one
  *  carrying credential-shaped substrings never leaves unmasked. Pure,
  *  never throws. */
 export function redactPolyforgeCommand(command: string): string {
-  let redacted = command;
-  for (const [pattern, replacement] of COMMAND_REDACTIONS) {
-    redacted = redacted.replace(pattern, replacement);
-  }
-  return redacted.slice(0, COMMAND_MAX);
+  return maskPolyforgeCredentials(command).slice(0, COMMAND_MAX);
 }
 
 export class PolyforgeError extends Error {
@@ -126,9 +134,20 @@ export interface PolyforgeJob {
   spawnN: number;
 }
 
+/** The machine's one-shot task counts: the Work › Tasks
+ *  badge reads `running`, and the Tasks list re-reads once when
+ *  running+completed changes. pf's other task counters are dropped. */
+export interface PolyforgeTaskCounts {
+  running: number;
+  completed: number;
+}
+
 export interface PolyforgeOpsStatus {
   queue: PolyforgeQueue;
   jobs: PolyforgeJob[];
+  /** Always set by sanitizeOpsStatus (zeros when pf reports none); optional
+   *  only because the config page builds a queue-only snapshot. */
+  tasks?: PolyforgeTaskCounts;
 }
 
 export interface PolyforgeStep {
@@ -300,10 +319,55 @@ async function runPfJson(argv: string[]): Promise<unknown> {
   }
 }
 
-export async function getPolyforgeOpsStatus(): Promise<PolyforgeOpsStatus | null> {
-  const machine = await runPfJson(["--json", "ops", "status"]);
-  return sanitizeOpsStatus(machine);
+/** How long a completed `pf ops status` read is reused. The
+ *  status poll and the cards poll share one spawn and one snapshot (the queue
+ *  line and the cards agree) only when both land inside this window — aligned
+ *  when the dock opens on Work › Jobs at the default 3 s. Out of phase (after
+ *  a tab switch, or at another card interval) each poll spawns its own read
+ *  and may show a different snapshot (docs/agents/polyforge-panel.md). */
+export const OPS_STATUS_REUSE_MS = 1000;
+
+/**
+ * A shared reader over one async read: concurrent calls share
+ * the one in-flight promise, a completed read is reused for `reuseMs`, and a
+ * failed read is never reused (the next call reads again). Calls further apart
+ * than `reuseMs` each read: sharing is a timing window, not a merge.
+ */
+export function createOpsStatusReader<T>(
+  read: () => Promise<T>,
+  now: () => number = Date.now,
+  reuseMs: number = OPS_STATUS_REUSE_MS,
+): () => Promise<T> {
+  let inFlight: Promise<T> | null = null;
+  let last: { value: T; at: number } | null = null;
+  return () => {
+    if (last && now() - last.at < reuseMs) return Promise.resolve(last.value);
+    if (inFlight) return inFlight;
+    const pending = read()
+      .then((value) => {
+        last = { value, at: now() };
+        return value;
+      })
+      .finally(() => {
+        if (inFlight === pending) inFlight = null;
+      });
+    inFlight = pending;
+    return pending;
+  };
 }
+
+/** One independent `pf --json ops status` read, never shared: the detect
+ *  reachability check uses it, so an explicit re-check sees the daemon now. */
+export async function readPolyforgeOpsStatus(): Promise<PolyforgeOpsStatus | null> {
+  return sanitizeOpsStatus(await runPfJson(["--json", "ops", "status"]));
+}
+
+/** The one module-level shared `pf --json ops status` reader: the status
+ *  route and the cards route share it, so their polls spawn once when they
+ *  land within `OPS_STATUS_REUSE_MS` of each other (the same-phase case);
+ *  out of phase each poll spawns its own read. */
+export const getPolyforgeOpsStatus: () => Promise<PolyforgeOpsStatus | null> =
+  createOpsStatusReader(readPolyforgeOpsStatus);
 
 export async function getPolyforgeWatch(wiRef: string): Promise<PolyforgeWatchStatus | null> {
   if (!isPolyforgeWiRef(wiRef)) {
@@ -420,13 +484,16 @@ export function tailPolyforgeEvents(events: unknown[], maxEvents: number = EVENT
 
 /**
  * Machine ops status → response snapshot. Keeps `queue.running`,
- * `queue.max_concurrent` and per-job wi/slug/status/stepAgeSec/idleAgeSec/
- * candidate/spawnN. Drops `env_names`, `workspaces`, `workflows_dir`,
- * `machine_id`, `shutting_down`, `session_fingerprint`, `origin`.
+ * `queue.max_concurrent`, per-job wi/slug/status/stepAgeSec/idleAgeSec/
+ * candidate/spawnN and `tasks.running`/`tasks.completed` (; a
+ * missing or malformed `tasks` reads as zeros). Drops the other task
+ * counters (`capped`, `failed`, `interrupted`, `limit`), `env_names`,
+ * `workspaces`, `workflows_dir`, `machine_id`, `shutting_down`,
+ * `session_fingerprint`, `origin`.
  */
 export function sanitizeOpsStatus(machine: unknown): PolyforgeOpsStatus | null {
   if (!machine || typeof machine !== "object") return null;
-  const m = machine as { queue?: unknown; jobs?: unknown };
+  const m = machine as { queue?: unknown; jobs?: unknown; tasks?: unknown };
   if (!m.queue || typeof m.queue !== "object" || m.queue === null) return null;
   if (!Array.isArray(m.jobs)) return null;
   const queue = m.queue as { running?: unknown; max_concurrent?: unknown };
@@ -453,12 +520,17 @@ export function sanitizeOpsStatus(machine: unknown): PolyforgeOpsStatus | null {
       spawnN: toNumber(j.spawn_n),
     }];
   });
+  const tasks = (m.tasks && typeof m.tasks === "object" ? m.tasks : {}) as { running?: unknown; completed?: unknown };
   return {
     queue: {
       running: toNumber(queue.running),
       max: toNumber(queue.max_concurrent),
     },
     jobs,
+    tasks: {
+      running: toNumber(tasks.running),
+      completed: toNumber(tasks.completed),
+    },
   };
 }
 

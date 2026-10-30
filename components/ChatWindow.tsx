@@ -3,7 +3,7 @@ import { registerAbortHandler } from "@/hooks/useKeyboardShortcuts";
 import { useTabSearch } from "@/hooks/useTabSearch";
 import { TabSearchBar } from "./TabSearchBar";
 import Image from "next/image";
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import type { AgentMessage, AssistantContentBlock, AssistantMessage, BackgroundTasksClientEvent, BashExecutionMessage, BlockingExtensionUiRequest, ExtensionUiRequest, SessionInfo, SessionTreeNode, ToolResultMessage } from "@/lib/types";
 import { normalizeCustomPanelLines } from "@/lib/ansi";
@@ -13,6 +13,7 @@ import { asBracketedPaste, toTerminalKeyData } from "@/lib/terminal-input";
 import { collapsesProcessDetails, countToolCallBlocks, getDisplayableAssistantBlocks, hasAssistantAnswer, isHiddenCustomMessage, isMessageGroupAnchor, splitFinalAssistantBlocks } from "@/lib/message-display";
 import { extractTurnWrittenFiles, type WrittenFile } from "@/lib/turn-written-files";
 import { getFinalAnswerViews, keepWrittenFiles, type FinalAnswerViews } from "@/lib/turn-views";
+import { formatTurnDuration, getTurnDurationMs } from "@/lib/turn-duration";
 import { buildQuotedSelection } from "@/lib/quoted-selection";
 import { dropMentionText, splitDroppedItems, uploadFiles, type DroppedItem } from "@/lib/file-upload-client";
 import { MessageView } from "./MessageView";
@@ -23,15 +24,19 @@ import { ExtensionStatusBar } from "./ExtensionStatusBar";
 import { AnsiText } from "./AnsiText";
 import { useI18n } from "@/hooks/useI18n";
 import { phaseLabel } from "@/lib/chat-phase-label";
-import { useAgentSession, type NoticeItem } from "@/hooks/useAgentSession";
+import { useAgentSession, type AgentEndInfo, type NewSessionChoices, type NoticeItem } from "@/hooks/useAgentSession";
 import { selectHasStreamingContent, selectIsStreaming, selectStreamingMessage, useStreamingSelector } from "@/hooks/useStreamingSelector";
 import type { StreamingStore } from "@/lib/streaming-message";
 import { useDragDrop } from "@/hooks/useDragDrop";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useScrollbarVisibility } from "@/hooks/useScrollbarVisibility";
 import type { SessionStatsInfo } from "@/lib/pi-types";
+import type { DebugClientSession } from "@/lib/debug-types";
 import type { AppUpdateResponse } from "@/lib/api-types";
 import type { ToolEntry } from "@/lib/tool-presets";
+import type { SettingsSection } from "@/lib/settings-navigation";
+import { getTranscriptNotices, summarizeCacheMisses, type CacheMissSummary } from "@/lib/transcript-notices";
+import { cacheMissSummaryText, TRANSCRIPT_NOTICE_WARNING_COLOR, TranscriptNoticeLines } from "@/components/TranscriptNotices";
 import { findChatScrollAnchor, type ChatScrollPosition } from "@/lib/chat-scroll-position";
 import {
   captureScrollAnchor,
@@ -45,6 +50,7 @@ import {
   type ScrollAnchorSnapshot,
 } from "@/lib/chat-lazy-load";
 import { CHAT_COLUMN_PADDING } from "@/lib/pane-state";
+import { isPullFetchTriggered, shouldArmPullFetch } from "@/lib/manual-fetch";
 
 interface Props {
   session: SessionInfo | null;
@@ -56,7 +62,10 @@ interface Props {
   isActivePane?: boolean;
   newSessionCwd: string | null;
   newSessionDraftKey: string | null;
-  onAgentEnd?: () => void;
+  /** A fresh composer's model and reasoning picks, carried from the composer it replaces. */
+  initialNewSessionChoices?: NewSessionChoices | null;
+  onNewSessionChoicesChange?: (choices: NewSessionChoices) => void;
+  onAgentEnd?: (end: AgentEndInfo) => void;
   /** A top-level tool call finished; the files it touched may have changed. */
   onToolEnd?: (toolName: string) => void;
   onAttentionNeeded?: (request: BlockingExtensionUiRequest) => void;
@@ -69,16 +78,24 @@ interface Props {
   onSystemPromptChange?: (prompt: string | null) => void;
   onSystemToolsChange?: (tools: ToolEntry[] | null) => void;
   onSystemInfoLoaderChange?: (loader: (() => Promise<void>) | null) => void;
+  /** Registers the debug panel's read-only reader of this chat's stream and lease. */
+  onDebugSnapshotReaderChange?: (reader: (() => DebugClientSession) | null) => void;
   onSessionStatsChange?: (stats: SessionStatsInfo | null) => void;
   onSessionStatsPanelOpen?: () => void;
+  /** Opens Settings on a section: a bare `/mcp` that pi's built-in MCP extension owns opens Settings › MCP. */
+  onOpenSettings?: (section: SettingsSection) => void;
   onContextUsageChange?: (usage: { percent: number | null; contextWindow: number; tokens: number | null } | null) => void;
   /** Signal from AppShell that the session with this id was written by
    *  another pi process; a new `key` triggers one disk reload. */
   externalSessionChange?: { sessionId: string; key: number } | null;
+  /** The toolbar's ↻: each new value starts one manual fetch in the focused pane. */
+  manualFetchKey?: number;
+  /** Whether this chat offers the manual fetch (a saved session) and whether one is under way; null on unmount. */
+  onManualFetchStateChange?: (state: { available: boolean; inProgress: boolean } | null) => void;
   onOpenFile?: (filePath: string, page?: number) => void;
   /** Files dropped onto the chat were written into the working directory. */
   onFilesUploaded?: () => void;
-  onOpenSession?: (sessionId: string) => void;
+  onOpenSubagent?: (sessionId: string, label: string) => void;
   onAskInNewChat?: (prompt: string, sourceSessionId: string, sourceEntryId: string) => Promise<void>;
   quoteSelectionEnabled?: boolean;
   initialPrompt?: string;
@@ -93,29 +110,46 @@ interface Props {
   holdAudio?: () => () => void;
 }
 
+// One update check per page. Every fresh composer mounts the header again,
+// and a link that turned up late each time would shift the brand row under
+// the reader's eyes; from the second header on it is there in the first paint.
+let appUpdateCheck: Promise<AppUpdateResponse | null> | null = null;
+let appUpdateFound: AppUpdateResponse | null = null;
+
+function checkAppUpdate(): Promise<AppUpdateResponse | null> {
+  appUpdateCheck ??= fetch("/api/app-update")
+    .then(async (response) => {
+      if (!response.ok) return null;
+      const result = await response.json() as AppUpdateResponse;
+      return result.updateAvailable && result.latestVersion && result.releaseUrl ? result : null;
+    })
+    .then((result) => {
+      appUpdateFound = result;
+      return result;
+    })
+    .catch(() => {
+      // Update checks are best-effort and must not interrupt a new session;
+      // a later header asks again.
+      appUpdateCheck = null;
+      return null;
+    });
+  return appUpdateCheck;
+}
+
 function NewSessionUpdateLink({
   label,
 }: {
   label: (version: string) => string;
 }) {
-  const [update, setUpdate] = useState<AppUpdateResponse | null>(null);
+  const [update, setUpdate] = useState<AppUpdateResponse | null>(() => appUpdateFound);
 
   useEffect(() => {
-    const controller = new AbortController();
-    void fetch("/api/app-update", { signal: controller.signal })
-      .then(async (response) => {
-        if (!response.ok) return null;
-        return response.json() as Promise<AppUpdateResponse>;
-      })
-      .then((result) => {
-        if (result?.updateAvailable && result.latestVersion && result.releaseUrl) {
-          setUpdate(result);
-        }
-      })
-      .catch(() => {
-        // Update checks are best-effort and must not interrupt a new session.
-      });
-    return () => controller.abort();
+    if (appUpdateFound) return;
+    let cancelled = false;
+    void checkAppUpdate().then((result) => {
+      if (!cancelled && result) setUpdate(result);
+    });
+    return () => { cancelled = true; };
   }, []);
 
   if (!update) return null;
@@ -189,25 +223,31 @@ function getUserInputText(message: AgentMessage): string | null {
   return text.length > 0 ? text : null;
 }
 
-function ProcessDetailsGroup({ messageCount, toolCallCount, defaultExpanded = false, reveal = false, children, t }: { messageCount: number; toolCallCount: number; defaultExpanded?: boolean; reveal?: boolean; children: ReactNode; t: (key: string, params?: Record<string, string | number>) => string }) {
+function ProcessDetailsGroup({ messageCount, toolCallCount, durationMs, cacheMisses, defaultExpanded = false, reveal = false, children, t }: { messageCount: number; toolCallCount: number; durationMs?: number; cacheMisses?: CacheMissSummary; defaultExpanded?: boolean; reveal?: boolean; children: ReactNode; t: (key: string, params?: Record<string, string | number>) => string }) {
   const [expanded, setExpanded] = useState(defaultExpanded);
   useLayoutEffect(() => {
     if (reveal) setExpanded(true);
   }, [reveal]);
-  const parts = [t("chat.processDetails"), `${messageCount} ${t(messageCount === 1 ? "chat.message" : "chat.messages")}`];
+  // The chevron already says this folds; the words stay in the accessible name.
+  const parts = [`${messageCount} ${t(messageCount === 1 ? "chat.message" : "chat.messages")}`];
   if (toolCallCount > 0) parts.push(`${toolCallCount} ${t(toolCallCount === 1 ? "chat.toolCall" : "chat.toolCalls")}`);
+  if (durationMs !== undefined) parts.push(t("chat.turnDuration", { time: formatTurnDuration(durationMs) }));
+  // Folded, the cache misses inside are added up here (#1265); open, each shows under its step.
+  const cacheMissText = cacheMisses && !(expanded || reveal) ? cacheMissSummaryText(t, cacheMisses) : undefined;
 
   return (
     <div style={{ marginBottom: 14 }}>
       <button
         type="button"
         aria-expanded={expanded || reveal}
+        aria-label={[t("chat.processDetails"), ...parts, ...(cacheMissText ? [cacheMissText] : [])].join(" · ")}
         onClick={() => setExpanded((v) => !v)}
         style={{
           display: "flex",
           alignItems: "center",
           gap: 8,
           width: "auto",
+          maxWidth: "100%",
           minHeight: 24,
           padding: "2px 0",
           border: "none",
@@ -224,6 +264,7 @@ function ProcessDetailsGroup({ messageCount, toolCallCount, defaultExpanded = fa
         </svg>
         <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
           {parts.join(" · ")}
+          {cacheMissText && <span style={{ color: TRANSCRIPT_NOTICE_WARNING_COLOR }}>{` · ${cacheMissText}`}</span>}
         </span>
       </button>
       {(expanded || reveal) && (
@@ -235,7 +276,7 @@ function ProcessDetailsGroup({ messageCount, toolCallCount, defaultExpanded = fa
   );
 }
 
-export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initialScrollPosition, onScrollPositionChange, sessionRunning, isActivePane = true, newSessionCwd, newSessionDraftKey, onAgentEnd, onToolEnd, onAttentionNeeded, onBackgroundTasksEvent, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemToolsChange, onSystemInfoLoaderChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, externalSessionChange, onOpenFile, onFilesUploaded, onOpenSession, onAskInNewChat, quoteSelectionEnabled = false, initialPrompt, onInitialPromptConsumed, soundEnabled = true, onSoundToggle, playDoneSound = () => {}, unlockAudio, holdAudio }: Props) {
+export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initialScrollPosition, onScrollPositionChange, sessionRunning, isActivePane = true, newSessionCwd, newSessionDraftKey, initialNewSessionChoices, onNewSessionChoicesChange, onAgentEnd, onToolEnd, onAttentionNeeded, onBackgroundTasksEvent, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemToolsChange, onSystemInfoLoaderChange, onSessionStatsChange, onSessionStatsPanelOpen, onDebugSnapshotReaderChange, onOpenSettings, onContextUsageChange, externalSessionChange, manualFetchKey, onManualFetchStateChange, onOpenFile, onFilesUploaded, onOpenSubagent, onAskInNewChat, quoteSelectionEnabled = false, initialPrompt, onInitialPromptConsumed, soundEnabled = true, onSoundToggle, playDoneSound = () => {}, unlockAudio, holdAudio }: Props) {
   const { t } = useI18n();
   const isMobile = useIsMobile();
   const completionNotificationsEnabled = session?.relation?.kind !== "subagent";
@@ -249,11 +290,12 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
   const soundEnabledRef = useRef(soundEnabled);
   soundEnabledRef.current = soundEnabled;
   const extensionDialogShownRef = useRef(false);
-  const wrappedOnAgentEnd = useCallback(() => {
-    if (completionNotificationsEnabled && soundEnabledRef.current) {
+  const wrappedOnAgentEnd = useCallback((end: AgentEndInfo) => {
+    // A run someone stopped did not finish anything, and one whose subagents still work did not finish the task.
+    if (completionNotificationsEnabled && soundEnabledRef.current && !end.aborted && !end.subagentsActive) {
       playDoneSoundRef.current();
     }
-    onAgentEnd?.();
+    onAgentEnd?.(end);
   }, [completionNotificationsEnabled, onAgentEnd]);
 
   const initialScrollPositionRef = useRef(searchTarget ? null : initialScrollPosition ?? null);
@@ -264,8 +306,8 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
   const [restoreAnchorReady, setRestoreAnchorReady] = useState(false);
 
   const {
-    loading, error, messages, activeToolResults, entryIds, historyCursor, hasEarlierMessages, streamingStore,
-    agentRunning, bashRunning, pendingBash, modelNames, modelList, modelError, modelScopeWarnings, modelThinkingLevels, modelThinkingLevelMaps, toolPreset, thinkingLevel,
+    loading, error, messages, activeToolResults, entryIds, messageKeys, historyCursor, hasEarlierMessages, streamingStore,
+    agentRunning, bashRunning, pendingBash, modelNames, modelList, modelError, missingCwd, modelScopeWarnings, modelThinkingLevels, modelThinkingLevelMaps, toolPreset, thinkingLevel,
     retryInfo, contextUsage, forkingEntryId,
     isCompacting, compactError, compactResult, displayModel: displayModelValue, modelSwitching, sessionStats,
     slashCommands, slashCommandsLoading, queuedMessages,
@@ -288,9 +330,11 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
     handleToolPresetChange, handleThinkingLevelChange, handleSetDefaultModel, handleSetDefaultThinkingLevel, loadSlashCommands, scrollUserMsgToTop,
     loadContext, activeLeafId, scrollToBottom, scrollToMessage, scrollToOffset,
     refreshFromDisk,
+    manualFetch, manualFetching, manualFetchAvailable,
   } = useAgentSession({
-    session, sessionRunning, newSessionCwd, newSessionDraftKey, onAgentEnd: wrappedOnAgentEnd, onToolEnd, onAttentionNeeded, onBackgroundTasksEvent, onSessionCreated, onSessionForked,
+    session, sessionRunning, newSessionCwd, newSessionDraftKey, initialNewSessionChoices, onNewSessionChoicesChange, onAgentEnd: wrappedOnAgentEnd, onToolEnd, onAttentionNeeded, onBackgroundTasksEvent, onSessionCreated, onSessionForked,
     modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemToolsChange, onSystemInfoLoaderChange, onSessionStatsPanelOpen,
+    onOpenSettings, onDebugSnapshotReaderChange, t,
     deferInitialScroll: Boolean(pendingScrollRestore),
   });
   // Only whether a reply is streaming and has content yet: the chunks themselves
@@ -309,6 +353,58 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
     if (externalSessionChange.sessionId !== session?.id) return;
     void refreshFromDisk(externalSessionChange.sessionId);
   }, [externalSessionChange, session?.id, refreshFromDisk]);
+  // The manual fetch, from the toolbar's ↻ or the bottom
+  // pull-up: a reader at the bottom stays at the bottom with the newest content;
+  // anywhere else no scroll command is issued, so that content stays in place.
+  const runManualFetch = useCallback(() => {
+    const container = scrollContainerRef.current;
+    const atTail = Boolean(container && isScrollAtTail(container.scrollTop, container.clientHeight, container.scrollHeight));
+    void manualFetch().then(() => {
+      if (atTail) requestAnimationFrame(() => scrollToBottom("instant"));
+    });
+  }, [manualFetch, scrollContainerRef, scrollToBottom]);
+  const runManualFetchRef = useRef(runManualFetch);
+  runManualFetchRef.current = runManualFetch;
+  const manualFetchKeyRef = useRef(manualFetchKey);
+  useEffect(() => {
+    // The mount's value is no trigger; an unfocused pane only follows the key.
+    if (manualFetchKeyRef.current === manualFetchKey) return;
+    manualFetchKeyRef.current = manualFetchKey;
+    if (isActivePane) runManualFetchRef.current();
+  }, [manualFetchKey, isActivePane]);
+  useEffect(() => {
+    onManualFetchStateChange?.({ available: manualFetchAvailable, inProgress: manualFetching });
+  }, [manualFetchAvailable, manualFetching, onManualFetchStateChange]);
+  useEffect(() => () => { onManualFetchStateChange?.(null); }, [onManualFetchStateChange]);
+  // The bottom pull-up (touch only): a touch that starts with the list already
+  // at its bottom and is released past PULL_FETCH_THRESHOLD_PX upward starts the
+  // same manual fetch. A touch starting in earlier history, a downward drag (the
+  // top stays with the "load earlier" sentinel) and a mouse or trackpad never do.
+  const pullFetchRef = useRef<{ startY: number; lastY: number } | null>(null);
+  const handlePullTouchStart = useCallback((event: React.TouchEvent<HTMLDivElement>) => {
+    const container = event.currentTarget;
+    const touch = event.touches.length === 1 ? event.touches[0] : undefined;
+    pullFetchRef.current = touch && manualFetchAvailable && shouldArmPullFetch({
+      touch: true,
+      scrollTop: container.scrollTop,
+      clientHeight: container.clientHeight,
+      scrollHeight: container.scrollHeight,
+    }) ? { startY: touch.clientY, lastY: touch.clientY } : null;
+  }, [manualFetchAvailable]);
+  const handlePullTouchMove = useCallback((event: React.TouchEvent<HTMLDivElement>) => {
+    const pull = pullFetchRef.current;
+    const touch = event.touches[0];
+    if (pull && touch) pull.lastY = touch.clientY;
+  }, []);
+  const handlePullTouchEnd = useCallback((event: React.TouchEvent<HTMLDivElement>) => {
+    const pull = pullFetchRef.current;
+    pullFetchRef.current = null;
+    const endY = event.changedTouches[0]?.clientY ?? pull?.lastY;
+    if (pull && endY !== undefined && manualFetchAvailable && isPullFetchTriggered(pull.startY, endY)) runManualFetch();
+  }, [manualFetchAvailable, runManualFetch]);
+  const handlePullTouchCancel = useCallback(() => {
+    pullFetchRef.current = null;
+  }, []);
   // While this session's run is under way its chime may come with the phone
   // locked, where a suspended context cannot start again (#1157).
   useEffect(() => {
@@ -431,7 +527,10 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
       t("chat.quoteIntro"),
       t("chat.quoteQuestion"),
     ));
-    window.getSelection()?.removeAllRanges();
+    // No `removeAllRanges()` here: inserting focuses the composer, and that
+    // focus already collapses the page's selection. Calling it afterwards also
+    // clears the composer's own selection and drops its caret to offset 0
+    // (#1319), so the quote would be typed in front of instead of after.
     closeQuotedSelection();
   }, [chatInputRef, quotedSelection, closeQuotedSelection, t]);
 
@@ -753,16 +852,22 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
   }, [messages.length]);
 
   // After a prepended (older) page commits to the DOM, restore the scroll
-  // position so the viewport doesn't jump. The effect is keyed on
-  // messages.length as well as visibleCount: the scroll-position restore,
-  // search-locate, and minimap-reveal paths inflate visibleCount beyond
-  // messages.length, so a prepend alone does not change visibleCount there
-  // and the anchor would never run (pi#16 — one upward pull then cascaded
-  // page loads into distant history). The snapshot guard consumes the
-  // anchor only once the prepend actually committed: the container height
+  // position so the viewport doesn't jump. A layout effect, not a passive one:
+  // the window growth also renews the sentinel observer, and the browser may
+  // deliver that observer's initial report before a passive effect has run.
+  // The report would capture a new anchor snapshot while the prepend is still
+  // uncompensated and overwrite this one, so the compensation would be lost
+  // and the viewport would jump by the whole page under load. Layout effects
+  // run before paint and before IntersectionObserver delivery.
+  // Keyed on messages.length as well as visibleCount: the scroll-position
+  // restore, search-locate, and minimap-reveal paths inflate visibleCount
+  // beyond messages.length, so a prepend alone does not change visibleCount
+  // there and the anchor would never run (pi#16 — one upward pull then
+  // cascaded page loads into distant history). The snapshot guard consumes
+  // the anchor only once the prepend actually committed: the container height
   // grew and the first rendered entry changed (tail growth — e.g. streaming
   // appends — must not consume the anchor prematurely).
-  useEffect(() => {
+  useLayoutEffect(() => {
     const snapshot = prevScrollAnchorRef.current;
     if (snapshot == null) return;
     const container = scrollContainerRef.current;
@@ -1019,6 +1124,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
       modelNames={modelNames}
       modelList={modelList}
       modelError={modelError}
+      missingCwd={missingCwd}
       modelScopeWarnings={modelScopeWarnings}
       onModelChange={handleModelChange}
       modelSwitching={modelSwitching}
@@ -1212,6 +1318,10 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
           // session grows past one screen.
           className="scrollbar-subtle min-w-0 flex-1 overflow-x-hidden overflow-y-auto pt-4 [scrollbar-gutter:stable]"
           style={{ visibility: pendingScrollRestore ? "hidden" : undefined }}
+          onTouchStart={handlePullTouchStart}
+          onTouchMove={handlePullTouchMove}
+          onTouchEnd={handlePullTouchEnd}
+          onTouchCancel={handlePullTouchCancel}
         >
           <div style={{ minWidth: 0, padding: `0 ${CHAT_COLUMN_PADDING}px` }}>
             <div ref={messageContentRef} onPointerUp={captureQuotedSelection} style={{ width: "100%", minWidth: 0, maxWidth: "var(--chat-content-max-width, 820px)", margin: "0 auto" }}>
@@ -1241,13 +1351,17 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
                 if (idx === lastUserIdx) { (lastUserMsgRef as { current: HTMLDivElement | null }).current = el; }
               };
 
-              const renderMessage = (idx: number, options: { attachRef?: boolean; keyPrefix?: string; messageOverride?: AgentMessage; showTimestamp?: boolean; writtenFiles?: WrittenFile[]; recoverTruncation?: boolean } = {}): ReactNode => {
+              const renderMessage = (idx: number, options: { attachRef?: boolean; keyPrefix?: string; messageOverride?: AgentMessage; showTimestamp?: boolean; writtenFiles?: WrittenFile[]; recoverTruncation?: boolean; turnDurationMs?: number; withNotices?: boolean } = {}): ReactNode => {
                 const msg = options.messageOverride ?? messages[idx];
                 if (isHiddenCustomMessage(msg)) return null;
+                // pi's showCacheMissNotices (#1265): read from the stored message, not a turn view's copy.
+                const notices = options.withNotices === false ? [] : getTranscriptNotices(messages[idx]);
                 const isVisible = isMessageGroupAnchor(msg) || msg.role === "assistant";
                 const currentRefIdx = visibleRefIndexByMessage.get(idx);
                 const keyPrefix = options.keyPrefix ?? "message";
-                const messageKey = entryIds[idx] ?? idx;
+                // Not the entry id alone: a message sent or streamed in this run
+                // gets its id only when the file is read again (#1184).
+                const messageKey = messageKeys[idx];
                 let showTimestamp = false;
                 if (msg.role === "assistant") {
                   showTimestamp = true;
@@ -1270,7 +1384,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
                     modelNames={modelNames}
                     cwd={messageCwd}
                     onOpenFile={onOpenFile}
-                    onOpenSession={onOpenSession}
+                    onOpenSubagent={onOpenSubagent}
                     entryId={entryIds[idx]}
                     searchBlock={entryIds[idx] === pendingSearchScroll?.entryId ? searchBlock : undefined}
                     onFork={bashRunning || isNew ? undefined : handleFork}
@@ -1282,15 +1396,19 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
                     prevTimestamp={idx > 0 ? (messages[idx - 1] as AgentMessage & { timestamp?: number }).timestamp : undefined}
                     sessionId={session?.id ?? sessionIdRef.current ?? undefined}
                     writtenFiles={options.writtenFiles}
+                    turnDurationMs={options.turnDurationMs}
                     onCompact={options.recoverTruncation ? handleCompact : undefined}
                     isCompacting={options.recoverTruncation ? isCompacting : undefined}
                     compactError={options.recoverTruncation ? compactError : undefined}
                   />
                 );
-                if (!isVisible || currentRefIdx === undefined) return view;
+                const noticeLines = notices.length > 0 ? <TranscriptNoticeLines key={`${keyPrefix}-notices-${messageKey}`} notices={notices} /> : null;
+                // One shape with or without notices, so lines arriving on a reload do not remount the view.
+                if (!isVisible || currentRefIdx === undefined) return <Fragment key={`${keyPrefix}-${messageKey}`}>{view}{noticeLines}</Fragment>;
                 return (
                   <div key={`${keyPrefix}-${messageKey}`} data-entry-id={entryIds[idx]} className={prependedIds.has(entryIds[idx]) ? "chat-row-prepended" : undefined} ref={options.attachRef === false ? undefined : attachVisibleRef(idx, currentRefIdx)}>
                     {view}
+                    {noticeLines}
                   </div>
                 );
               };
@@ -1334,10 +1452,17 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
 
                 if (hasAnchor) rendered.push(renderMessage(userIdx));
 
+                // A leading segment without its anchor has no start time, and neither has the bubble a
+                // send shows at once: it carries the browser's clock, not pi's, until the reload after
+                // the run brings the session file's entry (the only kind with an entry id).
+                const turnDurationMs = hasAnchor && entryIds[userIdx] ? getTurnDurationMs(messages, userIdx, endIdx) : undefined;
+
                 const finalViews = getFinalAnswerViews(finalAnswerViewCache, messages[finalAssistantIdx] as AssistantMessage);
                 const finalAnswerMessage = finalViews.answer;
 
                 const processViews: ReactNode[] = [];
+                // processViews also holds the notice lines of steps that show nothing else.
+                let processMessageCount = 0;
                 let processToolCount = 0;
                 let processRefIdx: number | undefined;
                 let revealProcess = false;
@@ -1348,29 +1473,41 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
                     // Not counted either: a turn whose only extra is a hidden message has no process details.
                     if (isHiddenCustomMessage(processMessage)) continue;
                     revealProcess ||= Boolean(pendingSearchScroll && pendingSearchScroll.entryId === entryIds[processIdx]);
+                    processMessageCount += 1;
                     processViews.push(renderMessage(processIdx, { attachRef: false, keyPrefix: "process" }));
                     continue;
                   }
                   if (processMessage.role !== "assistant") continue;
                   const message = processIdx === finalAssistantIdx ? finalViews.process : processMessage;
+                  // The final message's notices go under its answer when it has one.
+                  const withNotices = processIdx !== finalAssistantIdx || !finalAnswerMessage;
                   const blocks = getDisplayableAssistantBlocks(message);
-                  if (blocks.length === 0) continue;
+                  if (blocks.length === 0) {
+                    const notices = withNotices ? getTranscriptNotices(processMessage) : [];
+                    if (notices.length > 0) processViews.push(<TranscriptNoticeLines key={`process-notices-${messageKeys[processIdx]}`} notices={notices} />);
+                    continue;
+                  }
                   processRefIdx ??= visibleRefIndexByMessage.get(processIdx);
                   processToolCount += countToolCallBlocks(blocks);
+                  processMessageCount += 1;
                   revealProcess ||= Boolean(pendingSearchScroll && entryIds[processIdx] === pendingSearchScroll.entryId && (!searchBlock || blocks.includes(searchBlock)));
                   processViews.push(renderMessage(processIdx, {
                     attachRef: false,
                     keyPrefix: "process",
                     messageOverride: message,
                     showTimestamp: false,
+                    withNotices,
                   }));
                 }
 
-                if (processViews.length > 0) {
+                // Only notice lines, from steps that show nothing else: no fold for them.
+                if (processMessageCount === 0) rendered.push(...processViews);
+                else if (processViews.length > 0) {
                   const answered = collapsesProcessDetails(finalAnswerMessage);
+                  const processCacheMisses = summarizeCacheMisses(messages.slice(userIdx + 1, finalAnswerMessage ? finalAssistantIdx : finalAssistantIdx + 1));
                   rendered.push(
                     <div
-                      key={`process-group-${entryIds[groupStartIdx] ?? groupStartIdx}`}
+                      key={`process-group-${messageKeys[groupStartIdx]}`}
                       ref={processRefIdx === undefined ? undefined : (el) => { messageRefs.current[processRefIdx] = el; }}
                     >
                       {/* Re-key on answer availability: useState reads defaultExpanded only
@@ -1378,7 +1515,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
                           would otherwise stay open once its answer shows up, e.g. when
                           switching between an answered and an unanswered leaf of the same
                           turn. Manual toggles survive every other re-render. */}
-                      <ProcessDetailsGroup key={answered ? "answered" : "unanswered"} messageCount={processViews.length} toolCallCount={processToolCount} defaultExpanded={!answered} reveal={revealProcess} t={t}>
+                      <ProcessDetailsGroup key={answered ? "answered" : "unanswered"} messageCount={processMessageCount} toolCallCount={processToolCount} durationMs={turnDurationMs} cacheMisses={processCacheMisses} defaultExpanded={!answered} reveal={revealProcess} t={t}>
                         {processViews}
                       </ProcessDetailsGroup>
                     </div>,
@@ -1401,6 +1538,8 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
                   rendered.push(renderMessage(finalAssistantIdx, {
                     messageOverride: finalAnswerMessage,
                     writtenFiles,
+                    // Without process details the turn's time goes under the answer.
+                    turnDurationMs: processViews.length === 0 ? turnDurationMs : undefined,
                     recoverTruncation: endIdx === messages.length && !isStreaming && !hasAssistantAnswer(finalAnswerMessage),
                   }));
                 }
@@ -1433,12 +1572,12 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
               );
             })()}
             {isStreaming && hasStreamingContent && (
-              <StreamingReply store={streamingStore} onCommit={updatePromptAnchor} toolResults={toolResultsMap} modelNames={modelNames} cwd={messageCwd} onOpenFile={onOpenFile} onOpenSession={onOpenSession} />
+              <StreamingReply store={streamingStore} onCommit={updatePromptAnchor} toolResults={toolResultsMap} modelNames={modelNames} cwd={messageCwd} onOpenFile={onOpenFile} onOpenSubagent={onOpenSubagent} />
             )}
 
-            {agentRunning && !hasStreamingContent && (agentPhase || isCompacting) && (
+            {(agentRunning || isCompacting) && !hasStreamingContent && (agentPhase || isCompacting) && (
               <div className="break-words py-2 text-[13px] text-text-muted">
-                <span className="animate-[pulse_1.5s_infinite]">{phaseLabel(agentPhase, t, isCompacting)}</span>
+                <span className="animate-[pulse_1.5s_infinite]">{phaseLabel(agentPhase, t, isCompacting, (queuedMessages?.steering.length ?? 0) + (queuedMessages?.followUp.length ?? 0))}</span>
               </div>
             )}
 
@@ -1457,7 +1596,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
                   excludeFromContext: pendingBash.excludeFromContext,
                 } as BashExecutionMessage}
                 sessionId={session?.id ?? sessionIdRef.current ?? undefined}
-                onOpenSession={onOpenSession}
+                onOpenSubagent={onOpenSubagent}
               />
             )}
 
@@ -1557,7 +1696,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
         document.body,
       )}
 
-      <div className="relative shrink-0">
+      <div className="relative flex min-h-0 flex-col">
         {!isEmptyNew && (
           <div
             style={{
@@ -1585,27 +1724,31 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
             </button>
           </div>
         )}
+        {/* The empty new-session header: the versions line (web and pi), then
+            the brand ("Pi Web" with its logo) and the update link
+            (NewSessionUpdateLink) while a newer release exists. */}
         {isEmptyNew && (
-          <div className="mb-3 w-full" style={{ paddingLeft: 16, paddingRight: isMobile ? 16 : 52 }}>
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, maxWidth: "var(--chat-content-max-width, 820px)", margin: "0 auto", fontFamily: "var(--font-mono)" }}>
-              <div style={{ display: "flex", alignItems: "center", gap: isMobile ? 7 : 10, minWidth: 0, flex: 1, lineHeight: 1.4, overflow: "hidden" }}>
-                <Image src="/icons/apple-touch-icon.png" width={32} height={32} alt="" priority style={{ flexShrink: 0 }} />
-                <span style={{ fontSize: 22, color: "var(--text)", fontWeight: 700, flexShrink: 0, whiteSpace: "nowrap" }}>Pi Web</span>
-                <NewSessionUpdateLink label={(version) => t("appUpdate.releaseNotes", { version })} />
+          <div style={{ paddingLeft: 16, paddingRight: isMobile ? 16 : 52 }}>
+            <div style={{ maxWidth: "var(--chat-content-max-width, 820px)" }}>
+              <div>
+                <span>web <span>v{process.env.NEXT_PUBLIC_APP_VERSION ?? "0.0.0"}</span></span>
+                <span>pi <span>v{process.env.NEXT_PUBLIC_PI_VERSION ?? "0.0.0"}</span></span>
               </div>
-              <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 2, flexShrink: 0 }}>
-                <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
-                  web <span style={{ color: "var(--text)" }}>v{process.env.NEXT_PUBLIC_APP_VERSION ?? "0.0.0"}</span>
-                </span>
-                <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
-                  pi <span style={{ color: "var(--text)" }}>v{process.env.NEXT_PUBLIC_PI_VERSION ?? "0.0.0"}</span>
-                </span>
+              <div className="new-session-brand" style={{ gap: isMobile ? 7 : 10 }}>
+                <Image src="/icons/apple-touch-icon.png" width={32} height={32} alt="" priority style={{ flexShrink: 0 }} />
+                <span className="new-session-brand-name">Pi Web</span>
+                <NewSessionUpdateLink label={(version) => t("appUpdate.releaseNotes", { version })} />
               </div>
             </div>
           </div>
         )}
         {chatInputElement}
-        <ExtensionStatusBar statuses={extensionStatuses} widgets={extensionWidgets} />
+        <ExtensionStatusBar
+          statuses={extensionStatuses}
+          widgets={extensionWidgets}
+          onCommand={handleSend}
+          commandsDisabled={sessionBusy}
+        />
       </div>
       {isEmptyNew && <div className="min-h-0 flex-1" />}
     </div>
@@ -1621,7 +1764,7 @@ const NOTICE_MIN_HEIGHT_PX = 60;
 const NOTICE_LINE_BOX_PX = 21;
 const NOTICE_TEXT_PADDING_Y_PX = (NOTICE_MIN_HEIGHT_PX - 2 - NOTICE_LINE_BOX_PX) / 2;
 // The reply being streamed: the one part of the chat a chunk re-renders.
-const StreamingReply = memo(function StreamingReply({ store, onCommit, toolResults, modelNames, cwd, onOpenFile, onOpenSession }: {
+const StreamingReply = memo(function StreamingReply({ store, onCommit, toolResults, modelNames, cwd, onOpenFile, onOpenSubagent }: {
   store: StreamingStore;
   /** Runs after each chunk is in the DOM. */
   onCommit: () => void;
@@ -1629,12 +1772,12 @@ const StreamingReply = memo(function StreamingReply({ store, onCommit, toolResul
   modelNames: Record<string, string>;
   cwd?: string;
   onOpenFile?: (filePath: string, page?: number) => void;
-  onOpenSession?: (sessionId: string) => void;
+  onOpenSubagent?: (sessionId: string, label: string) => void;
 }) {
   const message = useStreamingSelector(store, selectStreamingMessage);
   useLayoutEffect(onCommit, [message, onCommit]);
   if (!message) return null;
-  return <MessageView message={message} toolResults={toolResults} isStreaming modelNames={modelNames} cwd={cwd} onOpenFile={onOpenFile} onOpenSession={onOpenSession} />;
+  return <MessageView message={message} toolResults={toolResults} isStreaming modelNames={modelNames} cwd={cwd} onOpenFile={onOpenFile} onOpenSubagent={onOpenSubagent} />;
 });
 
 // Toast 整体高度上限；文本区高度上限 = 整体上限 - 上下边框（全局 box-sizing: border-box，
@@ -1829,10 +1972,13 @@ function ExtensionDialog({
       if (disposed) return;
       const blocks = body.querySelectorAll<HTMLElement>("pre, .markdown-table-wrap");
       if (blocks.length === 0) return;
-      const needed = fitExtensionDialogWidth(
-        dialog.offsetWidth,
-        Array.from(blocks, (block) => block.scrollWidth - block.clientWidth),
-      );
+      // Code fences wrap their long lines; measured unwrapped, they still widen
+      // the dialog as far as the screen allows and wrap only past that. The
+      // class is an attribute change, which the observer below does not watch.
+      body.classList.add("extension-dialog-measuring");
+      const overflows = Array.from(blocks, (block) => block.scrollWidth - block.clientWidth);
+      body.classList.remove("extension-dialog-measuring");
+      const needed = fitExtensionDialogWidth(dialog.offsetWidth, overflows);
       // Only ever grow: shrinking again would make the dialog jump while it is read.
       if (needed !== null) setFitWidth((prev) => (prev !== null && prev >= needed ? prev : needed));
     };

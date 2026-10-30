@@ -127,7 +127,9 @@ test("pi#117: dragging the resize handle never dismisses the dock (the handle co
 
 test("the shell wires the hook's full state into the panel", () => {
   assert.match(source, /usePolyforge\(pfPanelOpen\)/);
-  for (const prop of ["opsStatus={pfOpsStatus}", "opsError={pfOpsError}", "watchStatus={pfWatchStatus}",
+  assert.match(source, /cards: pfCards,\s*cardsError: pfCardsError,/, "the card stream comes from the hook");
+  assert.equal(source.split("cards={pfCards}").length - 1, 2, "both the dock and the sheet render the card stream");
+  for (const prop of ["opsStatus={pfOpsStatus}", "opsError={pfOpsError}", "cards={pfCards}", "cardsError={pfCardsError}", "watchStatus={pfWatchStatus}",
     "selectedWi={pfSelectedWi}", "onSelect={selectPolyforgeJob}", "onRefresh={refreshPolyforgeStatus}"]) {
     assert.ok(source.includes(prop), `missing panel wiring: ${prop}`);
   }
@@ -142,7 +144,8 @@ test("no RegExp lookbehind anywhere in the new client sources", () => {
 test("pi#113: a pointer press outside the desktop dock dismisses it, without eating the click", () => {
   // The listener lives only while the desktop dock is open (mobile keeps its
   // backdrop; a closed dock leaves nothing attached).
-  assert.match(source, /if \(!pfPanelOpen \|\| isMobile\) return;/, "gated on desktop-dock-open");
+  // a pinned dock installs no listener at all.
+  assert.match(source, /if \(!pfPanelOpen \|\| isMobile \|\| pfDockPinned\) return;/, "gated on desktop-dock-open and unpinned");
   assert.match(source, /document\.addEventListener\("pointerdown", dismissOnOutsidePress\);/);
   assert.match(source, /return \(\) => document\.removeEventListener\("pointerdown", dismissOnOutsidePress\);/, "cleanup detaches the listener");
   // The dismissal path must not swallow the press: the same click still fires
@@ -213,7 +216,33 @@ test("the shell passes the messages surface and tab state into both dock branche
   assert.match(source, /onActiveTab=\{setPfActiveTab\}/);
 });
 
+test("both dock branches forward Work's sub-tab state", () => {
+  assert.match(source, /workTab: pfWorkTab,\s*setWorkTab: setPfWorkTab,/, "the shell reads the sub-tab from the one hook");
+  assert.equal((source.match(/workTab=\{pfWorkTab\}\s*onWorkTab=\{setPfWorkTab\}/g) ?? []).length, 2, "mobile sheet and desktop dock share the sub-tab");
+});
+
 test("both dock branches pass the memory cwd to the panel", () => {
   assert.equal((source.match(/memoryCwd=\{projectTrustCwd\}/g) ?? []).length, 2, "mobile sheet and desktop dock share the session cwd");
   assert.match(source, /const projectTrustCwd = selectedSession\?\.cwd \?\? effectiveNewSessionCwd;/, "the cwd is the config panel's own source");
+});
+
+test("the desktop dock pin persists globally, suppresses only the outside-press dismissal and reopens on load", () => {
+  assert.match(source, /const PF_DOCK_PINNED_KEY = "pi-web:polyforge-dock-pinned";/, "one global storage key");
+  // Guarded reads and writes, like the other pi-web:polyforge-* keys.
+  const mount = source.slice(source.indexOf("let pinned = false;"), source.indexOf("const togglePfDockPin"));
+  assert.match(mount, /try \{\s*pinned = window\.localStorage\.getItem\(PF_DOCK_PINNED_KEY\) === "1";\s*\} catch/, "a guarded read; only \"1\" pins");
+  assert.match(mount, /if \(window\.matchMedia\(MOBILE_MEDIA_QUERY\)\.matches\) return;\s*setBgPanelOpen\(false\);\s*setPfPanelOpen\(true\);/,
+    "a pinned load reopens the dock on desktop only, closing bg-tasks first (shared slot)");
+  assert.match(source, /\}, \[\]\);\s*\n\s*const togglePfDockPin/, "the reopen is a one-shot mount effect");
+  const toggle = source.slice(source.indexOf("const togglePfDockPin"), source.indexOf("}, [pfDockPinned]);"));
+  assert.match(toggle, /try \{\s*if \(next\) window\.localStorage\.setItem\(PF_DOCK_PINNED_KEY, "1"\);\s*else window\.localStorage\.removeItem\(PF_DOCK_PINNED_KEY\);\s*\} catch/, "a guarded write");
+  // Closing never touches the pin: both close paths only close the dock.
+  assert.equal((source.match(/onClose=\{\(\) => setPfPanelOpen\(false\)\}/g) ?? []).length, 2, "the panel close only closes (sheet and dock)");
+  assert.equal((source.match(/setPfDockPinned\(/g) ?? []).length, 2, "only the mount read and the pin control write the pin");
+  // The pin control renders on the desktop dock only.
+  assert.match(source, /showPin=\{false\}\s*pinned=\{pfDockPinned\}/, "the mobile sheet shows no pin");
+  assert.match(source, /showPin\s*pinned=\{pfDockPinned\}\s*onTogglePin=\{togglePfDockPin\}/, "the desktop dock shows the pin");
+  // The dock stays an absolute overlay (no chat resize).
+  const dock = source.slice(source.indexOf('id="polyforge-dock"'), source.indexOf('id="polyforge-dock"') + 400);
+  assert.match(dock, /position: "absolute", top: 0, right: 0, bottom: 0/, "the dock stays an overlay");
 });

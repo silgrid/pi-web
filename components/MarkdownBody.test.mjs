@@ -10,7 +10,7 @@ const jiti = createJiti(import.meta.url, {
   tsconfigPaths: true,
 });
 const { MarkdownBody } = await jiti.import("./MarkdownBody.tsx");
-const { normalizeDisplayMath, markdownPreviewRemarkPlugins, markdownPreviewRehypePlugins } = await jiti.import("../lib/markdown.ts");
+const { normalizeDisplayMath, markdownPreviewRemarkPlugins, markdownPreviewRehypePlugins, markdownRemarkPlugins, markdownRehypePlugins } = await jiti.import("../lib/markdown.ts");
 const { I18nProvider } = await jiti.import("@/hooks/useI18n");
 
 function renderMarkdown(markdown, props = {}) {
@@ -27,6 +27,65 @@ function renderMarkdown(markdown, props = {}) {
   );
 }
 
+test("a document reader keeps local links in the page without an href", () => {
+  const local = renderMarkdown("[relative](references/setup.md#config) [anchor](#config) [outside](../outside.md) [absolute](/etc/test.md) [attachment](image.png)", { onOpenFile: undefined, onNavigateLink() {} });
+  assert.equal((local.match(/<a role="link" tabindex="0">/g) ?? []).length, 5);
+  assert.doesNotMatch(local, /href=|target=|\snode=/);
+  const external = renderMarkdown("[web](https://example.com) [mail](mailto:hello@example.com) [bad](javascript:alert%281%29)", { onOpenFile: undefined, onNavigateLink() {} });
+  assert.equal((external.match(/target="_blank" rel="noopener noreferrer"/g) ?? []).length, 3);
+  assert.doesNotMatch(external, /role="link"|javascript:|alert%28/);
+  // Chat keeps its links as they were.
+  assert.match(renderMarkdown("[relative](references/setup.md)", { onOpenFile: undefined }), /<a href="references\/setup.md" target="_blank"/);
+});
+
+test("a document reader keeps HTML anchor destinations and link labels", () => {
+  const html = renderMarkdown('<a id="install"></a>\n\n<a href="guide.md" title="Read setup" aria-label="Setup guide">Next</a>\n\n[Jump](guide.md "Read the setup guide")', { onOpenFile: undefined, onNavigateLink() {} });
+  assert.match(html, /<a id="user-content-install" target="_blank" rel="noopener noreferrer"><\/a>/);
+  assert.match(html, /<a title="Read setup" aria-label="Setup guide" role="link" tabindex="0">Next<\/a>/);
+  assert.match(html, /<a title="Read the setup guide" role="link" tabindex="0">Jump<\/a>/);
+});
+
+test("heading anchors are opt-in, scoped, formatted-text aware and generated before KaTeX", () => {
+  const markdown = "# Setup **guide**!\n\n## Configuration\n\n## Configuration\n\n## Configuration-1\n\n## Configuration\n\n## 中文 标题\n\n## `code` & punctuation.\n\n## Compute $x$";
+  assert.doesNotMatch(renderMarkdown(markdown), /data-heading-anchor/);
+  const html = renderMarkdown(markdown, { onNavigateLink() {} });
+  const anchors = [...html.matchAll(/data-heading-anchor="([^"]*)"/g)].map((match) => match[1]);
+  assert.deepEqual(anchors, ["setup-guide", "configuration", "configuration-1", "configuration-1-1", "configuration-2", "中文-标题", "code--punctuation", "compute-x"]);
+  assert.doesNotMatch(html, /\sid=/);
+  assert.match(html, /class="katex"/);
+  assert.equal(renderMarkdown(markdown, { onNavigateLink() {} }), html, "new renders restart the slug sequence");
+});
+
+test("renders CJK sentence emphasis without spaces after closing punctuation", () => {
+  const sentence = "今天天气很好。";
+  const markdown = `**${sentence}**我们去公园散步吧。`;
+  for (const props of [{}, { keepLineBreaks: true }]) {
+    const html = renderMarkdown(markdown, props);
+    assert.ok(html.includes(`<strong>${sentence}</strong>我们`));
+    assert.doesNotMatch(html, /\*\*/);
+  }
+  const preview = renderToStaticMarkup(React.createElement(ReactMarkdown, {
+    remarkPlugins: markdownPreviewRemarkPlugins,
+    rehypePlugins: markdownPreviewRehypePlugins,
+  }, markdown));
+  assert.ok(preview.includes(`<strong>${sentence}</strong>我们`));
+});
+
+test("renders CJK brackets next to prose while preserving nested emphasis", () => {
+  assert.match(renderMarkdown("这是**「重要」**内容。"), /这是<strong>「重要」<\/strong>内容。/);
+  assert.match(renderMarkdown("これは**テスト。**テスト"), /これは<strong>テスト。<\/strong>テスト/);
+  assert.match(renderMarkdown("**outer *inner* text**"), /<strong>outer <em>inner<\/em> text<\/strong>/);
+});
+
+test("keeps CJK emphasis markers literal in code and escaped text", () => {
+  const literal = "**需要。**即使";
+  for (const markdown of [`\`${literal}\``, `\`\`\`\n${literal}\n\`\`\``, "\\*\\*需要。\\*\\*即使"]) {
+    const html = renderMarkdown(markdown);
+    assert.doesNotMatch(html, /<strong>/);
+    assert.ok(html.includes(literal));
+  }
+});
+
 test("opens non-file markdown links in a safe new tab", () => {
   const html = renderMarkdown("[docs](https://example.com/docs)");
 
@@ -37,6 +96,17 @@ test("opens non-file markdown links in a safe new tab", () => {
   assert.doesNotMatch(html, /\snode=/);
 });
 
+test("opens desktop app links like other external links (#1108)", () => {
+  for (const props of [{}, { onOpenFile: undefined }]) {
+    const html = renderMarkdown("[note](obsidian://open?vault=notes)", props);
+
+    assert.match(
+      html,
+      /<a (?=[^>]*href="obsidian:\/\/open\?vault=notes")(?=[^>]*target="_blank")(?=[^>]*rel="noopener noreferrer")[^>]*>note<\/a>/,
+    );
+  }
+});
+
 test("keeps local file markdown links in the app", () => {
   const relativeHtml = renderMarkdown("[file](components/MarkdownBody.tsx)");
   const fileUrlHtml = renderMarkdown("[report](file:///home/me/project/report.html)");
@@ -45,6 +115,21 @@ test("keeps local file markdown links in the app", () => {
   assert.doesNotMatch(relativeHtml, /target=|rel=|\snode=/);
   assert.match(fileUrlHtml, /<a href="file:\/\/\/home\/me\/project\/report\.html">report<\/a>/);
   assert.doesNotMatch(fileUrlHtml, /target=|rel=|\snode=/);
+});
+
+test("keeps Windows drive report links in chat and user messages", () => {
+  for (const keepLineBreaks of [false, true]) {
+    for (const url of ["C:/reports/REPORT.md", "/C:/reports/REPORT.md", "d:/报告 one%20%2520.md:12:3#片段"]) {
+      const normalized = `file:///${url.replace(/^\//, "")}`;
+      const expected = renderMarkdown(`[report](<${normalized}>)`, { keepLineBreaks });
+      assert.equal(renderMarkdown(`[report](<${url}>)`, { keepLineBreaks }), expected);
+      assert.equal(renderMarkdown(`[report][ref]\n\n[ref]: <${url}>`, { keepLineBreaks }), expected);
+      assert.match(expected, /href="file:\/\/\//);
+      assert.doesNotMatch(expected, /target=|rel=/);
+      const inert = renderMarkdown(`[report](<${url}>)`, { keepLineBreaks, onOpenFile: undefined });
+      assert.match(inert, /<a href="" target="_blank" rel="noopener noreferrer">report<\/a>/);
+    }
+  }
 });
 
 test("keeps file URLs inert without an in-app file handler", () => {
@@ -238,6 +323,29 @@ test("uses a generic preview label when a markdown image has no alt text", () =>
   assert.doesNotMatch(html, /Preview image:/);
 });
 
+test("plays a markdown audio or video file inline instead of showing a broken image", () => {
+  const audioHtml = renderMarkdown("![take 2](out/take2.wav)");
+  assert.match(
+    audioHtml,
+    /<audio (?=[^>]*controls="")(?=[^>]*preload="metadata")(?=[^>]*src="\/api\/files\/home\/me\/project\/out\/take2\.wav\?type=read")(?=[^>]*aria-label="take 2")[^>]*>/,
+  );
+  assert.doesNotMatch(audioHtml, /<img|<button|\snode=/);
+
+  const videoHtml = renderMarkdown("![](https://example.com/clip.mp4?v=2)");
+  assert.match(
+    videoHtml,
+    /<video (?=[^>]*controls="")(?=[^>]*playsInline="")(?=[^>]*preload="metadata")(?=[^>]*src="https:\/\/example\.com\/clip\.mp4\?v=2")[^>]*>/,
+  );
+  assert.doesNotMatch(videoHtml, /aria-label|<img|<button/);
+
+  // A linked clip stays a plain player inside its link, as a linked image does.
+  const linkedHtml = renderMarkdown("[![demo](out/demo.webm)](https://example.com/demo)");
+  assert.match(linkedHtml, /<a [^>]*href="https:\/\/example\.com\/demo"[^>]*><video [^>]*src="\/api\/files\/home\/me\/project\/out\/demo\.webm\?type=read"[^>]*><\/video><\/a>/);
+
+  // Images keep their preview.
+  assert.match(renderMarkdown("![chart](out/chart.png)"), /<button[^>]+aria-label="Preview image: chart"/);
+});
+
 test("keeps CJK prose out of an autolinked URL", () => {
   const html = renderMarkdown("开 http://localhost:4321，或直接开 library/x.png。");
 
@@ -308,19 +416,50 @@ test("leaves code and math line endings alone when keeping line breaks", () => {
   assert.match(emphasis, /<em>one<br\/>two<\/em>/);
 });
 
-test("keeps a block that opens a raw-text tag as it renders without line breaks", () => {
-  // A <br> after an unclosed <textarea> or <script> ends rehype-raw's raw-text
-  // state, which glued the lines together or dropped the rest of the block.
-  for (const markdown of [
-    "Use a <textarea> here\nand a button\nplease",
-    "Set <title>My\nPage</title> first\nthen deploy",
-    "add <script>a()\nb()</script> to the page\nthen reload",
-    "some *<style>x\ny</style>* then\nnext",
-  ]) {
-    assert.equal(renderMarkdown(markdown, { keepLineBreaks: true }), renderMarkdown(markdown));
+test("display math gets a Copy button for its LaTeX source; inline math does not", () => {
+  const copyButtons = (html) => (html.match(/markdown-math-copy/g) ?? []).length;
+  const markdown = "$$\n\\frac{a}{b} < c\n$$\n\n```math\na^2\n```\n\nInline $x$ and $$y$$ stay plain.";
+  for (const props of [{}, { onNavigateLink() {} }, { isStreaming: true }]) {
+    const html = renderMarkdown(markdown, props);
+    assert.equal(copyButtons(html), 2);
+    assert.equal((html.match(/class="katex-display"/g) ?? []).length, 2);
+    assert.doesNotMatch(html, /data-math-source/);
   }
+  // The source is the Markdown's, kept before KaTeX writes its glyphs.
+  const sources = [];
+  renderToStaticMarkup(React.createElement(ReactMarkdown, {
+    remarkPlugins: markdownRemarkPlugins,
+    rehypePlugins: markdownRehypePlugins,
+    components: {
+      div({ node, children }) {
+        sources.push(node.properties.dataMathSource);
+        return React.createElement("div", null, children);
+      },
+    },
+  }, markdown));
+  assert.deepEqual(sources, ["\\frac{a}{b} < c", "a^2"]);
+  // A half-streamed formula renders KaTeX's error text and still copies.
+  assert.equal(copyButtons(renderMarkdown("$$\n\\frac{a", { isStreaming: true })), 1);
+  // A user's own HTML cannot carry the attribute: the sanitizer drops it.
+  assert.equal(copyButtons(renderMarkdown('<div data-math-source="x">hi</div>')), 0);
+});
 
-  assert.match(renderMarkdown("normal <kbd>Ctrl</kbd>\nline two", { keepLineBreaks: true }), /<\/kbd><br\/>line two/);
-  const list = renderMarkdown("- item <textarea>\n  more\n- two\n  lines", { keepLineBreaks: true });
-  assert.match(list, /<li>two<br\/>lines<\/li>/);
+test("shows a user message's HTML as the text typed, like pi's TUI", () => {
+  // #1407: the tag was parsed by rehype-raw and stripped by the sanitizer.
+  const sample = '<TableOperator v-model="columns" :tableId="TABLE_ID_CONST.BUSINESS.${basic.businessModule.toUpperCase()}.Demo" :refresh="queryData" /> 咋更离谱呢，要不就去掉 ${basic.businessModule.toUpperCase()} 不要这个变量，直接拼后面部分';
+  const escaped = sample.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
+  assert.equal(renderMarkdown(sample, { keepLineBreaks: true }), `<div class="markdown-body"><p>${escaped}</p></div>`);
+
+  // Inline and block HTML, raw-text tags included, keep their characters and line breaks.
+  assert.match(renderMarkdown("normal <kbd>Ctrl</kbd>\nline two", { keepLineBreaks: true }), /<p>normal &lt;kbd&gt;Ctrl&lt;\/kbd&gt;<br\/>line two<\/p>/);
+  assert.match(renderMarkdown("Use a <textarea> here\nand a button", { keepLineBreaks: true }), /<p>Use a &lt;textarea&gt; here<br\/>and a button<\/p>/);
+  assert.match(renderMarkdown("<div>\n<b>hi</b>\n</div>\n\nafter", { keepLineBreaks: true }), /<p>&lt;div&gt;<br\/>&lt;b&gt;hi&lt;\/b&gt;<br\/>&lt;\/div&gt;<\/p>\n<p>after<\/p>/);
+  assert.match(renderMarkdown("- item <script>a()</script>\n- <!-- note -->", { keepLineBreaks: true }), /<li>item &lt;script&gt;a\(\)&lt;\/script&gt;<\/li>\n<li>&lt;!-- note --&gt;<\/li>/);
+  assert.match(renderMarkdown("> <img src=x onerror=alert(1)>", { keepLineBreaks: true }), /<blockquote>\n<p>&lt;img src=x onerror=alert\(1\)&gt;<\/p>\n<\/blockquote>/);
+
+  // Markdown around it still renders; code keeps its own text; assistant text keeps rendering HTML.
+  const mixed = renderMarkdown("**bold** <u>x</u> [link](https://example.com) `<b>`\n\n```html\n<p>code</p>\n```", { keepLineBreaks: true });
+  assert.match(mixed, /<strong>bold<\/strong> &lt;u&gt;x&lt;\/u&gt; <a href="https:\/\/example\.com"[^>]*>link<\/a> <code[^>]*>&lt;b&gt;<\/code>/);
+  assert.match(mixed, /&lt;p&gt;code&lt;\/p&gt;/);
+  assert.match(renderMarkdown("normal <kbd>Ctrl</kbd>"), /<kbd>Ctrl<\/kbd>/);
 });

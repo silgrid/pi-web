@@ -167,6 +167,13 @@ const argsOf = (pid) => spawnSync("ps", ["-p", String(pid), "-o", "args="], { en
 
 const alive = (pid) => spawnSync("kill", ["-0", String(pid)], { encoding: "utf8" }).status === 0;
 
+// A killed connector is gone once kill -0 fails, it is an unreaped zombie
+// (ps stat Z), or its PID now names a process that is not cloudflared (PID
+// reuse): a bare kill -0 right after the kill can still succeed in the
+// first two cases.
+const statOf = (pid) => spawnSync("ps", ["-p", String(pid), "-o", "stat="], { encoding: "utf8" }).stdout.trim();
+const connectorGone = (pid) => !alive(pid) || statOf(pid).startsWith("Z") || commOf(pid) !== "cloudflared";
+
 const waitFor = async (predicate, timeoutMs, stepMs = 100) => {
   for (let i = 0; i < Math.ceil(timeoutMs / stepMs); i += 1) {
     if (predicate()) return true;
@@ -211,6 +218,7 @@ try {
   const first = deploy();
   const connector1 = lastPid("cloudflared");
   assert.ok(alive(connector1), `tunnel connector PID ${connector1} must be alive after deploy #1`);
+  assert.equal(commOf(connector1), "cloudflared", `tunnel connector PID ${connector1} must be the cloudflared stub after deploy #1`);
   assert.equal(
     first.url,
     `https://stub-${connector1}-deadconn.trycloudflare.com`,
@@ -232,7 +240,11 @@ try {
   spawnSync("kill", [String(connector1)], { encoding: "utf8" });
   const windowGone = await waitFor(() => !windowsOf(session).includes("tunnel"), 10_000);
   assert.ok(windowGone, "the tunnel window must close when its connector process dies");
-  assert.ok(!alive(connector1), `the connector PID ${connector1} must be dead`);
+  const connectorDead = await waitFor(() => connectorGone(connector1), 10_000);
+  assert.ok(
+    connectorDead,
+    `the connector PID ${connector1} must be dead (stat '${statOf(connector1)}', comm '${commOf(connector1)}')`,
+  );
   assert.ok(windowsOf(session).includes("piweb"), "the session must survive the connector death (piweb loop window)");
 
   // The reported mechanism, stated at the identity level: in this state the

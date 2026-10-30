@@ -12,7 +12,7 @@ export const dynamic = "force-dynamic";
 /**
  * GET /api/polyforge/memory/[id] — the single-memory read:
  * exactly one `pf memory show`, the id shape-validated before any spawn.
- * Reads always answer 200 JSON: pf absent and below the 2.20.9 floor answer
+ * Reads always answer 200 JSON: pf absent and below the 2.20.12 floor answer
  * the capability fields with `memory: null`, and a failed or refused spawn
  * answers 200 with an `error` field — never 5xx. The only non-2xx answers
  * are the gate's 403 and the malformed-id 400.

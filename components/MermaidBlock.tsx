@@ -1,6 +1,8 @@
 "use client";
 
 import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import type { SyntaxHighlighterProps } from "react-syntax-highlighter";
+import renderSyntaxNode from "react-syntax-highlighter/dist/esm/create-element";
 import SyntaxHighlighter from "react-syntax-highlighter/dist/esm/prism-light";
 import { vs } from "react-syntax-highlighter/dist/cjs/styles/prism";
 import { vscDarkPlus } from "react-syntax-highlighter/dist/cjs/styles/prism";
@@ -8,6 +10,8 @@ import { useTheme } from "@/hooks/useTheme";
 import { useI18n } from "@/hooks/useI18n";
 import { usePrismLanguages } from "@/hooks/usePrismLanguages";
 import { copyText } from "@/lib/clipboard";
+import { takeHighlightBudget, waitForHighlight } from "@/lib/highlight-queue";
+import { prismLanguagesLoaded } from "@/lib/prism-languages";
 
 interface MermaidBlockProps {
   code: string;
@@ -19,15 +23,18 @@ const ZOOM_STEP = 0.25;
 const ZOOM_MIN = 0.5;
 const ZOOM_MAX = 3;
 
-export function downloadMermaidSvg(svg: SVGSVGElement): void {
-  // Mermaid's HTML serialization can leave void tags such as <br> unclosed.
-  const xml = new XMLSerializer().serializeToString(svg);
+export function downloadSvgFile(xml: string, filename: string): void {
   const url = URL.createObjectURL(new Blob([xml], { type: "image/svg+xml;charset=utf-8" }));
   const link = document.createElement("a");
   link.href = url;
-  link.download = "mermaid-diagram.svg";
+  link.download = filename;
   link.click();
   setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
+export function downloadMermaidSvg(svg: SVGSVGElement): void {
+  // Mermaid's HTML serialization can leave void tags such as <br> unclosed.
+  downloadSvgFile(new XMLSerializer().serializeToString(svg), "mermaid-diagram.svg");
 }
 
 type RenderState =
@@ -83,15 +90,12 @@ export function MermaidBlock({ code, isStreaming, defaultPreview = false }: Merm
   }, [code, currentKey, isDark, previewVisible]);
 
   const previewButton = useMemo(() => (
-    <button
-      type="button"
-      onClick={() => setShowPreview((v) => !v)}
-      disabled={isStreaming}
-      title={isStreaming ? t("i18n.previewAfterStreaming") : (previewVisible ? t("i18n.showMermaidSource") : t("i18n.previewMermaid"))}
-      className={["markdown-code-action", previewVisible ? "is-active" : ""].filter(Boolean).join(" ")}
-    >
-      {previewVisible ? t("i18n.source") : t("i18n.preview")}
-    </button>
+    <PreviewToggleButton
+      isStreaming={isStreaming}
+      previewVisible={previewVisible}
+      onToggle={() => setShowPreview((v) => !v)}
+      title={previewVisible ? t("i18n.showMermaidSource") : t("i18n.previewMermaid")}
+    />
   ), [isStreaming, previewVisible, t]);
 
   if (!previewVisible) {
@@ -115,38 +119,93 @@ export function MermaidBlock({ code, isStreaming, defaultPreview = false }: Merm
             dangerouslySetInnerHTML={{ __html: renderState.svg }}
           />
         )}
-        {zoomOpen && <MermaidZoomDialog svg={renderState.svg} onClose={() => setZoomOpen(false)} />}
+        {zoomOpen && (
+          <DiagramZoomDialog title={t("i18n.mermaidDiagram")} label={t("i18n.mermaidViewer")} onClose={() => setZoomOpen(false)}>
+            <div dangerouslySetInnerHTML={{ __html: renderState.svg }} />
+          </DiagramZoomDialog>
+        )}
       </>
     );
 
   return (
-    <div className="markdown-code-block">
-      <div className="markdown-code-header">
-        <span className="markdown-code-lang">mermaid</span>
-        <div className="markdown-code-actions">
+    <PreviewFrame
+      lang="mermaid"
+      actions={
+        <>
           {renderState?.key === currentKey && renderState.status === "ready" && (
-            <button
-              type="button"
-              className="markdown-code-action"
-              title={`${t("i18n.downloadFile")} (SVG)`}
-              aria-label={`${t("i18n.downloadFile")} (SVG)`}
+            <SvgDownloadButton
               onClick={() => {
                 const svg = previewRef.current?.querySelector("svg");
                 if (svg) downloadMermaidSvg(svg);
               }}
-            >
-              SVG
-            </button>
+            />
           )}
           {previewButton}
-        </div>
-      </div>
+        </>
+      }
+    >
       {body}
+    </PreviewFrame>
+  );
+}
+
+// What a previewed fence (mermaid here, svg in components/SvgBlock.tsx) shares:
+// the header with its toggle and download button, and the zoom viewer.
+
+export function PreviewToggleButton({ isStreaming, previewVisible, onToggle, title }: {
+  isStreaming?: boolean;
+  previewVisible: boolean;
+  onToggle: () => void;
+  /** What a click shows: the source while the preview is visible, else the preview. */
+  title: string;
+}) {
+  const { t } = useI18n();
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      disabled={isStreaming}
+      title={isStreaming ? t("i18n.previewAfterStreaming") : title}
+      className={["markdown-code-action", previewVisible ? "is-active" : ""].filter(Boolean).join(" ")}
+    >
+      {previewVisible ? t("i18n.source") : t("i18n.preview")}
+    </button>
+  );
+}
+
+export function SvgDownloadButton({ onClick }: { onClick: () => void }) {
+  const { t } = useI18n();
+  return (
+    <button
+      type="button"
+      className="markdown-code-action"
+      title={`${t("i18n.downloadFile")} (SVG)`}
+      aria-label={`${t("i18n.downloadFile")} (SVG)`}
+      onClick={onClick}
+    >
+      SVG
+    </button>
+  );
+}
+
+export function PreviewFrame({ lang, actions, children }: { lang: string; actions: ReactNode; children: ReactNode }) {
+  return (
+    <div className="markdown-code-block">
+      <div className="markdown-code-header">
+        <span className="markdown-code-lang">{lang}</span>
+        <div className="markdown-code-actions">{actions}</div>
+      </div>
+      {children}
     </div>
   );
 }
 
-function MermaidZoomDialog({ svg, onClose }: { svg: string; onClose: () => void }) {
+export function DiagramZoomDialog({ title, label, onClose, children }: {
+  title: string;
+  label: string;
+  onClose: () => void;
+  children: ReactNode;
+}) {
   const { t } = useI18n();
   const dialogRef = useRef<HTMLDialogElement>(null);
   const [zoom, setZoom] = useState(1);
@@ -169,7 +228,7 @@ function MermaidZoomDialog({ svg, onClose }: { svg: string; onClose: () => void 
     <dialog
       ref={dialogRef}
       className="mermaid-zoom-dialog"
-      aria-label={t("i18n.mermaidViewer")}
+      aria-label={label}
       onCancel={(event) => {
         event.preventDefault();
         onClose();
@@ -182,7 +241,7 @@ function MermaidZoomDialog({ svg, onClose }: { svg: string; onClose: () => void 
     >
       <div className="mermaid-zoom-layout">
         <div className="mermaid-zoom-toolbar">
-          <span className="mermaid-zoom-title">{t("i18n.mermaidDiagram")}</span>
+          <span className="mermaid-zoom-title">{title}</span>
           <div className="mermaid-zoom-actions">
             <div className="mermaid-zoom-stepper">
               <button
@@ -239,11 +298,9 @@ function MermaidZoomDialog({ svg, onClose }: { svg: string; onClose: () => void 
             if (event.target === event.currentTarget) onClose();
           }}
         >
-          <div
-            className="mermaid-zoom-canvas"
-            style={{ width: `${zoom * 100}%` }}
-            dangerouslySetInnerHTML={{ __html: svg }}
-          />
+          <div className="mermaid-zoom-canvas" style={{ width: `${zoom * 100}%` }}>
+            {children}
+          </div>
         </div>
       </div>
     </dialog>
@@ -268,6 +325,33 @@ const codeBlockDarkTheme = {
 };
 delete codeBlockDarkTheme['pre[class*="language-"]'].background;
 
+type CodeLinesProps = Parameters<NonNullable<SyntaxHighlighterProps["renderer"]>>[0];
+
+/**
+ * A fence's lines, each a row of its number and its text (`.markdown-code-line`
+ * in app/globals.css): long lines wrap, as in pi's TUI, and a wrapped line goes
+ * on under its own text, never under the number. The text keeps the row's own
+ * classes, which color the later lines of a token that spans several (a block
+ * comment).
+ */
+function renderCodeLines({ rows, stylesheet, useInlineStyles }: CodeLinesProps) {
+  return rows.map((row, index) => {
+    const children = row.children ?? [];
+    const number = children[0]?.properties?.className.includes("react-syntax-highlighter-line-number") ? children[0] : null;
+    const text = {
+      ...row,
+      properties: { ...row.properties, className: [...(row.properties?.className ?? []), "markdown-code-line-text"] },
+      children: number ? children.slice(1) : children,
+    };
+    return (
+      <span key={index} className="markdown-code-line">
+        {number && renderSyntaxNode({ node: number, stylesheet, useInlineStyles, key: "number" })}
+        {renderSyntaxNode({ node: text, stylesheet, useInlineStyles, key: "text" })}
+      </span>
+    );
+  });
+}
+
 /**
  * Syntax-highlighted code block with copy button.
  * Used as the "source" view for mermaid blocks and for all non-mermaid code fences.
@@ -277,6 +361,10 @@ delete codeBlockDarkTheme['pre[class*="language-"]'].background;
  * While the owning message is still streaming, the block renders as plain
  * monospace text — highlighting a growing block re-tokenizes all of it on
  * every chunk, which is the single most expensive part of streamed rendering.
+ * A finished block past this task's highlight budget (lib/highlight-queue.ts),
+ * or mounted before the Prism languages have loaded (lib/prism-languages.ts),
+ * renders through the same highlighter as `text` (same lines, numbers and
+ * box, no tokens) until an idle slice lets it take its language.
  */
 export const CodeBlock = memo(function CodeBlock({ code, lang, headerAction, isStreaming }: CodeBlockProps) {
   const { isDark } = useTheme();
@@ -285,6 +373,14 @@ export const CodeBlock = memo(function CodeBlock({ code, lang, headerAction, isS
   // Loading starts with the first block, streaming or not, so a streamed
   // reply usually finds the languages ready when it ends.
   const languagesReady = usePrismLanguages();
+  const [highlighted, setHighlighted] = useState(
+    () => !isStreaming && prismLanguagesLoaded() && takeHighlightBudget(code.length),
+  );
+
+  useEffect(() => {
+    if (isStreaming || highlighted || !languagesReady) return;
+    return waitForHighlight(() => setHighlighted(true));
+  }, [isStreaming, highlighted, languagesReady]);
 
   const copy = () => {
     copyText(code).then(() => {
@@ -314,7 +410,8 @@ export const CodeBlock = memo(function CodeBlock({ code, lang, headerAction, isS
             padding: "11px 13px",
             fontSize: "calc(12.5px + var(--chat-font-size-offset, 0px))",
             lineHeight: 1.62,
-            overflowX: "auto",
+            whiteSpace: "pre-wrap",
+            overflowWrap: "anywhere",
             backgroundColor: "color-mix(in srgb, var(--bg) 92%, var(--bg-panel))",
           }}
         >
@@ -322,10 +419,11 @@ export const CodeBlock = memo(function CodeBlock({ code, lang, headerAction, isS
         </pre>
       ) : (
         <SyntaxHighlighter
-          language={languagesReady ? lang || "text" : "text"}
+          language={highlighted ? lang || "text" : "text"}
           style={isDark ? codeBlockDarkTheme : vs}
           showLineNumbers
-          lineNumberStyle={{ color: "var(--text-dim)", fontStyle: "normal" }}
+          lineNumberStyle={{ color: "var(--text-dim)", fontStyle: "normal", flexShrink: 0 }}
+          renderer={renderCodeLines}
           customStyle={{
             margin: 0,
             padding: "11px 13px",

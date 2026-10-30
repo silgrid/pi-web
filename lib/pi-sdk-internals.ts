@@ -106,36 +106,6 @@ export interface McpTool {
   _meta?: Record<string, unknown>;
 }
 
-/** pi-mcp's `ContentAnnotations`. */
-export interface McpContentAnnotations {
-  audience?: ("user" | "assistant")[];
-  priority?: number;
-  lastModified?: string;
-}
-
-/** pi-mcp's `Resource`, from `resources/list`. */
-export interface McpResource {
-  uri: string;
-  name: string;
-  title?: string;
-  description?: string;
-  mimeType?: string;
-  size?: number;
-  annotations?: McpContentAnnotations;
-  _meta?: Record<string, unknown>;
-}
-
-/** pi-mcp's `ResourceTemplate`, from `resources/templates/list`. */
-export interface McpResourceTemplate {
-  uriTemplate: string;
-  name: string;
-  title?: string;
-  description?: string;
-  mimeType?: string;
-  annotations?: McpContentAnnotations;
-  _meta?: Record<string, unknown>;
-}
-
 /** pi-mcp's `OAuthChallenge`, parsed from a server's `WWW-Authenticate` header. */
 export interface McpOAuthChallenge {
   resourceMetadataUrl?: URL;
@@ -151,6 +121,10 @@ export interface McpOAuthSettings {
   callbackPort?: number;
   callbackUrl?: string;
   scope?: string;
+  clientName?: string;
+  /** How pi identifies itself without `clientId`: dynamic registration, or its Client ID Metadata Document (pi 1.0.1). */
+  clientRegistration?: "dcr" | "cimd";
+  authServerMetadataUrl?: URL;
 }
 
 /** The part of pi-mcp's `McpClient` that pi-web reads. */
@@ -169,6 +143,8 @@ export interface McpServerConnectionOptions {
   cwd: string;
   createTransport: McpTransportFactory;
   credentials: McpOAuthCredentialStore;
+  /** The current token of a pi provider, for servers with `auth.provider`. */
+  providerToken?: (provider: string) => Promise<string | undefined>;
   onTools: (connection: McpServerConnection) => void;
   /** Called when `state`, `error`, or `tools` change. */
   onChange?: (connection: McpServerConnection) => void;
@@ -180,9 +156,8 @@ export interface McpServerConnection {
   state: McpServerState;
   error: string | undefined;
   tools: McpTool[];
+  /** Whether the server offers resources; the SDK lists them only when a resource tool asks. */
   hasResources: boolean;
-  resources: McpResource[];
-  resourceTemplates: McpResourceTemplate[];
   /** Server instructions from `initialize`. */
   instructions: string | undefined;
   /** Last OAuth challenge from the server; sign-in uses its resource metadata URL and scope. */
@@ -215,9 +190,11 @@ export interface McpSignInOptions {
   settings: McpOAuthSettings;
   challenge?: McpOAuthChallenge;
   prompt: McpSignInPrompt;
+  /** Stops the sign-in at any step with `McpSignInCancelledError` (pi 1.1). */
+  signal?: AbortSignal;
 }
 
-/** The settings `/mcp` changes; `enabled: true` and `exposure: "codemode"` remove the key. */
+/** The settings `/mcp` changes; `enabled: true` and `exposure: "codemode"` remove the key, except in an override. */
 export interface McpServerConfigPatch {
   enabled?: boolean;
   exposure?: McpExposure;
@@ -233,7 +210,8 @@ export interface PiSdkInternals {
   loadMcpConfig: (options: { agentDir: string; cwd: string; projectTrusted: boolean }) => LoadedMcpConfig;
   /** Returns true when an entry with the same name was replaced. */
   addMcpServerConfig: (path: string, name: string, config: McpServerConfig) => boolean;
-  updateMcpServerConfig: (path: string, name: string, patch: McpServerConfigPatch) => void;
+  /** With `override`, a missing entry is added as a project override (pi 1.0.1). */
+  updateMcpServerConfig: (path: string, name: string, patch: McpServerConfigPatch, options?: { override?: boolean }) => void;
   /** Returns false when the file does not define the server. */
   removeMcpServerConfig: (path: string, name: string) => boolean;
   /** Returns the config, or an error message. */

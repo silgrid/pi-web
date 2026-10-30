@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { resolveSessionPath } from "@/lib/session-reader";
 import { getRpcSession, isSessionReloadedFromDiskError, setRpcSessionTools, startRpcSession } from "@/lib/rpc-manager";
+import { cwdMissingBody, missingCwdFromBody } from "@/lib/missing-cwd";
 
 // POST /api/agent/[id] - Send a command to an existing session
 export async function POST(
@@ -78,8 +79,11 @@ export async function POST(
       data: reloadedFromDisk && body.type === "prompt" ? { reloadedFromDisk: true } : result,
     });
   } catch (error) {
+    // Read by its fields: the wrapper that threw may come from another route's bundle.
+    const missingCwd = missingCwdFromBody(error);
     return NextResponse.json({
       error: error instanceof Error ? error.message : String(error),
+      ...(missingCwd ? cwdMissingBody(missingCwd) : {}),
       ...(commandType === "prompt" && !promptAccepted
         ? { code: "prompt_rejected", accepted: false }
         : {}),
@@ -89,7 +93,7 @@ export async function POST(
 
 // GET /api/agent/[id] - Get current agent state
 export async function GET(
-  _req: Request,
+  req: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
@@ -100,7 +104,9 @@ export async function GET(
       return NextResponse.json({ running: false });
     }
 
-    const state = await session.send({ type: "get_state" });
+    const state = await session.send({ type: "get_state" }) as Record<string, unknown>;
+    // Status reads leave out the system prompt, most of the reply (agentStatusUrl()).
+    if (new URL(req.url).searchParams.get("systemPrompt") === "0") delete state.systemPrompt;
     return NextResponse.json({ running: true, state });
   } catch (error) {
     return NextResponse.json({ error: String(error) }, { status: 500 });

@@ -1,7 +1,7 @@
 /**
  * Client-safe pure model and helpers for the Messages tab:
- * response types, the page merges, the one acknowledgment decision and the
- * anchor split. No Node import lives here, so both the server module and the
+ * response types, the page merges, the one acknowledgment decision, the
+ * anchor split and the flat direct contact list. No Node import lives here, so both the server module and the
  * client hook/panel can use it.
  */
 
@@ -16,6 +16,15 @@ export interface PolyforgeConversation {
   last_seq: number;
   unread: number;
   created_at: string;
+}
+
+/** A configured contact: one human the caller can message,
+ *  from `pf msg contacts`. `id` is the send address only — never rendered,
+ *  titled or labelled; `display_name` may be "" (the unknown-user
+ *  placeholder renders, never the id). */
+export interface PolyforgeContact {
+  id: string;
+  display_name: string;
 }
 
 export interface PolyforgeMessage {
@@ -88,10 +97,11 @@ export function mergeNewestPage(
  *  blocked-job suppression. */
 export interface AckDecisionInput {
   panelOpen: boolean;
-  /** The dock's tab ( adds "memory"): only "messages" may
-   *  auto-ack — the widened union keeps the hook's tab state passing
-   *  through unchanged. */
-  activeTab: "jobs" | "messages" | "memory";
+  /** The dock's top-level tab (Work | Memory | Messages, the
+   *  former Jobs and Tasks tabs now Work's sub-tabs): only "messages" may
+   *  auto-ack — the union keeps the hook's tab state passing through
+   *  unchanged. */
+  activeTab: "memory" | "messages" | "work";
   conversationId: string | null;
   blocked: boolean;
   newestDisplayedSeq: number;
@@ -162,4 +172,41 @@ export function groupConversations(
     else groups.push(conversation);
   }
   return { direct, groups };
+}
+
+/** One row of the flat direct (单聊) area: an existing direct conversation,
+ *  or a silent contact — a configured contact with no direct conversation. */
+export type PolyforgeDirectRow =
+  | { kind: "conversation"; conversation: PolyforgeConversation }
+  | { kind: "contact"; contact: PolyforgeContact };
+
+/** The flat direct area: the direct conversation rows in
+ *  their current order (unread intact), then the silent contacts sorted by
+ *  display name (blank names last, id as the tie-break), one row per peer —
+ *  a contact whose id is already a direct conversation's peer, or repeats an
+ *  earlier contact, adds no row. Group conversations are not part of it.
+ *  Pure. */
+export function directRows(
+  conversations: PolyforgeConversation[],
+  contacts: PolyforgeContact[],
+): PolyforgeDirectRow[] {
+  const { direct } = groupConversations(conversations);
+  const seen = new Set<string>();
+  for (const conversation of direct) if (conversation.peer) seen.add(conversation.peer);
+  const silent: PolyforgeContact[] = [];
+  for (const contact of contacts) {
+    if (seen.has(contact.id)) continue;
+    seen.add(contact.id);
+    silent.push(contact);
+  }
+  silent.sort((a, b) => {
+    const left = a.display_name.trim();
+    const right = b.display_name.trim();
+    if (!left !== !right) return left ? -1 : 1;
+    return left.localeCompare(right) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+  });
+  return [
+    ...direct.map((conversation) => ({ kind: "conversation" as const, conversation })),
+    ...silent.map((contact) => ({ kind: "contact" as const, contact })),
+  ];
 }

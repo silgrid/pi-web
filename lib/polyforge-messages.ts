@@ -16,17 +16,23 @@ import { probePolyforgeVersion } from "./polyforge-status";
  * (mine derived from `sender_id` and the server-side pf config user id) plus
  * its own optional conversation_id — the conversation the message lives in,
  * carried by a send's answer so its client can open that conversation
- * without re-reading the list.
+ * without re-reading the list. A contact keeps exactly id/display_name
+ *: the id is the send address, the name may be "".
  * `sender_id`, `members` and every other `member_names` key never leave the
  * server, and no response carries the pf user id, api key, server address or
  * an environment value.
  */
 
-/** Messages' own capability floor: the release that ships the split cursor,
- *  `pf msg ack`, `list --before` and the conversation list's `member_names`. */
-export const POLYFORGE_MESSAGES_MINIMUM_PF_VERSION = "2.20.10";
+/** Messages' own capability floor: the release that ships `pf msg contacts`
+ * on top of the split cursor, `pf msg ack`, `list --before`
+ *  and the conversation list's `member_names`. */
+export const POLYFORGE_MESSAGES_MINIMUM_PF_VERSION = "2.20.12";
 
 const READ_TIMEOUT_MS = 15000;
+/** The contact read's own bound: the list answer awaits it, so
+ *  a slow `pf msg contacts` must not hold the whole Messages list for the
+ *  15 s read timeout. At the bound the contact set is empty for that poll. */
+const CONTACT_READ_TIMEOUT_MS = 2000;
 const WRITE_TIMEOUT_MS = 15000;
 /** A real analyzer one-shot is an LLM call: the ruling sets the wait at
  *  no less than five minutes. */
@@ -40,6 +46,7 @@ const DEFAULT_PAGE_SIZE = 50;
 const NEWEST_BEFORE = "9223372036854775807";
 
 export type {
+  PolyforgeContact,
   PolyforgeConversation,
   PolyforgeMessage,
   PolyforgeMessagePage,
@@ -62,6 +69,9 @@ export interface PolyforgeMessagesRead {
   reason?: string;
   error?: string;
   conversations: PolyforgeConversation[];
+  /** The configured contacts; [] when their own read fails (that failure
+   *  never touches capable/reason/error or the conversations). */
+  contacts: PolyforgeContact[];
 }
 
 import {
@@ -69,6 +79,7 @@ import {
   isPolyforgeMessageId,
   isPolyforgeRecipient,
   isPositiveSeq,
+  type PolyforgeContact,
   type PolyforgeConversation,
   type PolyforgeMessage,
   type PolyforgeMessagePage,
@@ -257,6 +268,26 @@ export function sanitizeMessage(raw: unknown, userId = ""): PolyforgeMessage | n
   return message;
 }
 
+/** One contact row: a valid user id and its trimmed display name ("" when
+ *  absent or not a string); every other field is dropped. */
+export function sanitizeContact(raw: unknown): PolyforgeContact | null {
+  if (!raw || typeof raw !== "object") return null;
+  const row = raw as Record<string, unknown>;
+  const id = str(row.id);
+  if (!isPolyforgeRecipient(id)) return null;
+  return { id, display_name: str(row.display_name) };
+}
+
+export function sanitizeContactsAnswer(raw: unknown): PolyforgeContact[] {
+  if (!raw || typeof raw !== "object") return [];
+  const list = (raw as { contacts?: unknown }).contacts;
+  if (!Array.isArray(list)) return [];
+  return list.flatMap((row) => {
+    const contact = sanitizeContact(row);
+    return contact ? [contact] : [];
+  });
+}
+
 export function sanitizeConversationsAnswer(raw: unknown, userId = ""): PolyforgeConversation[] {
   if (!raw || typeof raw !== "object") return [];
   const list = (raw as { conversations?: unknown }).conversations;
@@ -300,6 +331,18 @@ async function listConversationsRaw(): Promise<unknown> {
   return runPfJson(["--json", "msg", "list"]);
 }
 
+/** The configured contacts (`pf msg contacts`: the union of the caller's
+ *  human co-members over every mapped project, assembled by pf). Its own
+ *  isolated spawn bounded by CONTACT_READ_TIMEOUT_MS: any failure, including
+ *  the bound, is an empty set, never the messages error. */
+async function readPolyforgeContacts(): Promise<PolyforgeContact[]> {
+  try {
+    return sanitizeContactsAnswer(await runPfJson(["--json", "msg", "contacts"], CONTACT_READ_TIMEOUT_MS));
+  } catch {
+    return [];
+  }
+}
+
 /** The pf caller's own user id, read server-side from `pf config`. It is used
  *  to filter conversations and derive peer/mine, then dropped: no response
  *  carries it. */
@@ -341,8 +384,9 @@ export interface PolyforgeMessagesCapability {
   reason?: string;
 }
 
-/** The Messages floor gate: presence + the 2.20.10 capability floor. Below it
- *  no message verb is spawned (the panel renders the upgrade state). */
+/** The Messages floor gate: presence + the 2.20.12 capability floor. Below it
+ *  no message or contact verb is spawned (the panel renders the upgrade
+ *  state); there is no degraded list below it. */
 export async function readPolyforgeMessagesCapability(): Promise<PolyforgeMessagesCapability> {
   const presence = await probePolyforgeVersion();
   if (!presence.present) {
@@ -361,13 +405,17 @@ export async function readPolyforgeMessagesCapability(): Promise<PolyforgeMessag
 
 /** Read the conversations the pf caller may see, filtered server-side to its
  *  own membership and annotated with the peer from `members` (one spawn; no
- *  per-conversation preview fan-out). */
+ *  per-conversation preview fan-out), plus the configured contacts from one
+ *  independent `pf msg contacts` spawn. */
 export async function readPolyforgeMessages(): Promise<PolyforgeMessagesRead> {
   const capability = await readPolyforgeMessagesCapability();
   if (!capability.capable) {
-    return { ...capability, conversations: [] };
+    return { ...capability, conversations: [], contacts: [] };
   }
   const presence = { version: capability.pfVersion };
+  // Started alongside the list reads and never rejects: a contact-read
+  // failure is an empty set that leaves the conversation answer alone.
+  const contactsRead = readPolyforgeContacts();
   let raw: unknown;
   let userId: string;
   try {
@@ -390,6 +438,7 @@ export async function readPolyforgeMessages(): Promise<PolyforgeMessagesRead> {
       capable: true,
       error: error instanceof Error ? error.message : "pf msg list is unavailable",
       conversations: [],
+      contacts: await contactsRead,
     };
   }
   return {
@@ -397,6 +446,7 @@ export async function readPolyforgeMessages(): Promise<PolyforgeMessagesRead> {
     pfVersion: presence.version,
     capable: true,
     conversations: sanitizeConversationsAnswer(raw, userId),
+    contacts: await contactsRead,
   };
 }
 

@@ -79,13 +79,22 @@ export async function checkFontPreferences(page) {
   await resetUi.click();
 
   // Changing font metrics must refit a draft without requiring another keystroke.
+  // Do not use the generic serif/monospace families here: this host's
+  // fontconfig maps both to WenQuanYi Zen Hei (one is just the Mono variant),
+  // whose narrow Latin glyphs wrap this draft to the same line count. Named
+  // families that the Playwright browser dependencies install on both the
+  // local host and CI keep the height-change assertion meaningful.
   await page.keyboard.press("Escape");
   const textarea = page.locator(".chat-input-textarea");
   await textarea.fill("iiii llll mmmm wwww sample text ".repeat(12));
   await openSettings();
-  await ui.fill("serif");
+  const fontFamily = () => textarea.evaluate((el) => getComputedStyle(el).fontFamily);
+  await ui.fill("Liberation Serif");
+  await page.waitForFunction(() => getComputedStyle(document.querySelector(".chat-input-textarea")).fontFamily.startsWith('"Liberation Serif"'));
+  assert.match(await fontFamily(), /^"Liberation Serif"/, "the interface font did not change to Liberation Serif");
   const serifHeight = await textarea.evaluate((el) => el.clientHeight);
-  await ui.fill("monospace");
+  await ui.fill("Liberation Mono");
+  await page.waitForFunction(() => getComputedStyle(document.querySelector(".chat-input-textarea")).fontFamily.startsWith('"Liberation Mono"'));
   await page.waitForFunction((oldHeight) => {
     const input = document.querySelector(".chat-input-textarea");
     return input.clientHeight !== oldHeight && (input.scrollHeight <= input.clientHeight + 1 || input.clientHeight >= 199);

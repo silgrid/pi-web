@@ -11,6 +11,12 @@
 // Baseline posture: the Memory tab and its routes do not exist yet, so every
 // scenario is an assertion-level red, never a build or fixture error.
 //
+// moved this suite to the new required behaviour (never a
+// relaxation): the tab strip reads Work | Memory | Messages (#178), the
+// Memory tab browses on open (one no-keyword `pf recall --limit 20 --sort
+// updated`) instead of showing a keyword guidance, filter changes re-issue the
+// current mode's read, and the pf floor is 2.20.12.
+//
 //   node e2e/polyforge-memory-panel.mjs
 import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
@@ -79,7 +85,7 @@ const stubDir = join(work, "stub-bin");
 mkdirSync(stubDir);
 const stateFile = join(stubDir, "state.json");
 const argvLog = join(stubDir, "argv.log");
-const seed = (patch = {}) => { writeFileSync(stateFile, JSON.stringify({ version: "v2.20.9", mode: "ok", ws1, recall: Object.fromEntries(
+const seed = (patch = {}) => { writeFileSync(stateFile, JSON.stringify({ version: "v2.20.12", mode: "ok", ws1, recall: Object.fromEntries(
   Object.entries(RECALL).map(([k, v]) => [k, v.map(hit)])), memories: MEMORIES, ...patch })); writeFileSync(argvLog, ""); };
 seed();
 writeFileSync(join(stubDir, "pf"), `#!${process.execPath}
@@ -107,7 +113,7 @@ if (rest[0] === "recall" || (rest[0] === "memory" && rest[1] === "show")) {
   if (s.mode === "fail") { process.stderr.write(JSON.stringify({ code: "CORE-500", detail: "stub recall failure" }) + "\\n"); process.exit(4); }
 }
 if (rest[0] === "recall") {
-  const words = []; for (let i = 1; i < rest.length; i++) { if (["--project", "--limit", "--tags", "--type"].includes(rest[i])) i++; else if (rest[i] !== "--any") words.push(rest[i]); }
+  const words = []; for (let i = 1; i < rest.length; i++) { if (["--project", "--limit", "--tags", "--type", "--sort", "--after"].includes(rest[i])) i++; else if (rest[i] !== "--any") words.push(rest[i]); }
   const hits = s.recall[words.join(" ")] || s.recall[""];
   out({ items: hits, total: hits.length });
 }
@@ -134,8 +140,8 @@ const absentPath = (process.env.PATH || "").split(delimiter).map((dir, n) => {
 
 // ---- scenario bookkeeping ----
 const T = {
-  MP1: "MP1: the dock tab strip reads Jobs | Messages | Memory on desktop and in the mobile sheet, with translated zh-CN labels",
-  MP2: "MP2: opening the Memory tab shows the keyword guidance and spawns no memory read, an empty submit spawns nothing, and no keyword-less list control exists",
+  MP1: "MP1: the dock tab strip reads Work | Memory | Messages on desktop and in the mobile sheet, with translated zh-CN labels",
+  MP2: "MP2: opening the Memory tab browses the project with exactly one no-keyword recall, idling reads nothing more, and an empty submit stays in browse mode",
   MP3: "MP3: a project dropdown mirrors the cwd's workspace projects, a default submit spawns exactly one recall --project workbench --limit 200 <keyword>, and the three filters are opt-in",
   MP4: "MP4: a flag-shaped keyword, an off-list project, an unknown type or a malformed memory id answers 400 with no memory spawn",
   MP5: "MP5: results render newest-first by updated_at, page at 20 client-side, show the narrowing notice at 200 and the empty state at zero hits",
@@ -144,7 +150,7 @@ const T = {
   MP8: "MP8: the detail shows metadata with private and non-active badges, collapses a 7751-byte body behind a toggle, copies the id and announces a capped body",
   MP9: "MP9: a work_item_id opens the Jobs watch read, a related id opens in the Memory tab, and a null work_item_id renders no link",
   MP10: "MP10: both memory routes pass only the allowed field set, degrade to 200 JSON on failure, and answer 403 to an in-route gate refusal with no spawn",
-  MP11: "MP11: below pf 2.20.9 the tab shows the upgrade-required state and spawns no recall; without pf the route degrades to 200 with no console error",
+  MP11: "MP11: below pf 2.20.12 the tab shows the upgrade-required state and spawns no recall; without pf the route degrades to 200 with no console error",
   MP12: "MP12: an unmapped cwd shows the unmapped state and runs no search, and no response or server log carries a sentinel or a memory body",
 };
 const failures = new Map(Object.values(T).map((title) => [title, []]));
@@ -199,12 +205,26 @@ const hasKey = (v, keys) => v && typeof v === "object" && Object.entries(v).some
 const dock = (page) => page.locator("#polyforge-dock").or(page.getByRole("dialog", { name: /polyforge/i })).first();
 const pfButton = (page) => page.getByRole("button", { name: /^(?!.*close).*polyforge/i }).first();
 const tabs = (page) => dock(page).getByRole("tab");
+const topTabs = (page) => dock(page).locator('[data-pf-tabstrip="top"] [role="tab"]');
 const keyword = (page) => dock(page).getByRole("searchbox").or(dock(page).getByPlaceholder(/keyword|search/i)).or(dock(page).getByLabel(/keyword/i)).first();
-async function memoryTab(page) {
+async function memoryTab(page, { browse = true } = {}) {
   await pfButton(page).click(); await dock(page).waitFor();
   const tab = tabs(page).filter({ hasText: /memory/i }).first();
-  await tab.waitFor({ timeout: 15_000 }); await tab.click(); return dock(page);
+  await tab.waitFor({ timeout: 15_000 }); await tab.click();
+  // A mapped, capable tab browses on open; let that read land first.
+  if (browse) await settled(isBrowse, "opening the tab must issue its browse read");
+  return dock(page);
 }
+// The browse read the tab issues on open (or a filter's re-read) has landed:
+// the newest recall matches pred. Searching before it lands would count it.
+async function settled(pred, label) {
+  for (let i = 0; i < 60 && !(recalls().length > 0 && pred(recalls().at(-1))); i++) await delay(250);
+  assert.ok(recalls().length > 0 && pred(recalls().at(-1)), `${label} (ledger ${JSON.stringify(recalls())})`);
+}
+// A browse read: --limit 20 --sort updated and no positional keyword (every
+// bare token is a flag's value).
+const isBrowse = (argv) => argAfter(argv, "--sort") === "updated" && argAfter(argv, "--limit") === "20"
+  && argv.slice(1).every((a, i, all) => a.startsWith("--") || all[i - 1]?.startsWith("--"));
 async function search(page, q, n = recalls().length + 1) {
   await keyword(page).fill(q); await keyword(page).press("Enter");
   for (let i = 0; i < 40 && recalls().length < n; i++) await delay(250);
@@ -226,29 +246,37 @@ try {
   await check(T.MP1, "MP1 three tabs desktop, mobile, zh-CN", async () => {
     for (const viewport of [{ width: 1280, height: 800 }, { width: 600, height: 900 }]) await withPage({ viewport }, async (page) => {
       await pfButton(page).click(); await dock(page).waitFor();
-      assert.deepEqual((await tabs(page).allInnerTexts()).map((t) => t.trim().split(/\s/)[0].toLowerCase()), ["jobs", "messages", "memory"], `tab strip at ${viewport.width}px`);
-      await tabs(page).nth(2).click();
+      // (owner-approved intentional change ①); (owner
+      // 2026-10-30, intentional change): Work | Memory | Messages.
+      await topTabs(page).first().waitFor();
+      assert.deepEqual((await topTabs(page).allInnerTexts()).map((t) => t.trim().split(/\s/)[0].toLowerCase()), ["work", "memory", "messages"], `tab strip at ${viewport.width}px`);
+      await topTabs(page).nth(1).click();
       assert.ok(await dock(page).isVisible(), "selecting Memory must keep the dock open");
       await keyword(page).waitFor({ timeout: 10_000 });
     });
     await withPage({ locale: "zh-CN" }, async (page) => {
       await pfButton(page).click(); await dock(page).waitFor();
-      assert.equal(await tabs(page).count(), 3, "zh-CN tab strip must carry three tabs");
-      await tabs(page).nth(2).click();
-      assert.match(await tabs(page).nth(2).innerText(), /[一-鿿]/, "the Memory tab label must be translated");
+      await topTabs(page).first().waitFor();
+      assert.equal(await topTabs(page).count(), 3, "zh-CN tab strip must carry three tabs");
+      await topTabs(page).nth(1).click();
+      assert.match(await topTabs(page).nth(1).innerText(), /[一-鿿]/, "the Memory tab label must be translated");
       assert.doesNotMatch(await dock(page).innerText(), /polyforge\.memory\./, "no untranslated polyforge.memory.* key may be visible");
     });
   });
 
-  await check(T.MP2, "MP2 pull-only guidance", () => withPage({}, async (page) => {
+  await check(T.MP2, "MP2 browse on open", () => withPage({}, async (page) => {
     seed(); const panel = await memoryTab(page);
-    await panel.getByText(/keyword/i).first().waitFor({ timeout: 10_000 });
+    await panel.getByText(DOC.title).waitFor({ timeout: 10_000 });
+    assert.equal(recalls().length, 1, `opening the tab must spawn exactly one browse recall (ledger ${JSON.stringify(recalls())})`);
+    const browse = recalls()[0];
+    assert.deepEqual([argAfter(browse, "--project"), argAfter(browse, "--limit"), argAfter(browse, "--sort")], ["workbench", "20", "updated"], `browse argv ${JSON.stringify(browse)}`);
+    assert.ok(!browse.includes("--any") && !browse.includes("--after"), `the first page carries no keyword flag or cursor: ${JSON.stringify(browse)}`);
+    assert.doesNotMatch(await panel.innerText(), /enter a keyword/i, "no keyword guidance state remains");
     await delay(4000);
-    assert.equal(memoryVerbs(), 0, "opening and idling on the tab must spawn no recall / memory show");
-    await keyword(page).fill(""); await keyword(page).press("Enter"); await delay(1500);
-    assert.equal(memoryVerbs(), 0, "an empty submit must spawn nothing");
-    assert.ok(await panel.getByText(/keyword/i).count() > 0, "an empty submit keeps the guidance state");
-    assert.equal(await panel.getByRole("button", { name: /all memories|newest|browse|list all/i }).count(), 0, "no keyword-less list control may exist");
+    assert.equal(memoryVerbs(), 1, "idling on the tab must spawn nothing more (no timer)");
+    await keyword(page).fill(""); await keyword(page).press("Enter");
+    await settled((a) => isBrowse(a) && recalls().length === 2, "an empty submit re-reads the browse page");
+    assert.equal(shows().length, 0, "no memory show without a selection");
   }));
 
   await check(T.MP3, "MP3 project dropdown and recall argv", () => withPage({}, async (page) => {
@@ -258,20 +286,26 @@ try {
     assert.deepEqual((await project.locator("option").allInnerTexts()).map((t) => t.trim()), ["workbench", "polyforge"], "the dropdown must list ws1's projects in order");
     assert.equal(await project.inputValue(), "workbench", "the first project must be selected");
     await search(page, "memory panel");
-    const plain = recalls()[0];
+    const plain = recalls().at(-1);
     assert.deepEqual([argAfter(plain, "--project"), argAfter(plain, "--limit"), plain.at(-1)], ["workbench", "200", "memory panel"], `default argv ${JSON.stringify(plain)}`);
     assert.ok(!plain.includes("--any") && !plain.includes("--tags") && !plain.includes("--type"), `the default search carries no optional flag: ${JSON.stringify(plain)}`);
     await panel.getByRole("checkbox", { name: /any/i }).check();
+    // A filter change re-issues the current (keyword) read; `any` applies at
+    // the next submit.
     await panel.getByLabel(/tags/i).or(panel.getByPlaceholder(/tag/i)).first().fill("audit,review");
+    await settled((a) => argAfter(a, "--tags") === "audit,review", "a tag change re-issues the keyword read");
     await panel.getByRole("combobox", { name: /type/i }).selectOption("doc.*");
+    await settled((a) => argAfter(a, "--type") === "doc.*", "a type change re-issues the keyword read");
     await search(page, "memory panel");
-    const full = recalls()[1];
+    const full = recalls().at(-1);
     assert.ok(full.includes("--any") && argAfter(full, "--tags") === "audit,review" && argAfter(full, "--type") === "doc.*", `filtered argv ${JSON.stringify(full)}`);
     await panel.getByRole("checkbox", { name: /any/i }).uncheck();
     await panel.getByLabel(/tags/i).or(panel.getByPlaceholder(/tag/i)).first().fill("");
+    await settled((a) => !a.includes("--tags"), "clearing the tags re-issues the keyword read");
     await panel.getByRole("combobox", { name: /type/i }).selectOption("*");
+    await settled((a) => !a.includes("--type"), "the all-types choice re-issues the keyword read");
     await search(page, "memory panel");
-    assert.ok(!recalls()[2].some((a) => ["--any", "--tags", "--type"].includes(a)), "unticking returns to the flag-less form");
+    assert.ok(!recalls().at(-1).some((a) => ["--any", "--tags", "--type"].includes(a)), "unticking returns to the flag-less form");
   }));
 
   await check(T.MP4, "MP4 refused before spawn", async () => {
@@ -399,7 +433,7 @@ try {
   });
 
   await check(T.MP12, "MP12 unmapped cwd", () => withPage({ session: SESSIONS.unmapped }, async (page) => {
-    seed(); const panel = await memoryTab(page);
+    seed(); const panel = await memoryTab(page, { browse: false });
     await panel.getByText(/unmapped|not mapped|no workspace|maps to no/i).first().waitFor({ timeout: 10_000 });
     if (await keyword(page).isEditable().catch(() => false)) { await keyword(page).fill("memory"); await keyword(page).press("Enter"); }
     await delay(1500);
@@ -407,13 +441,13 @@ try {
   }));
 
   await check(T.MP11, "MP11 below floor", async () => {
-    await stop(); seed({ version: "v2.20.8" }); await startServer("floor");
+    await stop(); seed({ version: "v2.20.11" }); await startServer("floor");
     const scope = await get(`/api/polyforge/memory?${new URLSearchParams({ cwd: ws1 })}`);
     assert.equal(scope.status, 200, `the below-floor route answered ${scope.status}`);
-    assert.match(scope.text, /2\.20\.9|upgrade/i, "below the floor the reason must name the upgrade");
+    assert.match(scope.text, /2\.20\.12|upgrade/i, "below the floor the reason must name the upgrade");
     await get(searchPath("memory panel"));
     await withPage({}, async (page) => {
-      const panel = await memoryTab(page);
+      const panel = await memoryTab(page, { browse: false });
       await panel.getByText(/upgrade/i).first().waitFor({ timeout: 10_000 });
       if (await keyword(page).isEditable().catch(() => false)) { await keyword(page).fill("memory"); await keyword(page).press("Enter"); await delay(1500); }
     });

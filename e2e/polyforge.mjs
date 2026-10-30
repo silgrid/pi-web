@@ -234,7 +234,12 @@ async function openPage({ viewport = { width: 1280, height: 800 }, locale } = {}
   page.on("console", (event) => { if (event.type() === "error") errors.push(event.text()); });
   page.on("response", (r) => { if (r.url().startsWith(base) && r.status() >= 500) errors.push(`${r.status()} ${r.url()}`); });
   page.on("request", (r) => { if (new URL(r.url()).pathname === "/api/polyforge/status") statusRequests.push(Date.now()); });
-  await page.goto(`${base}/?session=${SESSION}`, { waitUntil: "domcontentloaded" });
+  // Navigation headroom only: the host is shared and other capsules' e2e
+  // servers routinely push a cold page load past the page's 10s action
+  // timeout. The navigation shares the readiness wait's 60s bound: a cold
+  // `next dev` compile under host load outlasts the 10s action default.
+  // Assertions below still use the 10s default.
+  await page.goto(`${base}/?session=${SESSION}`, { waitUntil: "domcontentloaded", timeout: 60_000 });
   // Locale-independent readiness: the host session's first message is mounted.
   await page.getByText("E2E polyforge host session").first().waitFor({ state: "attached", timeout: 60_000 });
   return page;
@@ -244,6 +249,59 @@ const pfPanel = (page) => page.getByRole("complementary", { name: /polyforge/i }
 const bgPanel = (page) => page.getByRole("complementary", { name: "Background tasks" }).or(page.getByRole("dialog", { name: "Background tasks" }));
 async function openPanel(page) { await pfButton(page).click(); await pfPanel(page).first().waitFor(); return pfPanel(page).first(); }
 const countSince = (t0) => statusRequests.filter((t) => t >= t0).length;
+// (declared scope extension, owner-answered rewind): since
+// (18ceaea2) the server shares one `pf ops status` read between
+// the status and cards polls and reuses a completed read for
+// OPS_STATUS_REUSE_MS (lib/polyforge-status.ts). After a fixture switch an
+// answer can still carry the pre-switch snapshot, so each status assertion
+// below first waits (bounded at 2s, polling every 100ms) on the switch's
+// observable effect — the status route's body, or the stub argv log for a
+// hanging read — and then asserts exactly as before: only the wait is
+// legitimate, no assertion is relaxed.
+const STATUS_SWITCH_WAIT_MS = 2000;
+const STATUS_SWITCH_POLL_MS = 100;
+async function awaitStatusCondition(describe, predicate) {
+  const until = Date.now() + STATUS_SWITCH_WAIT_MS;
+  let lastSeen = "no status answer";
+  for (;;) {
+    try {
+      const r = await get("/api/polyforge/status");
+      if (predicate(r)) return r;
+      lastSeen = `status ${r.status} ${r.text.slice(0, 120)}`;
+    } catch (error) {
+      lastSeen = `request failed: ${String(error?.message ?? error)}`;
+    }
+    if (Date.now() >= until) {
+      throw new Error(`waited ${STATUS_SWITCH_WAIT_MS}ms for ${describe}; last answer: ${lastSeen}`);
+    }
+    await delay(STATUS_SWITCH_POLL_MS);
+  }
+}
+const awaitStatusUnavailable = (what) => awaitStatusCondition(
+  `${what}: /api/polyforge/status answers status:null with an error`,
+  (r) => r.json?.status === null && typeof r.json?.error === "string" && r.json.error.length > 0,
+);
+const awaitStatusQueueRunning = (running, what) => awaitStatusCondition(
+  `${what}: /api/polyforge/status queue.running === ${running}`,
+  (r) => r.json?.status?.queue?.running === running,
+);
+// A hanging `pf` writes its argv before it stalls, so the argv log shows the
+// post-switch read starting without waiting for that read to finish. Polling
+// the route starts the read; the status GETs that return the warm cached body
+// answer at once, and the ones that join the hanging read are bounded by the
+// route's own read timeout.
+async function awaitOpsStatusReadAfterSwitch() {
+  const before = argvCalls().length;
+  const until = Date.now() + STATUS_SWITCH_WAIT_MS;
+  for (;;) {
+    if (argvCalls().slice(before).some((args) => args.length === 3 && args[0] === "--json" && args[1] === "ops" && args[2] === "status")) return;
+    if (Date.now() >= until) {
+      throw new Error(`waited ${STATUS_SWITCH_WAIT_MS}ms for a post-switch pf --json ops status invocation in the stub argv log`);
+    }
+    void get("/api/polyforge/status").catch(() => {});
+    await delay(STATUS_SWITCH_POLL_MS);
+  }
+}
 function arrayOf(value, pred) { // first array (deep) whose object items satisfy pred
   if (Array.isArray(value) && value.length && value.every((item) => item && typeof item === "object" && pred(item))) return value;
   for (const child of value && typeof value === "object" ? Object.values(value) : []) { const hit = arrayOf(child, pred); if (hit) return hit; }
@@ -325,13 +383,35 @@ async function ensureDetail112(page) {
   // alike). The job row TOGGLES selection, so never blind-click it: verify
   // first, click only when the detail is absent, retry bounded (a click during
   // a select-fetch gap deselects; the next attempt re-selects).
-  for (let attempt = 0; attempt < 4; attempt++) {
+  // Bounded, but long enough for a post-reload status fetch on a loaded
+  // host (N9 reloads the page and expects the detail straight back).
+  for (let attempt = 0; attempt < 20; attempt++) {
     if ((await pfPanel(page).count()) === 0) { await openPanel(page); continue; }
     const panel = pfPanel(page).first();
     if ((await panel.getByText("future_kind_e2e").count()) > 0) return panel;
+    // put the job list behind a tab strip; made it
+    // Work | Memory | Messages with Jobs as Work's first sub-tab. The
+    // mode-toggle probe clicks every control, including other tabs, which
+    // unmounts the detail. Return to Work (the first top-level tab at every
+    // locale), then its Jobs sub-tab (the first), before looking for the
+    // fixture row.
+    const workTab = panel.locator('[data-pf-tabstrip="top"] [role="tab"]').first();
+    if ((await workTab.count()) > 0 && (await workTab.getAttribute("aria-selected")) !== "true") {
+      await workTab.click({ timeout: 2000 }).catch(() => {});
+      await delay(500);
+      continue;
+    }
+    const jobsTab = panel.locator('[data-pf-tabstrip="work"] [role="tab"]').first();
+    if ((await jobsTab.count()) > 0 && (await jobsTab.getAttribute("aria-selected")) !== "true") {
+      await jobsTab.click({ timeout: 2000 }).catch(() => {});
+      await delay(500);
+      continue;
+    }
     if ((await panel.getByText(SLUG112, { exact: true }).count()) === 0) { await delay(500); continue; }
     await panel.getByText(SLUG112, { exact: true }).first().click().catch(() => {});
-    await delay(500);
+    // Wait for the selection's detail fetch itself (bounded), not a fixed
+    // 500ms: under host load the fetch outlasts it and every attempt fails.
+    await panel.getByText("future_kind_e2e").first().waitFor({ state: "attached", timeout: 10_000 }).catch(() => {});
   }
   throw new Error("the pi#112 detail did not render");
 }
@@ -342,7 +422,11 @@ async function ensureDetail112(page) {
 // positionally each round, so a remounted panel is still covered. Returns the
 // toggle locator with the tail left in SIMPLE mode, or null.
 async function findEventModeToggle(page) {
-  const selector = 'button, [role="button"], [role="switch"], [role="checkbox"], [aria-pressed]';
+  // The dock's tab strips (Work | Memory | Messages, and Work's Jobs | Tasks
+  // sub-tabs,) switch the whole
+  // surface, never the tail's mode, and a click on another tab hides the Jobs
+  // detail where ensureDetail112 cannot re-select it: tabs are not candidates.
+  const selector = ':is(button, [role="button"], [role="switch"], [role="checkbox"], [aria-pressed]):not([role="tab"])';
   const verbose = async () => (await pfPanel(page).count()) > 0
     && (await pfPanel(page).first().locator('[title*="exec_init"]').count()) > 0;
   const detailShowing = async () => (await pfPanel(page).count()) > 0
@@ -416,6 +500,7 @@ try {
     await pfButton(page).filter({ hasText: "3" }).waitFor({ timeout: 8_000 });
   });
   setState({});
+  await awaitStatusQueueRunning(2, "AC4 after the AC2 cadence restore");
 
   // AC4 — job list
   await check(T.AC4, "status route fields", async () => {
@@ -432,9 +517,15 @@ try {
     await panel.getByText("demo#7").first().waitFor();
     const text = await panel.innerText();
     for (const j of JOBS) assert.ok(text.includes(j.slug), `list lacks ${j.slug} (owner ${j.origin.owner})`);
-    assert.ok(text.includes(`${LONG_CANDIDATE.slice(0, 24)}…`) && !text.includes(LONG_CANDIDATE), "candidate not shortened to 24 chars + …");
     for (const v of ["needs_input|needs input", "running"]) assert.match(text, new RegExp(v, "i"));
     assert.match(text, /2\s*\/\s*4/, "queue running/max badge 2/4 missing");
+    // (owner-approved intentional change ③): the candidate left
+    // the card for the job detail, still shortened to 24 chars + ….
+    assert.ok(!text.includes(LONG_CANDIDATE.slice(0, 24)), "the candidate is no longer on the card");
+    await panel.getByText("pi#108", { exact: true }).first().click();
+    await panel.getByRole("button", { name: /back to job list|deselect/i }).waitFor({ timeout: 15_000 });
+    const detail = await panel.innerText();
+    assert.ok(detail.includes(`${LONG_CANDIDATE.slice(0, 24)}…`) && !detail.includes(LONG_CANDIDATE), "candidate not shortened to 24 chars + … in the detail");
   });
 
   // AC5 — watch route and detail
@@ -507,6 +598,7 @@ try {
   });
   await check(T.AC8, "stale key auth failure", async () => {
     setState({ mode: "auth" });
+    await awaitStatusUnavailable("AC8 stale key auth failure");
     const r = await get("/api/polyforge/status");
     assert.equal(r.status, 200); assert.equal(r.json?.status, null);
     assert.match(String(r.json?.error), /401 unauthorized/, "pf's own stderr must surface");
@@ -514,6 +606,7 @@ try {
   });
   await check(T.AC8, "hang times out to unavailable", async () => {
     setState({ mode: "hang" });
+    await awaitOpsStatusReadAfterSwitch();
     const t0 = Date.now(); const r = await get("/api/polyforge/status");
     assert.ok(r.status === 200 && r.json && r.json.status === null, `hang answered ${r.status} ${r.text.slice(0, 80)}`);
     assert.ok(Date.now() - t0 < 20_000, `hang took ${Date.now() - t0}ms (want ~10s timeout)`);
@@ -521,6 +614,7 @@ try {
 
   // AC3/AC2 — daemon down
   setState({ mode: "down" });
+  await awaitStatusUnavailable("AC3/AC2 daemon down");
   await check(T.AC3, "daemon down routes", async () => {
     const s = await get("/api/polyforge/status"); const w = await get("/api/polyforge/watch?wi=pi%23108");
     assert.ok(s.status === 200 && s.json && s.json.status === null && s.json.error, `status route: ${s.status} ${s.text.slice(0, 80)}`);
@@ -760,7 +854,7 @@ try {
     assert.ok((await pfPanel(page).first().locator('[title*="exec_init"]').count()) >= 1, "the toggle did not switch back to verbose mode");
     // Persisted globally in localStorage: a reload restores verbose without
     // re-toggling.
-    await page.reload({ waitUntil: "domcontentloaded" });
+    await page.reload({ waitUntil: "domcontentloaded", timeout: 60_000 });
     await page.getByText("E2E polyforge host session").first().waitFor({ state: "attached", timeout: 60_000 });
     const panel2 = await ensureDetail112(page);
     assert.ok((await panel2.locator('[title*="exec_init"]').count()) >= 1, "the verbose preference did not survive a reload");

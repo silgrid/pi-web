@@ -347,7 +347,20 @@ export async function checkSplitPane(page, sessions) {
   // dropdown — an open AnimatedDropdown panel would intercept the click).
   // The picker opens browsing homeDir; type the project path so "Select this
   // folder" adds THE PROJECT (the group header keys off it).
+  // The picker's initial home-directory browse can land after a fast typed
+  // path and overwrite it on a loaded host. Dev Strict Mode replays the mount
+  // effect, so waiting for the FIRST /api/cwd/browse response is not enough:
+  // the applied (latest) browse can still be in flight and its handleResult
+  // would overwrite the input, while the disabled form ignores Enter. The
+  // path form's submit button is enabled only once the latest browse has
+  // finished and cleared `loading` (DirectoryPicker.tsx), and no further
+  // result can land after that, so wait for that real state before typing.
   await page.getByRole("button", { name: "Add", exact: true }).click();
+  await page.waitForFunction(() => {
+    const input = document.querySelector("#directory-path");
+    const submit = input && input.closest("form")?.querySelector('button[type="submit"]');
+    return Boolean(submit && !submit.disabled);
+  }, null, { timeout: 30_000 });
   await page.locator("#directory-path").fill(project);
   await page.locator("#directory-path").press("Enter");
   await page.getByRole("button", { name: "Select this folder", exact: true }).click();

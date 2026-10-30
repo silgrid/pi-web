@@ -108,3 +108,11 @@ test("the detect response surface is flat booleans/labels only (R8)", () => {
   assert.doesNotMatch(detectLibSource, /process\.env\./, "no process.env value is ever read or echoed");
   assert.doesNotMatch(detectSource, /process\.env\./, "no process.env value is ever read or echoed on the route");
 });
+
+test("the status read face forwards the machine's task counts through the one sanitizer", () => {
+  assert.match(statusSource, /getPolyforgeOpsStatus\(/, "the status route answers the sanitized ops snapshot");
+  const sanitizer = libSource.slice(libSource.indexOf("export function sanitizeOpsStatus("));
+  const body = sanitizer.slice(0, sanitizer.indexOf("\n}\n"));
+  assert.match(body, /tasks: \{\s*running: toNumber\(tasks\.running\),\s*completed: toNumber\(tasks\.completed\),\s*\}/, "exactly running/completed leave the server");
+  assert.doesNotMatch(body, /capped|interrupted|\.failed|\.limit/, "the other task counters are never read");
+});

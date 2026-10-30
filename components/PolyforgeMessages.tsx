@@ -8,17 +8,21 @@ import {
   avatarColor,
   avatarInitial,
   conversationName,
+  directRows,
   groupConversations,
   splitAnchor,
+  type PolyforgeContact,
   type PolyforgeConversation,
   type PolyforgeMessage,
 } from "@/lib/polyforge-messages-pure";
 
 /**
- * The dock's Messages surface (layout redone in):
- * a Slack-like two-column panel — the conversation list as a right-hand
- * column (compose entry on top, 单聊/群聊 sections, initial-plus-colour
- * avatars and display names, unread badges) beside the bubble stream (own
+ * The dock's Messages surface (layout redone in,
+ * contact list in): a Slack-like two-column panel — the list
+ * as a right-hand column (the flat 单聊 area: direct conversation rows first,
+ * then the silent configured contacts by display name; the 群聊 section;
+ * initial-plus-colour avatars, display names, unread badges; no compose
+ * entry — a contact row is the whole gesture) beside the bubble stream (own
  * bubbles right without attribution, peer bubbles left with a first-of-run
  * avatar and name, timestamps kept). No surface ever renders a raw user id:
  * every identity is the display name or the unknown-user placeholder. It
@@ -32,9 +36,14 @@ export interface PolyforgeMessagesProps {
   capable: boolean;
   reason: string | null;
   conversations: PolyforgeConversation[];
+  contacts: PolyforgeContact[];
   error: string | null;
   selectedConversation: string | null;
   onSelectConversation: (id: string | null) => void;
+  /** The open silent contact (no conversation yet): an empty pane whose
+   *  first send addresses `contact.id`. */
+  selectedContact: PolyforgeContact | null;
+  onSelectContact: (contact: PolyforgeContact) => void;
   messages: PolyforgeMessage[];
   initialPageLoaded: boolean;
   blocked: boolean;
@@ -84,18 +93,6 @@ function Avatar({ seed, name }: { seed: string; name: string }) {
   );
 }
 
-/** One composer face's draft (task-42 review): the chat composer and the compose
- *  entry each hold their own text/anchor/error/in-flight state — typing in
- *  one never mirrors in the other, and a send from one face never clears or
- *  restores the other's draft. */
-function useDraft() {
-  const [text, setText] = useState("");
-  const [anchor, setAnchor] = useState("");
-  const [sendError, setSendError] = useState<string | null>(null);
-  const [sending, setSending] = useState(false);
-  return { text, setText, anchor, setAnchor, sendError, setSendError, sending, setSending };
-}
-
 /** HH:MM from the sanitized created_at; the raw string when unparsable. */
 function formatTimestamp(iso: string): string {
   const date = new Date(iso);
@@ -108,9 +105,12 @@ export function PolyforgeMessages({
   capable,
   reason,
   conversations,
+  contacts,
   error,
   selectedConversation,
   onSelectConversation,
+  selectedContact,
+  onSelectContact,
   messages,
   initialPageLoaded,
   blocked,
@@ -132,35 +132,28 @@ export function PolyforgeMessages({
   // The open conversation's peer is the recipient; it is captured on open so
   // a list poll blip cannot blank a reply's recipient.
   const [lastPeer, setLastPeer] = useState("");
-  const [newRecipient, setNewRecipient] = useState("");
-  // The reply target belongs to the chat face only: the compose entry has no
-  // reply state, so its sends never inherit the open conversation's
-  // --reply-to (aihub refuses a reply outside its own conversation).
   const [replyTo, setReplyTo] = useState<string | null>(null);
   const [analyzing, setAnalyzing] = useState<string | null>(null);
-  const [composing, setComposing] = useState(false);
-  // Each face owns its draft (see useDraft): the two textareas never mirror
-  // each other, and a refusal restores the attempt only on the face it was
-  // typed in.
-  const chatDraft = useDraft();
-  const composeDraft = useDraft();
-  // The picker's picked conversation: its peer is the send target (held, never
-  // rendered — no name→id resolution); typing in the recipient field picks
-  // nothing, and a picked peer that disappears from the list falls back to
-  // nothing picked.
-  const [picked, setPicked] = useState<string | null>(null);
+  // The composer's draft: text, anchor, the refusal text and the in-flight
+  // flag.
+  const [draftText, setDraftText] = useState("");
+  const [draftAnchor, setDraftAnchor] = useState("");
+  const [sendError, setSendError] = useState<string | null>(null);
+  const [sending, setSending] = useState(false);
 
   const selectedRow = selectedConversation
     ? conversations.find((conversation) => conversation.id === selectedConversation)
     : undefined;
   const selectedPeer = selectedRow?.peer ?? "";
   useEffect(() => { if (selectedPeer) setLastPeer(selectedPeer); }, [selectedPeer]);
-  const recipient = selectedConversation ? (selectedPeer || lastPeer) : "";
-  const pickedRow = picked ? conversations.find((conversation) => conversation.id === picked) : undefined;
-  const pickedPeer = pickedRow?.peer ?? "";
+  // The send address: the open conversation's peer, or — for a silent
+  // contact with no conversation yet — the contact's id. Neither is rendered.
+  const recipient = selectedConversation ? (selectedPeer || lastPeer) : (selectedContact?.id ?? "");
+  // The pane's identity: the avatar hash seed and the display name.
+  const paneSeed = selectedConversation ? selectedPeer : (selectedContact?.id ?? "");
 
-  // A newly opened conversation resets the composer's reply state.
-  useEffect(() => { setReplyTo(null); }, [selectedConversation]);
+  // A newly opened conversation or contact resets the composer's reply state.
+  useEffect(() => { setReplyTo(null); }, [selectedConversation, selectedContact]);
 
   // Opening a conversation always positions the history at the newest message,
   // even while a local job is blocked: blocked suppresses only ARRIVAL
@@ -194,45 +187,37 @@ export function PolyforgeMessages({
 
   const replyOriginal = replyTo ? messages.find((message) => message.id === replyTo) : undefined;
 
-  // The submit knows its face: the chat composer sends to the open
-  // conversation's peer; the compose entry sends to a picked peer or the
-  // typed recipient — even while a conversation is open beside it (the
-  // hook's list-view send auto-opens one, and the entry stays usable).
-  // The composer clears the moment the send is accepted for submission and
-  // restores the attempt on a refusal, so a rendered message body always
-  // means the message actually reached the history (never an in-flight
-  // composer echo). Only the chat face carries a reply target — the compose
-  // entry sends to its own picked or typed peer with no --reply-to.
-  const submit = useCallback(async (event: React.FormEvent, face: "chat" | "compose") => {
+  // The composer sends to the open conversation's peer, or to the open
+  // silent contact's id (its first send; the hook then opens the
+  // conversation the send's answer names). The composer clears the moment
+  // the send is accepted for submission and restores the attempt on a
+  // refusal (pf's 4xx text shows under it), so a rendered message body
+  // always means the message actually reached the history (never an
+  // in-flight composer echo).
+  const submit = useCallback(async (event: React.FormEvent) => {
     event.preventDefault();
-    const draft = face === "chat" ? chatDraft : composeDraft;
-    if (draft.sending) return;
-    const target = face === "chat"
-      ? recipient
-      : (picked ? pickedPeer : newRecipient.trim());
-    const attempt = { text: draft.text, anchor: draft.anchor, newRecipient: face === "compose" ? newRecipient : "", picked: face === "compose" ? picked : null };
-    draft.setSending(true);
-    draft.setSendError(null);
-    draft.setText("");
-    draft.setAnchor("");
-    if (face === "compose") { setNewRecipient(""); setPicked(null); }
+    if (sending) return;
+    const attempt = { text: draftText, anchor: draftAnchor };
+    setSending(true);
+    setSendError(null);
+    setDraftText("");
+    setDraftAnchor("");
     try {
       await onSend({
-        to: target,
+        to: recipient,
         text: attempt.text,
         ...(attempt.anchor.trim() ? { aboutWi: attempt.anchor.trim() } : {}),
-        ...(face === "chat" && replyTo ? { replyTo } : {}),
+        ...(replyTo ? { replyTo } : {}),
       });
-      if (face === "chat") setReplyTo(null);
+      setReplyTo(null);
     } catch (submitError) {
-      draft.setText(attempt.text);
-      draft.setAnchor(attempt.anchor);
-      if (face === "compose") { setNewRecipient(attempt.newRecipient); setPicked(attempt.picked); }
-      draft.setSendError(submitError instanceof Error ? submitError.message : String(submitError));
+      setDraftText(attempt.text);
+      setDraftAnchor(attempt.anchor);
+      setSendError(submitError instanceof Error ? submitError.message : String(submitError));
     } finally {
-      draft.setSending(false);
+      setSending(false);
     }
-  }, [chatDraft, composeDraft, onSend, recipient, picked, pickedPeer, newRecipient, replyTo]);
+  }, [sending, draftText, draftAnchor, onSend, recipient, replyTo]);
 
   const analyze = useCallback(async (messageId: string) => {
     if (analyzing) return;
@@ -240,44 +225,38 @@ export function PolyforgeMessages({
     try {
       await onAnalyze(messageId);
     } catch (analyzeError) {
-      chatDraft.setSendError(analyzeError instanceof Error ? analyzeError.message : String(analyzeError));
+      setSendError(analyzeError instanceof Error ? analyzeError.message : String(analyzeError));
     } finally {
       setAnalyzing(null);
     }
-  }, [analyzing, onAnalyze, chatDraft]);
+  }, [analyzing, onAnalyze]);
 
-  // One composer markup for both faces, each reading its own draft: the
-  // conversation view sends to the open conversation's peer (no recipient
-  // field — the header names the peer), the compose entry takes the picked
-  // or typed recipient. The reply quote renders in the chat face only.
-  const renderComposer = (recipientArea: React.ReactNode | null, face: "chat" | "compose") => {
-    const draft = face === "chat" ? chatDraft : composeDraft;
-    return (
-      <form onSubmit={(event) => void submit(event, face)} style={{ display: "flex", flexDirection: "column", gap: 6, padding: "8px 12px", borderTop: "1px solid var(--border)", flexShrink: 0 }}>
-        {face === "chat" && replyOriginal && (
-          <div style={{ fontSize: 11, color: "var(--text-muted)", borderLeft: "2px solid var(--border)", paddingLeft: 6 }}>
-            {t("polyforge.messages.quote")}: {replyOriginal.text}
-          </div>
-        )}
-        {recipientArea}
-        <label style={{ display: "flex", flexDirection: "column", gap: 2, fontSize: 11, color: "var(--text-dim)" }}>
-          {t("polyforge.messages.anchor")}
-          <input value={draft.anchor} onChange={(event) => draft.setAnchor(event.target.value)}
-            style={{ background: "var(--bg)", color: "var(--text)", border: "1px solid var(--border)", borderRadius: 4, padding: "4px 6px", fontSize: 12 }} />
-        </label>
-        <label style={{ display: "flex", flexDirection: "column", gap: 2, fontSize: 11, color: "var(--text-dim)" }}>
-          {t("polyforge.messages.text")}
-          <textarea value={draft.text} onChange={(event) => draft.setText(event.target.value)} rows={3}
-            style={{ background: "var(--bg)", color: "var(--text)", border: "1px solid var(--border)", borderRadius: 4, padding: "4px 6px", fontSize: 12, resize: "vertical" }} />
-        </label>
-        {draft.sendError && <div style={{ fontSize: 11, color: "#dc2626" }}>{draft.sendError}</div>}
-        <button type="submit" disabled={draft.sending}
-          style={{ alignSelf: "flex-end", background: "var(--accent)", color: "var(--bg-panel)", border: "none", borderRadius: 4, padding: "4px 12px", fontSize: 12, cursor: draft.sending ? "default" : "pointer" }}>
-          {t("polyforge.messages.send")}
-        </button>
-      </form>
-    );
-  };
+  // The composer: it sends to the open conversation's peer or the open
+  // silent contact (no recipient field — the header names the peer).
+  const composer = (
+    <form onSubmit={(event) => void submit(event)} style={{ display: "flex", flexDirection: "column", gap: 6, padding: "8px 12px", borderTop: "1px solid var(--border)", flexShrink: 0 }}>
+      {replyOriginal && (
+        <div style={{ fontSize: 11, color: "var(--text-muted)", borderLeft: "2px solid var(--border)", paddingLeft: 6 }}>
+          {t("polyforge.messages.quote")}: {replyOriginal.text}
+        </div>
+      )}
+      <label style={{ display: "flex", flexDirection: "column", gap: 2, fontSize: 11, color: "var(--text-dim)" }}>
+        {t("polyforge.messages.anchor")}
+        <input value={draftAnchor} onChange={(event) => setDraftAnchor(event.target.value)}
+          style={{ background: "var(--bg)", color: "var(--text)", border: "1px solid var(--border)", borderRadius: 4, padding: "4px 6px", fontSize: 12 }} />
+      </label>
+      <label style={{ display: "flex", flexDirection: "column", gap: 2, fontSize: 11, color: "var(--text-dim)" }}>
+        {t("polyforge.messages.text")}
+        <textarea value={draftText} onChange={(event) => setDraftText(event.target.value)} rows={3}
+          style={{ background: "var(--bg)", color: "var(--text)", border: "1px solid var(--border)", borderRadius: 4, padding: "4px 6px", fontSize: 12, resize: "vertical" }} />
+      </label>
+      {sendError && <div style={{ fontSize: 11, color: "#dc2626" }}>{sendError}</div>}
+      <button type="submit" disabled={sending}
+        style={{ alignSelf: "flex-end", background: "var(--accent)", color: "var(--bg-panel)", border: "none", borderRadius: 4, padding: "4px 12px", fontSize: 12, cursor: sending ? "default" : "pointer" }}>
+        {t("polyforge.messages.send")}
+      </button>
+    </form>
+  );
 
   if (!pfPresent) {
     return <div style={{ padding: 16, color: "var(--text-dim)", fontSize: 12 }}>{t("polyforge.unavailable")}</div>;
@@ -291,14 +270,16 @@ export function PolyforgeMessages({
     );
   }
 
-  const chatOpen = selectedConversation !== null;
+  const chatOpen = selectedConversation !== null || selectedContact !== null;
   // One tree for desktop and mobile: mobile shows one view at a time (the
-  // list while nothing is open, the chat while a conversation is open); the
-  // ack and scroll refs survive the switch because nothing remounts.
+  // list while nothing is open, the chat while a conversation or contact is
+  // open); the ack and scroll refs survive the switch because nothing
+  // remounts.
   const showListColumn = !isMobile || !chatOpen;
   const showChatPane = !isMobile || chatOpen;
 
   const sections = groupConversations(conversations);
+  const direct = directRows(conversations, contacts);
 
   const renderRow = (conversation: PolyforgeConversation) => {
     const name = conversationName(conversation);
@@ -330,11 +311,37 @@ export function PolyforgeMessages({
     );
   };
 
-  // The list column: the compose entry on top, then the 单聊 and 群聊
-  // sections with their empty placeholders. On desktop the column is a
-  // fixed clamp of the panel width that never shrinks (the chat pane takes
-  // the rest); on mobile it is the single view while nothing is open, so
-  // it fills the sheet's full width with no desktop divider.
+  // A silent contact row: avatar, display name (or the placeholder), no
+  // unread. Clicking it opens the empty pane — no conversation is created
+  // and nothing is acknowledged; re-clicking the open contact is a no-op.
+  const renderContact = (contact: PolyforgeContact) => {
+    const name = contact.display_name.trim();
+    const open = selectedConversation === null && selectedContact?.id === contact.id;
+    return (
+      <button
+        key={`contact:${contact.id}`}
+        type="button"
+        onClick={() => { if (!open) onSelectContact(contact); }}
+        style={{
+          display: "flex", alignItems: "center", gap: 6, padding: "6px 8px",
+          background: open ? "var(--bg-selected)" : "none",
+          border: "none", cursor: "pointer", textAlign: "left", width: "100%", font: "inherit",
+        }}
+      >
+        <Avatar seed={contact.id} name={name} />
+        <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 12, color: "var(--text)" }}>
+          {name || t("polyforge.messages.unknownUser")}
+        </span>
+      </button>
+    );
+  };
+
+  // The list column: the flat 单聊 area (conversation rows first, then the
+  // silent contacts by display name, one row per peer) and the 群聊 section,
+  // each with its empty placeholder. On desktop the column is a fixed clamp
+  // of the panel width that never shrinks (the chat pane takes the rest); on
+  // mobile it is the single view while nothing is open, so it fills the
+  // sheet's full width with no desktop divider.
   const listColumn = (
     <div
       style={{
@@ -345,73 +352,12 @@ export function PolyforgeMessages({
         overflowY: "auto",
       }}
     >
-      <button
-        type="button"
-        onClick={() => setComposing((previous) => !previous)}
-        style={{
-          display: "flex", alignItems: "center", gap: 6, padding: "6px 8px", flexShrink: 0,
-          background: "none", border: "none", borderBottom: "1px solid var(--border)",
-          cursor: "pointer", textAlign: "left", width: "100%", font: "inherit", fontSize: 12, color: "var(--text)",
-        }}
-      >
-        <span aria-hidden="true" style={{ fontSize: 14, lineHeight: 1 }}>＋</span>
-        {t("polyforge.messages.newMessage")}
-      </button>
       {error && <div style={{ padding: "6px 8px", color: "#dc2626", fontSize: 11, flexShrink: 0 }}>{error}</div>}
-      {composing && (
-        <>
-          {/* The picker: existing conversation peers only, by display name;
-              a first contact is the typed field below it. No name→id lookup,
-              no directory, no new route — the list is the only source. */}
-          <div role="group" aria-label={t("polyforge.messages.recipientPick")}
-            style={{ display: "flex", flexDirection: "column", gap: 2, padding: "6px 8px", flexShrink: 0, borderBottom: "1px solid var(--border)" }}>
-            {conversations.map((conversation) => {
-              const name = conversationName(conversation);
-              return (
-                <button
-                  key={conversation.id}
-                  type="button"
-                  onClick={() => { setPicked(conversation.id); setNewRecipient(""); }}
-                  style={{
-                    display: "flex", alignItems: "center", gap: 6, padding: "4px 6px",
-                    background: picked === conversation.id ? "var(--bg-selected)" : "none",
-                    border: "none", borderRadius: 4, cursor: "pointer", textAlign: "left", width: "100%", font: "inherit",
-                  }}
-                >
-                  <Avatar seed={conversation.peer ?? conversation.id} name={name} />
-                  <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 12, color: "var(--text)" }}>
-                    {name || t("polyforge.messages.unknownUser")}
-                  </span>
-                </button>
-              );
-            })}
-          </div>
-          {renderComposer(
-            <div style={{ display: "flex", flexDirection: "column", gap: 2, fontSize: 11, color: "var(--text-dim)" }}>
-              {pickedRow && (
-                <span style={{ color: "var(--text)" }}>
-                  {conversationName(pickedRow) || t("polyforge.messages.unknownUser")}
-                </span>
-              )}
-              <label style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-                {t("polyforge.messages.recipient")}
-                <input
-                  value={newRecipient}
-                  onChange={(event) => { setPicked(null); setNewRecipient(event.target.value); }}
-                  aria-label={t("polyforge.messages.recipient")}
-                  style={{ background: "var(--bg)", color: "var(--text)", border: "1px solid var(--border)", borderRadius: 4, padding: "4px 6px", fontSize: 12 }}
-                />
-              </label>
-            </div>,
-            "compose",
-          )}
-        </>
-      )}
       <div style={{ padding: "6px 8px 2px", fontSize: 11, color: "var(--text-dim)", flexShrink: 0 }}>
         {t("polyforge.messages.sectionDirect")}
       </div>
-      {sections.direct.map(renderRow)}
-      {sections.direct.length === 0 && (
+      {direct.map((row) => (row.kind === "conversation" ? renderRow(row.conversation) : renderContact(row.contact)))}
+      {direct.length === 0 && (
         <div style={{ padding: "4px 8px", fontSize: 11, color: "var(--text-dim)" }}>{t("polyforge.messages.empty")}</div>
       )}
       <div style={{ padding: "6px 8px 2px", fontSize: 11, color: "var(--text-dim)", flexShrink: 0 }}>
@@ -427,8 +373,11 @@ export function PolyforgeMessages({
   // The chat pane: with nothing open it carries only the select-a-conversation
   // empty state (the history region and composer are not rendered, so
   // nothing acks and no conversation was auto-opened); with a conversation
-  // open it is the header, the bubble stream and the composer.
-  const headerName = selectedRow ? conversationName(selectedRow) : "";
+  // or a silent contact open it is the header, the bubble stream (empty for
+  // a contact until its first send) and the composer.
+  const headerName = selectedRow
+    ? conversationName(selectedRow)
+    : (selectedContact?.display_name.trim() ?? "");
   const chatPane = !chatOpen ? (
     <div style={{ flex: 1, minHeight: 0, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-dim)", fontSize: 12, padding: 16 }}>
       {t("polyforge.messages.select")}
@@ -440,7 +389,7 @@ export function PolyforgeMessages({
           style={{ background: "none", border: "none", color: "var(--text-muted)", cursor: "pointer", fontSize: 11, padding: 0 }}>
           ← {t("polyforge.messages.back")}
         </button>
-        <Avatar seed={selectedPeer} name={headerName} />
+        <Avatar seed={paneSeed} name={headerName} />
         <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 12, color: "var(--text)" }}>
           {headerName || t("polyforge.messages.unknownUser")}
         </span>
@@ -476,7 +425,7 @@ export function PolyforgeMessages({
             >
               {!message.mine && firstOfRun && (
                 <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                  <Avatar seed={selectedPeer} name={headerName} />
+                  <Avatar seed={paneSeed} name={headerName} />
                   <span style={{ fontSize: 11, color: "var(--text)" }}>
                     {headerName || t("polyforge.messages.unknownUser")}
                   </span>
@@ -517,12 +466,12 @@ export function PolyforgeMessages({
         })}
       </div>
 
-      {renderComposer(null, "chat")}
+      {composer}
     </div>
   );
 
-  // row-reverse keeps the column flush right while the compose entry's
-  // fields stay first in DOM order (the layout's own oracle).
+  // row-reverse keeps the column flush right while it stays first in DOM
+  // order (the layout's own oracle).
   return (
     <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "row-reverse" }}>
       {showListColumn && listColumn}

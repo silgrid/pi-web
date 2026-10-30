@@ -1,10 +1,10 @@
 # Pi Web
 
-[中文文档](./README.zh-CN.md) | [日本語](./README.ja.md) | [Русский](./README.ru.md)
+[中文文档](./docs/README.zh-CN.md) | [日本語](./docs/README.ja.md) | [Русский](./docs/README.ru.md)
 
 Local browser UI for the [pi coding agent](https://github.com/earendil-works/pi). Pi Web uses the same local configuration and session files as pi, so you can browse and resume conversations, run agent turns, configure models and resources, and inspect project files from a browser.
 
-This is the **@silgrid/pi-web** fork of [agegr/pi-web](https://github.com/agegr/pi-web), adding split-pane chat and background task panels. The fork keeps its own version line (`0.0.x`) and never reuses upstream version numbers.
+This is the **@silgrid/pi-web** fork of the upstream pi-web project, adding split-pane chat and background task panels. The fork keeps its own version line (`0.0.x`) and never reuses upstream version numbers.
 
 ## Fork baseline
 
@@ -16,7 +16,7 @@ This is the **@silgrid/pi-web** fork of [agegr/pi-web](https://github.com/agegr/
 
 Update one row per upstream merge so the table stays the mapping between the fork line and the upstream baseline.
 
-![Pi Web displaying a pi session with structured Markdown, tool calls, and project navigation](https://raw.githubusercontent.com/agegr/pi-web/main/docs/screenshot2.png)
+![Pi Web displaying a pi session with structured Markdown, tool calls, and project navigation](docs/screenshot2.png)
 
 ## Features
 
@@ -29,7 +29,7 @@ Update one row per upstream merge so the table stays the mapping between the for
 
 ## Quick Start
 
-> **⚠️ Exposure warning.** `npx` / `pi-web` binds `127.0.0.1` only by default. Any non-loopback bind — `deploy-piweb.sh` binds `0.0.0.0` by default, and `pi-web -H 0.0.0.0` / `npm run start:lan` do the same — has **no authentication** unless `PI_WEB_PASSWORD` is set: anyone who can reach the port can read and write files, open a terminal, and drive the agent. Set `PI_WEB_PASSWORD` (or keep the loopback bind / front it with a trusted edge) before exposing the port.
+> **⚠️ Exposure warning.** `npx` / `pi-web` binds `127.0.0.1` only by default. `pi-web -H 0.0.0.0` / `npm run start:lan` expose the app **without authentication** unless `PI_WEB_PASSWORD` is set: anyone who can reach the port can read and write files, open a terminal, and drive the agent. `deploy-piweb.sh` defaults to `0.0.0.0`, but it now refuses a non-loopback bind unless both `PIWEB_PORT` and `PI_WEB_PASSWORD` are set, so it cannot start a passwordless service. Set `PI_WEB_PASSWORD` (or keep the loopback bind / front it with a trusted edge) before exposing the port.
 
 Pi Web requires Node.js 22.19.0 or newer. Check your version with `node --version`, then run:
 
@@ -48,7 +48,17 @@ npm install -g @silgrid/pi-web@latest
 pi-web
 ```
 
-To update, stop the running process with `Ctrl+C` and run the same install command again. To uninstall, run `npm uninstall -g @silgrid/pi-web`.
+Commands:
+
+```bash
+pi-web version          # print the installed version
+pi-web status           # list running servers
+pi-web stop [--port N]  # stop a running server
+pi-web open [--port N]  # open a running server in the browser
+pi-web update [--check] # update a global install from its release channel
+```
+
+To update, stop the running process with `Ctrl+C` and run `pi-web update`. It updates from the release channel named in the shipped `bin/pi-web-release-channel.json` (`{ "repo": "OWNER/REPO" }`): when that is this package's own repository (`silgrid/pi-web`) it installs `@silgrid/pi-web@latest` from npm, the same as running the install command again; any other repository is an internal line, updated from that repository's GitHub Releases (the GitHub CLI `gh` downloads the release `.tgz` and `SHA256SUMS`, the checksum is verified, then `npm install -g` installs the tarball). `pi-web update --check` only reports the channel and the latest version; it downloads and installs nothing. A tree without a valid marker (for example an upstream or copied package) is refused with a non-zero exit before anything is fetched or installed. To uninstall, run `npm uninstall -g @silgrid/pi-web`.
 
 ## Deployment (container autostart)
 
@@ -62,6 +72,70 @@ The script installs the latest published package globally and (re)starts pi-web
 in a detached `tmux` session (`piweb`) with a restart loop. `PI_WEB_IDLE_TIMEOUT_MS=0`
 is required for unattended runs: by default pi-web exits after 10 idle minutes,
 which looks like the process "self-exits" when run as a background service.
+
+### Service shape (`~/.config/piweb/deploy.env`)
+
+The script takes the service shape from the caller's environment and fills any
+variable the caller did not set from the operator's
+`~/.config/piweb/deploy.env` (mode `0600`). The file is parsed as plain
+`KEY=VALUE` lines: it is never sourced or executed, and only these keys are
+read:
+
+| Key | Meaning |
+| --- | --- |
+| `PIWEB_PORT` | Port passed to pi-web; required for a non-loopback bind |
+| `PIWEB_HOST` | Bind address (default `0.0.0.0`) |
+| `PI_WEB_PASSWORD` | Web-auth password; required for a non-loopback bind |
+| `PI_WEB_ALLOWED_HOSTS` | Comma-separated hostnames pi-web accepts |
+| `PIWEB_INSTALL_REPO` | GitHub Releases install channel: `OWNER/REPO` |
+| `PIWEB_INSTALL_VERSION` | Exact release tag to install (optional pin) |
+
+A value set in the caller's environment wins over the file, including an
+explicitly empty value. The script logs only the names of the keys it loaded,
+never their values.
+
+An unquoted value ends at whitespace followed by `#`: `PIWEB_PORT=8142  # the
+service port` loads `8142`. A quoted value keeps its content, `#` included
+(`PI_WEB_PASSWORD="a#b"` loads `a#b`). The file holds the web-auth password:
+when it is not mode `0600` or not owned by the deploying user, the deploy
+still uses it and prints one `warn:` line naming the file, its mode and owner
+(never a value).
+
+A non-loopback bind is refused before any install or tmux change unless both
+`PIWEB_PORT` and `PI_WEB_PASSWORD` are set (in the environment or the file).
+The error names the missing variables and the old service keeps running.
+
+After the swap, a deploy that has both `PIWEB_PORT` and `PI_WEB_PASSWORD` probes
+the configured port: `GET /login` must answer 200 and an anonymous
+`GET /api/sessions` must answer 401 within 20 seconds. A failed probe exits 3,
+so the deploy lane reports `state=changed` instead of `state=deployed`; an
+unreachable or unauthenticated service is never reported as a successful
+deploy. The probe needs `curl` on the deploy host (a script dependency, next to
+`bash`, `tmux` and `npm`): without it the probe fails at once with an error
+naming `curl` (exit 3, `state=changed`) instead of blaming the service. The
+probe runs only when both `PIWEB_PORT` and `PI_WEB_PASSWORD` are set, so a
+loopback deploy with a port but no password gets no reachability check.
+
+The deploy then checks that the pi-web it serves is the pi-web it just
+installed. Three points must agree: the package `command -v pi-web` resolves to
+(symlinks followed), that package's version against the version npm just wrote
+under its global root (`npm root -g`, falling back to `npm ls -g`), and the
+package of the script the running `piweb` loop process executes. The check
+waits for the loop's first process and compares up to 3 times within 30
+seconds. Any disagreement prints exactly one
+`warn: serving <old>, installed <new>` line (`unknown` for a point that cannot
+be read), e.g. when npm installed into a prefix whose `bin` is not on the
+service `PATH`. The warning is advisory: the exit code is unchanged and the
+deploy lane still reports `state=deployed`. When all three agree the deploy
+prints `==> Served == installed: pi-web <version> (<path>)`.
+
+The deploy then probes the TLS edge of the first `PI_WEB_ALLOWED_HOSTS` entry
+with a single `https` `GET /` (5-second timeout; any HTTP answer, a redirect
+included, counts as reachable). The edge (e.g. a reverse proxy) is a separate
+service, so a failure only prints `warn: TLS edge unreachable (<host>)`: the
+exit code is unchanged and the deploy lane still reports `state=deployed`. An
+empty `PI_WEB_ALLOWED_HOSTS` skips the edge probe with one line, and so does a
+host without `curl`: `warn: TLS edge probe skipped: curl is not installed (<host>)`.
 
 For container entrypoint autostart, create the tmux session at container start
 (e.g. from an entrypoint script or shell rc):
@@ -86,12 +160,16 @@ For port and hostname, command-line options override the corresponding environme
 | `--port <port>`, `-p <port>`, or `PORT` | Server port | `30141` |
 | `--hostname <host>`, `-H <host>`, or `PI_WEB_HOSTNAME` | Bind hostname | `127.0.0.1` |
 | `--no-open` or `PI_WEB_NO_OPEN=1` | Do not open a browser automatically | Browser opens |
+| `PI_WEB_APP_NAME` | PWA manifest `name` and `short_name`; surrounding whitespace is trimmed, empty values use the default | `Pi Web` |
 | `PI_WEB_SKIP_VERSION_CHECK=1` | Disable Pi Web update checks | Unset |
 | `PI_WEB_ALLOWED_HOSTS` | Additional exact proxy or custom hostnames, comma-separated | Unset |
 | `PI_WEB_PASSWORD` | Enable browser password login; API clients may use Basic Auth with username `pi` | Authentication disabled |
 | `PI_WEB_IDLE_TIMEOUT_MS` | Session idle timeout in milliseconds, up to `2147483647`; `0` disables idle shutdown; invalid or out-of-range values use the default | `600000` (10 min) |
 | `PI_WEB_PUSH_ALLOWED_ENDPOINT_SUFFIXES` | Additional Web Push endpoint host suffixes (comma-separated) accepted by `/api/push/subscribe`, on top of the built-in browser push services (FCM, Mozilla autopush, Apple) | Unset |
 | `PI_WEB_SHUTDOWN_DEADLINE_MS` | How long extensions get to handle `session_shutdown` before a closing session is disposed anyway, in milliseconds up to `2147483647`; `0`, invalid or out-of-range values use the default | `5000` (5 s) |
+| `PI_CODEMODE_MAX_WORKERS` | pi's limit on codemode scripts running at once, shared by every session and subagent in the server; pi's own default is `2`, and pi-web sets `8` when the variable is unset or empty. Each script may use up to 256 MB | `8` |
+
+Set `PI_WEB_APP_NAME` before starting the server (for example, `PI_WEB_APP_NAME='Work Pi' pi-web`). After changing it, restart the server to serve the new manifest; no rebuild is required. Updates to the name of an already installed PWA are managed by the browser and are not guaranteed to appear immediately. This does not change the page title or icons.
 
 For example:
 
@@ -136,7 +214,7 @@ npx @silgrid/pi-web@latest
 
 ## Expose pi-web to your phone
 
-`deploy-piweb.sh` ships opt-in exposure modes: set `PIWEB_EXPOSE=lan|tailscale|cloudflare` when deploying. Leaving `PIWEB_EXPOSE` **unset** keeps the legacy self-managed deployment unchanged — pi-web binds `0.0.0.0` and you run your own edge (the GCP static-IP + Caddy setup, for example), with `PI_WEB_ALLOWED_HOSTS` passed through untouched and no tunnel/serve tooling installed.
+`deploy-piweb.sh` ships opt-in exposure modes: set `PIWEB_EXPOSE=lan|tailscale|cloudflare` when deploying. Every exposed mode binds a non-loopback address, so the script refuses to deploy unless `PIWEB_PORT` and `PI_WEB_PASSWORD` are set — the examples below read them from `~/.config/piweb/deploy.env`, or you can prefix them on the command line. Leaving `PIWEB_EXPOSE` **unset** keeps the legacy self-managed deployment shape — pi-web binds `0.0.0.0` and you run your own edge (the GCP static-IP + Caddy setup, for example), with `PI_WEB_ALLOWED_HOSTS` passed through untouched and no tunnel/serve tooling installed — but the same fail-closed guard still requires `PIWEB_PORT` and `PI_WEB_PASSWORD`.
 
 | Situation | Mode | Result |
 | --- | --- | --- |
@@ -147,6 +225,8 @@ npx @silgrid/pi-web@latest
 | Just kicking the tires | `PIWEB_EXPOSE=cloudflare` + `PIWEB_TUNNEL=quick` | Random `*.trycloudflare.com` URL — **demo only** |
 
 ```bash
+# PIWEB_PORT and PI_WEB_PASSWORD come from ~/.config/piweb/deploy.env, or add
+# them to any line below (e.g. PI_WEB_PASSWORD='...' PIWEB_PORT=8142 ...).
 # Same WiFi only
 PIWEB_EXPOSE=lan ./deploy-piweb.sh
 
@@ -217,7 +297,7 @@ Closed-app Web Push on Android goes through FCM, which needs a VPN in mainland C
 
 - **Agent data**: Pi Web reads pi data from `~/.pi/agent` by default, including session files under `sessions/<encoded-cwd>/<timestamp>_<uuid>.jsonl`. Set `PI_CODING_AGENT_DIR` to use another pi agent directory.
 - **Filesystem access**: Pi Web must be able to read the agent data directory and the working directories recorded by its sessions. Run Pi Web in the same filesystem environment as pi when sharing existing sessions.
-- **Shared configuration**: the Models panel uses pi's model, settings, and credential storage, so changes are visible to both interfaces.
+- **Shared configuration**: the Models panel uses pi's model, settings, and credential storage, so changes are visible to both interfaces. An open session applies a saved edit of its model when you select the model again.
 - **File access boundary**: the file browser is limited to working directories selected in Pi Web and project or session roots it already knows about; it is not a general filesystem browser.
 - **Git worktrees**: see [Worktrees in Pi Web](./docs/worktrees.md) for switcher visibility, worktree creation, and removal behavior.
 
@@ -251,7 +331,9 @@ Server-side Pi extensions with detached work can prevent automatic idle
 session eviction through the versioned global registry:
 
 ```js
-const liveness = globalThis[Symbol.for("@agegr/pi-web/session-liveness/v1")];
+// SESSION_LIVENESS_REGISTRY_KEY: the registry key string exported by
+// lib/session-liveness.ts (the upstream-compatible v1 key); use its value.
+const liveness = globalThis[Symbol.for(SESSION_LIVENESS_REGISTRY_KEY)];
 const release = liveness?.version === 1
   ? liveness.register({
       name: "my-extension",
@@ -287,6 +369,8 @@ npm run lint
 `npm test` runs the tests with a private temp dir and fails if anything is left in it afterwards (`scripts/tmp-guard.mjs`): a test removes what it creates, in `t.after()`.
 
 Do not run `next build` or `npm run build` during normal development. It writes to `.next/` and can interfere with the development server; leave builds for release work.
+
+Before starting on a feature, read [Contributing](./CONTRIBUTING.md) for what is in scope and the pull request checklist.
 
 Contributor guides: [Internationalization](./docs/i18n.md) and [Release process](./docs/release.md).
 

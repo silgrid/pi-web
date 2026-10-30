@@ -106,6 +106,8 @@ export interface SubagentResultMetadata {
   result?: string;
   error?: string;
   worktreeCleanupError?: string;
+  /** Whether an isolated run's worktree path still existed when this entry was written (#1202). */
+  worktreeExists?: boolean;
 }
 
 export interface SubagentRunInfo {
@@ -125,6 +127,8 @@ export interface SubagentRunInfo {
   worktreePath?: string;
   worktreeBranch?: string;
   worktreeCleanupError?: string;
+  /** Set once the run's result is recorded, as `SubagentResultMetadata.worktreeExists`. */
+  worktreeExists?: boolean;
   /** Set on a run started by `resume`, which reuses the session ID of an earlier run. Not persisted. */
   resumed?: boolean;
 }
@@ -908,19 +912,12 @@ export function selectSubagentExtensionTools(
 }
 
 /**
- * The built-ins a child with `mcp: on` loads, by the paths the pi CLI's `-e builtin:<name>`
- * takes: listed there, they load under `noExtensions` too, with the `builtin:mcp` path the MCP
- * host and the read-only policy recognise. Their factories come from
- * `createSubagentMcpExtensions()`.
- */
-export const SUBAGENT_MCP_EXTENSION_PATHS: readonly string[] = ["builtin:tool-search", "builtin:mcp"];
-
-/**
  * Keep only the extensions an `extensions:` list names, after the SDK has loaded them, as
  * pi-subagents does. A dropped extension binds no handlers, tools, commands or providers,
  * but its factory has already run once: this scopes the child, it is not a sandbox. Names
  * resolve like `ext:` selectors (directory, file or package name, case-insensitive), so a
- * name two sources claim keeps neither. pi-web's own inline extensions always stay. The SDK
+ * name two sources claim keeps neither. pi-web's own inline extensions always stay, as do the
+ * built-ins a child with `mcp: on` names (`SUBAGENT_MCP_EXTENSION_PATHS`). The SDK
  * calls the override on every reload, so the scope holds without further wiring.
  */
 export function scopeSubagentExtensions(names: readonly string[]) {
@@ -929,6 +926,7 @@ export function scopeSubagentExtensions(names: readonly string[]) {
     const owners = extensionNameOwners(base.extensions);
     const extensions = base.extensions.filter((extension) => (
       extension.path.startsWith("<inline:")
+      || SUBAGENT_MCP_EXTENSION_PATHS.includes(extension.path)
       || extensionCandidateNames(extension).some((name) => wanted.has(name) && owners.get(name)?.size === 1)
     ));
     const kept = new Set(extensions.map((extension) => extension.path));
@@ -941,15 +939,32 @@ export function scopeSubagentExtensions(names: readonly string[]) {
   };
 }
 
+/**
+ * The built-ins a child with `mcp: on` loads, by the paths the pi CLI's `-e builtin:<name>`
+ * takes: listed there, they load under `noExtensions` too, with the `builtin:mcp` path the MCP
+ * host and the read-only policy recognise (`lib/mcp-command.ts`). Their factories come from
+ * `createSubagentMcpExtensions()`.
+ */
+export const SUBAGENT_MCP_EXTENSION_PATHS: readonly string[] = ["builtin:tool-search", "builtin:mcp"];
+
 /** The extension half of a child's resource loader options, shared by spawn and reopen. */
 export function subagentExtensionLoaderOptions(resources: { loadExtensions: boolean; extensions?: readonly string[]; mcp?: boolean }) {
   return {
     noExtensions: !resources.loadExtensions,
+    ...(resources.mcp ? { additionalExtensionPaths: [...SUBAGENT_MCP_EXTENSION_PATHS] } : {}),
     ...(resources.loadExtensions && resources.extensions !== undefined
       ? { extensionsOverride: scopeSubagentExtensions(resources.extensions) }
       : {}),
     ...(resources.mcp ? { additionalExtensionPaths: [...SUBAGENT_MCP_EXTENSION_PATHS] } : {}),
   };
+}
+
+/**
+ * A persisted `running` / `queued` status with no live child was left by a process that
+ * stopped mid-run. Every listing must settle it, or a restart leaves a spinner forever.
+ */
+export function settleOrphanedSubagentStatus(status: SubagentStatus): SubagentStatus {
+  return status === "running" || status === "queued" ? "interrupted" : status;
 }
 
 export function readSubagentRun(entries: readonly SessionEntry[], sessionId: string, sessionPath: string): SubagentRunInfo | null {
@@ -988,5 +1003,6 @@ export function readSubagentRun(entries: readonly SessionEntry[], sessionId: str
     ...(typeof data.worktreePath === "string" ? { worktreePath: data.worktreePath } : {}),
     ...(typeof data.worktreeBranch === "string" ? { worktreeBranch: data.worktreeBranch } : {}),
     ...(result && typeof result.worktreeCleanupError === "string" ? { worktreeCleanupError: result.worktreeCleanupError } : {}),
+    ...(result && typeof result.worktreeExists === "boolean" ? { worktreeExists: result.worktreeExists } : {}),
   };
 }

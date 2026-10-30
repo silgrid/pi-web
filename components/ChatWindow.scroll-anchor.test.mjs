@@ -9,8 +9,8 @@ import test from "node:test";
 
 test("scroll anchor restore runs on a prepend even when visibleCount already exceeds messages.length", async () => {
   const source = await readFile(new URL("./ChatWindow.tsx", import.meta.url), "utf8");
-  const effect = source.match(/useEffect\(\(\) => \{\n    const snapshot = prevScrollAnchorRef\.current;[\s\S]*?\n  \}, \[[^\]]*\]\);/);
-  assert.ok(effect, "scroll anchor restore effect must read the captured snapshot");
+  const effect = source.match(/useLayoutEffect\(\(\) => \{\n    const snapshot = prevScrollAnchorRef\.current;[\s\S]*?\n  \}, \[[^\]]*\]\);/);
+  assert.ok(effect, "scroll anchor restore must run in a layout effect so the compensation lands before IntersectionObserver can deliver a renewed observer's report");
   assert.match(effect[0], /shouldRestoreScrollAnchor\(/);
   assert.match(effect[0], /restoreScrollTop\(container\.scrollHeight, snapshot\.distance\)/);
   assert.match(effect[0], /\}, \[visibleCount, messages\.length, scrollContainerRef\]\);/,

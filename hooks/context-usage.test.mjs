@@ -3,6 +3,9 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { Script, createContext } from "node:vm";
 import ts from "typescript";
+import { createJiti } from "jiti";
+
+const { agentStatusUrl } = await createJiti(import.meta.url, { interopDefault: true }).import("../lib/agent-client.ts");
 
 const source = ts.createSourceFile("useAgentSession.ts", await readFile(new URL("./useAgentSession.ts", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true);
 const nodes = [];
@@ -15,21 +18,25 @@ function callback(name) {
 }
 function setup() {
   const writes = [];
+  const activeWrites = [];
   const requests = [];
   const context = createContext({
     sessionHookMountedRef: { current: true }, sessionIdRef: { current: "a" },
     promptRunIdRef: { current: 1 }, contextUsageRequestIdRef: { current: 0 }, contextUsageAppliedIdRef: { current: 0 },
+    extensionUiTouchRef: { current: { seq: 0, status: new Map(), widget: new Map() } },
+    applySnapshotWidgets() {},
     agentRunningRef: { current: true }, sdkAgentActiveRef: { current: true }, rpcPromptPendingRef: { current: true },
     setContextUsage: (value) => writes.push(value),
+    setLiveTotalActiveMs: (value) => activeWrites.push({ sessionId: value.sessionId, value: value.value }), agentStatusUrl,
     fetch: (url) => { const request = Promise.withResolvers(); requests.push({ ...request, url }); return request.promise; },
     syncLiveModel() {}, setIsCompacting() {}, setAutoCompactionEnabled() {}, setQueuedMessages() {},
     normalizeQueuedMessages: (value) => value, finishPromptWithoutStream: () => { throw new Error("busy run settled"); },
   });
-  context.applyContextUsage = callback("applyContextUsage").runInContext(context);
+  context.applyLiveUsage = callback("applyLiveUsage").runInContext(context);
   context.refreshContextUsage = callback("refreshContextUsage").runInContext(context);
   context.reconcileAgentState = callback("reconcileAgentState").runInContext(context);
-  const reply = (index, usage, busy = true) => requests[index].resolve(Response.json({ running: busy, state: { contextUsage: usage, isStreaming: busy, isPromptRunning: busy } }));
-  return { context, writes, requests, reply };
+  const reply = (index, usage, busy = true, totalActiveMs) => requests[index].resolve(Response.json({ running: busy, state: { contextUsage: usage, totalActiveMs, isStreaming: busy, isPromptRunning: busy } }));
+  return { context, writes, activeWrites, requests, reply };
 }
 const usage = (tokens) => ({ percent: tokens / 100, contextWindow: 10_000, tokens });
 
@@ -40,6 +47,21 @@ test("a busy reconciliation refreshes context usage without settling the run", a
   await pending;
   assert.deepEqual(state.writes, [usage(100)]);
   assert.equal(state.context.agentRunningRef.current, true);
+  // Status reads leave out the system prompt, nearly all of the state (#1302).
+  assert.equal(state.requests[0].url, "/api/agent/a?systemPrompt=0");
+});
+
+test("a usage read also carries the live active time, keyed to its session", async () => {
+  const state = setup();
+  const pending = state.context.reconcileAgentState("a");
+  state.reply(0, usage(100), true, 112_900_000);
+  await pending;
+  assert.deepEqual(state.activeWrites, [{ sessionId: "a", value: 112_900_000 }]);
+  // A read without the field leaves the last value alone.
+  const later = state.context.refreshContextUsage("a");
+  state.reply(1, usage(200));
+  await later;
+  assert.deepEqual(state.activeWrites, [{ sessionId: "a", value: 112_900_000 }]);
 });
 
 test("a newer assistant usage read wins over a delayed poll", async () => {
@@ -94,8 +116,10 @@ test("only completed assistant messages trigger an immediate usage read", () => 
     script.runInNewContext({
       event: { type: "message_end", message: { role, content: [] } },
       agentRunningRef: { current: true }, sessionIdRef: { current: "a" }, optimisticUserMessageKeyRef: { current: null },
+      runContentEventsRef: { current: 0 }, lateSnapshotMessagesRef: { current: null }, promptRunIdRef: { current: 1 },
       isSystemMessageEvent: (event) => event.message.role === "system",
-      normalizeToolCalls: (message) => message, userMessageKey: () => "user", setMessages() {}, dispatch() {}, setAgentPhase() {},
+      normalizeToolCalls: (message) => message, userMessageKey: () => "user", takeLateSnapshotMessage: () => false,
+      setMessages() {}, dispatch() {}, setAgentPhase() {},
       refreshContextUsage: (sid) => reads.push(sid),
     });
     assert.deepEqual(reads, role === "assistant" ? ["a"] : []);
@@ -110,6 +134,7 @@ test("each event stream connection reads usage, since connecting resumes an idle
     script.runInNewContext({
       event: { type: "connected", sessionId: sid ?? "pending", isStreaming },
       sessionIdRef: { current: sid }, sdkAgentActiveRef: { current: false }, agentRunningRef: { current: false },
+      runContentEventsRef: { current: 0 }, externalWriteContentEventsRef: { current: 0 }, lateSnapshotMessagesRef: { current: null },
       dispatch() {}, cancelEventStreamGrace() {}, setAgentRunning() {}, setAgentPhase() {},
       refreshContextUsage: (id) => reads.push(id),
     });

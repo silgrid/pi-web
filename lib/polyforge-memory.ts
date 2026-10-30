@@ -4,17 +4,21 @@ import { isPolyforgeVersionBelowMinimum } from "./polyforge-detect";
 import { probePolyforgeVersion } from "./polyforge-status";
 import { workspaceProjects } from "../components/polyforge-config-helpers";
 import {
+  capUtf8Bytes,
   isMemoryTagList,
   isPolyforgeMemoryId,
+  MEMORY_BROWSE_LIMIT,
   MEMORY_RESULT_LIMIT,
   MEMORY_TYPE_FILTERS,
   type MemoryTypeFilter,
   type PolyforgeMemoryDetail,
   type PolyforgeMemoryHit,
+  type PolyforgeMemoryPage,
 } from "./polyforge-memory-pure";
 
 /**
- * Server-side reads for the Memory tab. Every fact comes from
+ * Server-side reads for the Memory tab (; browse mode
+ *). Every fact comes from
  * a `pf` subprocess through `execFileAsync` (no shell); every argv value is
  * validated here, before any spawn. The HTTP faces under
  * `app/api/polyforge/memory/**` only degrade and answer.
@@ -22,14 +26,16 @@ import {
  * The sanitizers are the only passport off this module: a hit keeps exactly
  * id/type/title/visibility/status/tags/related/work_item_id/created_at/
  * updated_at/content_len and the detail adds `content` (capped at
- * MEMORY_BODY_FORWARD_CAP). `owner_user_id`, `project_id`, `content_sha`,
+ * MEMORY_BODY_FORWARD_CAP); a browse page is those hits plus a finite
+ * non-negative `total` and a validated `next_cursor`. `owner_user_id`, `project_id`, `content_sha`,
  * `content_excerpt` and every unknown field never leave the server, and no
  * response carries the pf api key, user id, server address or an environment
  * value. No memory body is ever logged.
  */
 
-/** The release every flag this panel uses was observed on (Assumption 2). */
-export const POLYFORGE_MEMORY_MINIMUM_PF_VERSION = "2.20.9";
+/** The first pf whose `recall` browses with no query (`--after`, `--sort`;
+ *). Below it the tab shows its upgrade state, no fallback. */
+export const POLYFORGE_MEMORY_MINIMUM_PF_VERSION = "2.20.12";
 
 /** The body this module forwards, cut on a code-point boundary (Assumption 4). */
 export const MEMORY_BODY_FORWARD_CAP = 262144;
@@ -42,11 +48,13 @@ const SPAWN_MAX_BUFFER = 8 * 1024 * 1024;
 const STDERR_CAP = 512;
 /** A cwd is a path: this bound keeps argv bounded, nothing more. */
 const CWD_MAX_BYTES = 4096;
+/** A browse cursor is opaque (aihub's keyset token): bounded, never parsed. */
+const CURSOR_MAX_BYTES = 1024;
 
 export type ValidationResult<T> = { ok: true; value: T } | { ok: false; error: string };
 
 export { isMemoryTagList, isPolyforgeMemoryId } from "./polyforge-memory-pure";
-export type { MemoryTypeFilter, PolyforgeMemoryDetail, PolyforgeMemoryHit } from "./polyforge-memory-pure";
+export type { MemoryTypeFilter, PolyforgeMemoryDetail, PolyforgeMemoryHit, PolyforgeMemoryPage } from "./polyforge-memory-pure";
 
 /** A search after validation, in the CLI's own face. */
 export interface PolyforgeMemorySearchInput {
@@ -56,6 +64,15 @@ export interface PolyforgeMemorySearchInput {
   type: MemoryTypeFilter;
   tags?: string;
   any?: boolean;
+}
+
+/** A browse page request after validation: no keyword. */
+export interface PolyforgeMemoryBrowseInput {
+  cwd: string;
+  project: string;
+  type: MemoryTypeFilter;
+  tags?: string;
+  after?: string;
 }
 
 /** pf's typed/plain failure text, bounded: never our argv, never env values. */
@@ -88,6 +105,17 @@ function hasControlBytes(value: string): boolean {
 
 const PROJECT_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
 
+function validCwd(cwd: unknown): cwd is string {
+  return typeof cwd === "string" && !!cwd.trim() && !hasControlBytes(cwd) && Buffer.byteLength(cwd, "utf8") <= CWD_MAX_BYTES;
+}
+
+/** An opaque browse cursor as it may reach an argv: non-empty, bounded, no
+ *  control bytes and no leading `-` (never read as a flag). */
+export function isMemoryBrowseCursor(value: unknown): value is string {
+  return typeof value === "string" && value !== "" && !value.startsWith("-") && !hasControlBytes(value)
+    && Buffer.byteLength(value, "utf8") <= CURSOR_MAX_BYTES;
+}
+
 /** Validate the search face's raw params (Requirement 3 / D4): every value
  *  is checked here, so a refusal answers 400 with no pf process at all —
  *  the version probe included. Project membership is NOT here: "one of the
@@ -101,7 +129,7 @@ export function validateMemorySearch(params: {
   any?: unknown;
 }): ValidationResult<PolyforgeMemorySearchInput> {
   const cwd = params.cwd;
-  if (typeof cwd !== "string" || !cwd.trim() || hasControlBytes(cwd) || Buffer.byteLength(cwd, "utf8") > CWD_MAX_BYTES) {
+  if (!validCwd(cwd)) {
     return { ok: false, error: "cwd must be a directory path" };
   }
   const q = params.q;
@@ -129,6 +157,50 @@ export function validateMemorySearch(params: {
   if (tags !== undefined && tags !== "") value.tags = tags;
   if (params.any === "1" || params.any === true) value.any = true;
   return { ok: true, value };
+}
+
+/** Validate the browse face's raw params: the search face's
+ *  cwd/project/type/tags rules plus an optional cursor, all before any
+ *  spawn. Membership stays the route's (it needs the config read). */
+export function validateMemoryBrowse(params: {
+  cwd: unknown;
+  project: unknown;
+  type: unknown;
+  tags?: unknown;
+  after?: unknown;
+}): ValidationResult<PolyforgeMemoryBrowseInput> {
+  if (!validCwd(params.cwd)) return { ok: false, error: "cwd must be a directory path" };
+  const project = params.project;
+  if (typeof project !== "string" || !PROJECT_NAME.test(project)) {
+    return { ok: false, error: "project must be a project name" };
+  }
+  const type = params.type ?? "*";
+  if (typeof type !== "string" || !(MEMORY_TYPE_FILTERS as readonly string[]).includes(type)) {
+    return { ok: false, error: "type must be one of the six dropdown values" };
+  }
+  const tags = params.tags;
+  if (tags !== undefined && tags !== "" && !isMemoryTagList(tags)) {
+    return { ok: false, error: "tags must be a comma-separated list of tag tokens" };
+  }
+  const after = params.after;
+  if (after !== undefined && !isMemoryBrowseCursor(after)) {
+    return { ok: false, error: "after must be a browse cursor" };
+  }
+  const value: PolyforgeMemoryBrowseInput = { cwd: params.cwd, project, type: type as MemoryTypeFilter };
+  if (tags !== undefined && tags !== "") value.tags = tags;
+  if (after !== undefined) value.after = after;
+  return { ok: true, value };
+}
+
+/** The exact browse argv: one `pf recall` with no query,
+ *  one 20-row page in the fixed updated-desc order, the cursor and the two
+ *  filters opt-in. Exported for tests. */
+export function buildBrowseRecallArgv(input: PolyforgeMemoryBrowseInput): string[] {
+  const argv = ["--json", "recall", "--project", input.project, "--limit", String(MEMORY_BROWSE_LIMIT), "--sort", "updated"];
+  if (input.after) argv.push("--after", input.after);
+  if (input.tags) argv.push("--tags", input.tags);
+  if (input.type !== "*") argv.push("--type", input.type);
+  return argv;
 }
 
 /** The exact search argv (D2): one `pf recall`, the keyword as the one
@@ -193,18 +265,18 @@ export function sanitizeMemorySearchAnswer(raw: unknown): PolyforgeMemoryHit[] {
   });
 }
 
-/** Cut a body to at most `cap` UTF-8 bytes on a code-point boundary. */
-function capUtf8Bytes(value: string, cap: number): string {
-  if (Buffer.byteLength(value, "utf8") <= cap) return value;
-  let bytes = 0;
-  let end = 0;
-  for (const char of value) {
-    const size = Buffer.byteLength(char, "utf8");
-    if (bytes + size > cap) break;
-    bytes += size;
-    end += char.length;
-  }
-  return value.slice(0, end);
+/** A browse answer: the hits through the hit passport, a finite
+ *  non-negative `total` (the page length when pf's is missing or malformed)
+ *  and `next_cursor` only when it is a valid cursor. */
+export function sanitizeMemoryBrowseAnswer(raw: unknown): PolyforgeMemoryPage {
+  const items = sanitizeMemorySearchAnswer(raw);
+  const answer = raw && typeof raw === "object" ? raw as { total?: unknown; next_cursor?: unknown } : {};
+  const total = typeof answer.total === "number" && Number.isFinite(answer.total) && answer.total >= 0
+    ? Math.trunc(answer.total)
+    : items.length;
+  const page: PolyforgeMemoryPage = { items, total };
+  if (isMemoryBrowseCursor(answer.next_cursor)) page.next_cursor = answer.next_cursor;
+  return page;
 }
 
 /** One single-memory read: the hit's field set plus `content`, capped at
@@ -237,7 +309,7 @@ export interface PolyforgeMemoryCapability {
   reason?: string;
 }
 
-/** The Memory floor gate: presence + the 2.20.9 capability floor, from the
+/** The Memory floor gate: presence + the 2.20.12 capability floor, from the
  *  one existing version probe. Below it no memory verb is spawned. */
 export async function readPolyforgeMemoryCapability(): Promise<PolyforgeMemoryCapability> {
   const presence = await probePolyforgeVersion();
@@ -292,6 +364,14 @@ export async function readPolyforgeMemoryProjects(cwd: string): Promise<{ mapped
 export async function searchPolyforgeMemory(input: PolyforgeMemorySearchInput): Promise<PolyforgeMemoryHit[]> {
   const raw = await runPfJson(buildRecallArgv(input));
   return sanitizeMemorySearchAnswer(raw);
+}
+
+/** The browse face: exactly one `pf recall` with no query
+ *  (the argv of buildBrowseRecallArgv). Validation, capability and
+ *  membership are the caller's; this only transports and sanitizes. */
+export async function browsePolyforgeMemory(input: PolyforgeMemoryBrowseInput): Promise<PolyforgeMemoryPage> {
+  const raw = await runPfJson(buildBrowseRecallArgv(input));
+  return sanitizeMemoryBrowseAnswer(raw);
 }
 
 /** The single-memory face: exactly one `pf memory show`, body capped. A

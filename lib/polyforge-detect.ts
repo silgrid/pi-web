@@ -6,7 +6,7 @@ import { type PackageSource } from "@earendil-works/pi-coding-agent";
 import { execFileAsync } from "./exec-file";
 import { getGlobalSettingsPath, readGlobalSettings } from "./global-settings-file";
 import { getPackageSource, isDisabledPackage } from "./package-settings";
-import { getPolyforgeOpsStatus, probePolyforgeVersion } from "./polyforge-status";
+import { probePolyforgeVersion, readPolyforgeOpsStatus } from "./polyforge-status";
 
 /**
  * Server-side machine-level detection for the Settings Polyforge section
@@ -273,7 +273,7 @@ export async function detectPolyforge(force = false): Promise<PolyforgeDetectSta
   let daemon: PolyforgeDaemonStatus | null = null;
   if (present) {
     try {
-      await getPolyforgeOpsStatus();
+      await readPolyforgeOpsStatus();
       daemon = { reachable: true };
     } catch (error) {
       // Only pf's own bounded stderr surfaces (PolyforgeError caps it at

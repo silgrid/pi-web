@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { createJiti } from "jiti";
+import ts from "typescript";
 
 const jiti = createJiti(import.meta.url, {
   jsx: { runtime: "automatic" },
@@ -9,8 +11,11 @@ const jiti = createJiti(import.meta.url, {
 const React = await jiti.import("react");
 const { renderToStaticMarkup } = await jiti.import("react-dom/server");
 const {
+  CompactionSummaryDetails,
   MessageView,
+  PatchDiffFiles,
   ThinkingBlock,
+  formatToolDuration,
   getModelDisplayName,
   getTokenEstimateText,
   getToolCallInputText,
@@ -18,6 +23,8 @@ const {
 } = await jiti.import("./MessageView.tsx");
 const { I18nProvider } = await jiti.import("@/hooks/useI18n");
 const { splitFinalAssistantBlocks } = await jiti.import("@/lib/message-display");
+const { clearExpandedToolCalls, setToolCallExpanded } = await jiti.import("@/lib/tool-call-expansion");
+const { parseUnifiedPatch } = await jiti.import("@/lib/patch");
 
 function renderMessage(message, props = {}) {
   return renderToStaticMarkup(
@@ -72,6 +79,39 @@ test("previews the first thinking line and reveals the full text with the saved 
   }
 });
 
+test("renders long expanded thinking in pieces and short thinking as one text node (#1196)", () => {
+  const previousWindow = globalThis.window;
+  globalThis.window = { localStorage: { getItem: () => "true" } };
+  const contentOf = (thinking) => {
+    const html = renderToStaticMarkup(React.createElement(
+      I18nProvider,
+      null,
+      React.createElement(ThinkingBlock, { block: { type: "thinking", thinking }, blockIndex: 0 }),
+    ));
+    return html.match(/overflow-wrap:anywhere">([\s\S]*)<\/div><\/div>$/)[1];
+  };
+  const piecesOf = (thinking) => {
+    const content = contentOf(thinking);
+    const pieces = [...content.matchAll(/<div>([^<]*)<\/div>/g)].map((match) => match[1]);
+    assert.equal(pieces.map((piece) => `<div>${piece}</div>`).join(""), content);
+    assert.ok(pieces.length > 1);
+    return pieces;
+  };
+  try {
+    assert.equal(contentOf("First <b>line</b>\n\nSecond line."), "First &lt;b&gt;line&lt;/b&gt;\n\nSecond line.");
+
+    // The block boundary stands in for the line break at a cut; a line with
+    // no break is cut with nothing left out.
+    const thinking = "Wait, let me check settings.json again.\n".repeat(2_000);
+    assert.equal(piecesOf(thinking).join("\n"), thinking);
+    const oneLine = "Wait, let me check settings.json again. ".repeat(2_000);
+    assert.equal(piecesOf(oneLine).join(""), oneLine);
+  } finally {
+    if (previousWindow === undefined) delete globalThis.window;
+    else globalThis.window = previousWindow;
+  }
+});
+
 test("shows deferred thinking previews without loading the full content", () => {
   const html = renderMessage({
     role: "assistant",
@@ -79,6 +119,22 @@ test("shows deferred thinking previews without loading the full content", () => 
   });
   assert.match(html, />Historical first line<\/span>/);
   assert.match(html, /aria-expanded="false"/);
+});
+
+test("keys an assistant message's blocks by their place, not the entry id (#1184)", () => {
+  // A message of the running turn gets its entry id when the file is read again.
+  // A block keyed by it remounted then: open thinking closed, a tool output's
+  // scroll went back to the top. ThinkingBlock drops what it loaded for another id.
+  const source = ts.createSourceFile("MessageView.tsx", readFileSync(new URL("./MessageView.tsx", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const keys = [];
+  (function visit(node) {
+    if ((ts.isJsxSelfClosingElement(node) || ts.isJsxOpeningElement(node)) && node.tagName.getText(source) === "BlockView") {
+      const key = node.attributes.properties.find((attribute) => ts.isJsxAttribute(attribute) && attribute.name.getText(source) === "key");
+      keys.push(key?.initializer?.expression?.getText(source));
+    }
+    ts.forEachChild(node, visit);
+  })(source);
+  assert.deepEqual(keys, ["originalIndex"]);
 });
 
 test("marks only the matched text block after splitting thinking and the final answer", () => {
@@ -128,7 +184,151 @@ test("keeps streamed tool input out of collapsed markup while counting it", () =
   assert.equal(getTokenEstimateText(block), block.rawInput);
 });
 
-test("renders subagents as standard tool calls with only an extra session button", () => {
+test("renders write tool content as readable file text", () => {
+  const block = {
+    type: "toolCall",
+    toolCallId: "call-write-file",
+    toolName: "write",
+    input: { path: "src/example.ts", content: "first line\nsecond line\n" },
+  };
+  clearExpandedToolCalls();
+  setToolCallExpanded(block.toolCallId, true);
+  try {
+    const html = renderMessage({
+      role: "assistant",
+      provider: "anthropic",
+      model: "claude-test",
+      content: [block],
+    });
+
+    assert.ok(html.includes("src/example.ts"));
+    assert.match(html, /first line\nsecond line\n/);
+    assert.ok(!html.includes("<table"));
+    assert.doesNotMatch(textOf(html), /"content":/);
+  } finally {
+    clearExpandedToolCalls();
+  }
+});
+
+test("a write with another argument or an empty file shows every argument as a row", () => {
+  const cases = [
+    { id: "call-write-mode", input: { path: "notes.md", content: "text", mode: "append" }, expect: "append" },
+    { id: "call-write-empty", input: { path: "empty.txt", content: "" }, expect: "(empty)" },
+  ];
+  for (const { id, input, expect } of cases) {
+    const block = { type: "toolCall", toolCallId: id, toolName: "write", input };
+    clearExpandedToolCalls();
+    setToolCallExpanded(id, true);
+    try {
+      const html = renderMessage({ role: "assistant", provider: "anthropic", model: "claude-test", content: [block] });
+      assert.ok(textOf(html).includes(expect), id);
+      assert.doesNotMatch(textOf(html), /"path":/, id);
+    } finally {
+      clearExpandedToolCalls();
+    }
+  }
+});
+
+test("streaming input shows the rows pi's partial parse has so far, else its raw text", () => {
+  const cases = [
+    // A multi-line command cut mid-escape: its lines, not `\n` escapes.
+    { id: "call-bash-streaming", toolName: "bash", rawInput: "{\"command\":\"cd /tmp\\nls -l\\", rows: ["command", "cd /tmp\nls -l"] },
+    { id: "call-bash-timeout", toolName: "bash", rawInput: "{\"command\":\"sleep 5\",\"timeout\":3", rows: ["timeout", "3"] },
+    // Nothing parsed yet, or a nested argument begun: the raw text, as before.
+    { id: "call-bash-empty", toolName: "bash", rawInput: "{\"comm", rows: null },
+    { id: "call-edit-streaming", toolName: "edit", rawInput: "{\"path\":\"a.ts\",\"edits\":[{\"oldText\":\"x", rows: null },
+  ];
+  for (const { id, toolName, rawInput, rows } of cases) {
+    const block = { type: "toolCall", toolCallId: id, toolName, input: {}, rawInput };
+    clearExpandedToolCalls();
+    setToolCallExpanded(id, true);
+    try {
+      const html = renderMessage({ role: "assistant", provider: "anthropic", model: "claude-test", content: [block] });
+      if (rows) {
+        assert.ok(html.includes("<table"), id);
+        for (const text of rows) assert.ok(textOf(html).includes(text), id);
+      } else {
+        assert.ok(!html.includes("<table"), id);
+        assert.ok(textOf(html).includes(getToolCallInputText(block)), id);
+      }
+    } finally {
+      clearExpandedToolCalls();
+    }
+  }
+});
+
+test("a nested argument keeps the JSON body: a row cannot hold a subtree", () => {
+  const block = {
+    type: "toolCall",
+    toolCallId: "call-mcp-nested",
+    toolName: "mcp__issues__search",
+    input: { query: "open bugs", filter: { labels: ["bug"], assignee: "me" }, limit: 10 },
+  };
+  clearExpandedToolCalls();
+  setToolCallExpanded(block.toolCallId, true);
+  try {
+    const html = renderMessage({ role: "assistant", provider: "anthropic", model: "claude-test", content: [block] });
+    assert.ok(!html.includes("<table"));
+    assert.ok(textOf(html).includes('"filter"'));
+    assert.ok(textOf(html).includes('"labels"'));
+  } finally {
+    clearExpandedToolCalls();
+  }
+});
+
+test("an edit call shows no table: its arguments are a list of patches", () => {
+  const input = {
+    path: "src/app/page.tsx",
+    edits: [{ oldText: "const a = 1", newText: "const a = 2" }],
+  };
+  const block = { type: "toolCall", toolCallId: "call-edit-nested", toolName: "edit", input };
+  clearExpandedToolCalls();
+  setToolCallExpanded(block.toolCallId, true);
+  try {
+    const html = renderMessage({ role: "assistant", provider: "anthropic", model: "claude-test", content: [block] });
+    assert.ok(!html.includes("<table"));
+  } finally {
+    clearExpandedToolCalls();
+  }
+});
+
+test("a read, a subagent and a flat MCP call show one row per argument", (t) => {
+  const cases = [
+    { id: "call-read-rows", toolName: "read", input: { path: "lib/tool-fields.ts", offset: 120, limit: 80 }, expect: [">path</td>", "lib/tool-fields.ts", ">120</td>"] },
+    { id: "call-agent-rows", toolName: "Agent", input: { subagent_type: "Explore", prompt: "Find the parser" }, expect: [">subagent_type</td>", "Find the parser"] },
+    { id: "call-mcp-flat-rows", toolName: "mcp__issues__search", input: { query: "open bugs", limit: 10 }, expect: [">query</td>", "open bugs", ">10</td>"] },
+  ];
+  for (const { id, toolName, input, expect } of cases) {
+    const block = { type: "toolCall", toolCallId: id, toolName, input };
+    setToolCallExpanded(id, true);
+    t.after(() => setToolCallExpanded(id, false));
+    const html = renderMessage({ role: "assistant", provider: "anthropic", model: "claude-test", content: [block] });
+    assert.ok(html.includes("<table"), id);
+    for (const needle of expect) assert.ok(html.includes(needle), `${id}: ${needle}`);
+  }
+});
+
+test("a long or multi-line value stays inside the card", (t) => {
+  const content = Array.from({ length: 40 }, (_, index) => `line ${index}`).join("\n");
+  const block = {
+    type: "toolCall",
+    toolCallId: "call-agent-long",
+    toolName: "Agent",
+    input: { subagent_type: "a".repeat(200), prompt: content },
+  };
+  setToolCallExpanded(block.toolCallId, true);
+  t.after(() => setToolCallExpanded(block.toolCallId, false));
+  const html = renderMessage({ role: "assistant", provider: "anthropic", model: "claude-test", content: [block] });
+  // A single-line value wraps in its cell; a value with lines of its own scrolls in a block.
+  assert.ok(html.includes("<table"));
+  assert.match(html, /overflow-wrap:anywhere/);
+  assert.match(html, /calc\(12px \+ var\(--chat-font-size-offset, 0px\)\)/);
+  assert.match(html, /max-height:260px/);
+  assert.match(html, /overflow:auto/);
+  assert.ok(textOf(html).includes("line 39"));
+});
+
+test("renders subagents as standard tool calls with only an extra side-panel button", () => {
   const block = {
     type: "toolCall",
     toolCallId: "call-agent-1",
@@ -160,13 +360,13 @@ test("renders subagents as standard tool calls with only an extra session button
     content: [block],
   }, {
     toolResults: new Map([[block.toolCallId, result]]),
-    onOpenSession() {},
+    onOpenSubagent() {},
   });
 
   assert.match(html, /border:1px solid rgba\(34,197,94,0\.25\)/);
   assert.match(html, />Agent</);
   assert.match(html, />Explore</);
-  assert.match(html, /aria-label="Open sub-agent session"/);
+  assert.match(html, /aria-label="View sub-agent work in side panel"/);
   assert.doesNotMatch(html, />completed</);
   assert.doesNotMatch(html, />Find parser</);
 
@@ -177,9 +377,26 @@ test("renders subagents as standard tool calls with only an extra session button
     content: [{ ...block, toolCallId: "call-extension-1", toolName: "extension_tool" }],
   }, {
     toolResults: new Map(),
-    onOpenSession() {},
+    onOpenSubagent() {},
   });
-  assert.doesNotMatch(ordinaryHtml, /Open sub-agent session/);
+  assert.doesNotMatch(ordinaryHtml, /View sub-agent work in side panel/);
+});
+
+test("a tool card shows the run time pi recorded, else the timestamps' difference, never a tiny one", () => {
+  const block = { type: "toolCall", toolCallId: "call-duration-1", toolName: "bash", arguments: { command: "make" } };
+  const message = { role: "assistant", provider: "anthropic", model: "claude-test", content: [block], timestamp: 1_000_000, durationMs: 4_000 };
+  const header = (result) => renderMessage(message, { toolResults: new Map([[block.toolCallId, result]]) });
+  const result = { role: "toolResult", toolCallId: block.toolCallId, toolName: "bash", content: [], isError: false };
+  // pi 1.1 records the execution itself; the timestamps would count the model's 4 s of generation too.
+  assert.match(header({ ...result, timestamp: 1_006_400, durationMs: 2_400 }), />2\.4s</);
+  // A result saved before pi recorded durations falls back to the timestamps.
+  assert.match(header({ ...result, timestamp: 1_006_400 }), />6\.4s</);
+  assert.doesNotMatch(header({ ...result, timestamp: 1_006_400, durationMs: 40 }), />\d+\.\ds</);
+
+  assert.equal(formatToolDuration(400), "0.4s");
+  assert.equal(formatToolDuration(59_940), "59.9s");
+  assert.equal(formatToolDuration(185_000), "3m 5s");
+  assert.equal(formatToolDuration(3_725_000), "1h 2m 5s");
 });
 
 const COMPLETE_SKILL_EXPANSION = `<skill name="review" location="/skills/review/SKILL.md">
@@ -189,6 +406,26 @@ Review the supplied files.
 </skill>
 
 src/main.ts`;
+
+test("a reply's usage line reads like pi's TUI footer, then the turn's time", () => {
+  const usage = { input: 1_234, output: 567, cacheRead: 85_312, cacheWrite: 12, cost: { total: 0.00362 } };
+  const html = renderMessage(
+    { role: "assistant", provider: "anthropic", model: "claude-test", content: [{ type: "text", text: "Done." }], stopReason: "stop", usage },
+    { turnDurationMs: 10_000 },
+  );
+  // The arrows and the clock are drawn as SVG; their characters and words stay
+  // as font-size 0 text, so a copied selection reads like the footer.
+  assert.equal(html.match(/<svg[^>]*aria-hidden="true"/g)?.length, 3);
+  const text = html.replace(/<svg[\s\S]*?<\/svg>/g, "").replace(/<span style="font-size:0">([^<]*)<\/span>/g, "$1");
+  // Each count is its own span; the spaces between them stay in the text.
+  assert.match(text, /<span>↑1\.2k<\/span> <span>↓567<\/span> <span>R85k<\/span> <span>W12<\/span> <span>\$0\.0036<\/span> <span>·<\/span> <span>took 10s<\/span>/);
+  // Zero counts are left out, as in the footer.
+  const bare = renderMessage({
+    role: "assistant", provider: "anthropic", model: "claude-test", content: [{ type: "text", text: "Done." }], stopReason: "stop",
+    usage: { input: 12_000_000, output: 0, cacheRead: 0, cacheWrite: 0, cost: { total: 0 } },
+  });
+  assert.match(bare.replace(/<svg[\s\S]*?<\/svg>/g, "").replace(/<span style="font-size:0">([^<]*)<\/span>/g, "$1"), /<span>↑12M<\/span><\/div>/);
+});
 
 test("renders a provider error when the assistant message has no content", () => {
   const html = renderMessage({
@@ -398,6 +635,36 @@ test("marks apply_patch returned failures as errors even when isError is unset",
   assert.doesNotMatch(html, /border:1px solid rgba\(34,197,94,0\.25\)/);
 });
 
+test("collapses a displayed custom message from its header alone", () => {
+  const custom = (props) => renderMessage({
+    role: "custom",
+    customType: "extension",
+    display: true,
+    timestamp: Date.now(),
+    ...props,
+  });
+  // The header is the card's first button and the only one holding the title.
+  const header = (html) => html.slice(0, html.indexOf("</button>"));
+
+  // The header is the toggle, so a message with no `details` can collapse too.
+  const shown = custom({ content: [{ type: "text", text: "a message with no details" }] });
+  assert.match(header(shown), /aria-expanded="true"/);
+  assert.match(header(shown), />extension</);
+  // The footer is for details only; it is not a second way to collapse.
+  assert.doesNotMatch(shown, /Show details|Hide details/);
+
+  // It starts expanded, as pi's TUI draws a displayed custom message in full.
+  assert.match(shown, /a message with no details/);
+  // A message with no text (images only) can collapse too.
+  assert.match(header(custom({ content: [] })), /aria-expanded="true"/);
+
+  // A message that does carry details keeps that button, for its details.
+  assert.match(
+    custom({ content: [{ type: "text", text: "a message with details" }], details: { files: ["a.ts"] } }),
+    /Show details/,
+  );
+});
+
 test("renders custom-message images as buttons that open a larger preview", () => {
   const html = renderMessage({
     role: "custom",
@@ -453,8 +720,6 @@ test("uses the unanswered truncation notice for an empty length reply", () => {
   assert.match(html, /nearly full context/i);
   assert.doesNotMatch(html, /follow-up/i);
 });
-
-const { setToolCallExpanded } = await jiti.import("@/lib/tool-call-expansion");
 
 function textOf(html) {
   return html.replace(/<[^>]+>/g, "").replace(/&quot;/g, "\"").replace(/&amp;/g, "&").replace(/&#x27;/g, "'");
@@ -526,9 +791,9 @@ test("expands a codemode call into its script, its calls, and the output without
   });
   const text = textOf(html);
 
-  assert.match(html, /markdown-code-lang">javascript</);
-  assert.match(text, /\/\/ @options: \{"timeoutMs": 5000\}/);
-  assert.match(text, /return files\.length;/);
+  // The script sits in the plain box any tool's input uses, not a highlighted code block.
+  assert.doesNotMatch(html, /markdown-code-block/);
+  assert.equal(textOf(html.match(/<pre[^>]*>([\s\S]*?)<\/pre>/)[1]), CODEMODE_SCRIPT);
   assert.match(text, /Tool calls/);
   assert.match(text, /Show 5 earlier calls/);
   // The newest 20 of 25 calls are listed; the 5 oldest are folded.
@@ -563,19 +828,26 @@ test("shows a running script's calls without an empty output", (t) => {
   assert.doesNotMatch(text, /No output/i);
 });
 
-test("keeps the generic view for a codemode call whose input is still streaming or has no script", (t) => {
+test("a codemode call with no script or streaming input falls back to a plain body", (t) => {
   const streaming = { ...codemodeCall("call-codemode-streaming", ""), input: {}, rawInput: "{\"code\":\"const secret" };
   setToolCallExpanded(streaming.toolCallId, true);
   t.after(() => setToolCallExpanded(streaming.toolCallId, false));
   const streamingText = textOf(renderCodemode(streaming));
   assert.match(streamingText, /Generating parameters/);
-  assert.match(streamingText, /\{"code":"const secret/);
+  // The script so far, through the partial parse, rather than its JSON.
+  assert.match(streamingText, /codeconst secret/);
+  assert.doesNotMatch(streamingText, /\{"code"/);
   assert.doesNotMatch(streamingText, /Tool calls/);
 
   const other = { type: "toolCall", toolCallId: "call-codemode-other", toolName: "codemode", input: { script: "x" } };
   setToolCallExpanded(other.toolCallId, true);
   t.after(() => setToolCallExpanded(other.toolCallId, false));
-  assert.match(textOf(renderCodemode(other)), /"script": "x"/);
+  // An argument this view does not understand is still an argument: no script box,
+  // but the flat row shows it.
+  const otherHtml = renderCodemode(other);
+  assert.match(otherHtml, /<table/);
+  assert.match(otherHtml, />x<\/td>/);
+  assert.doesNotMatch(textOf(otherHtml), /"script": "x"/);
 });
 
 test("labels an MCP call server/tool and indents a JSON result", (t) => {
@@ -629,4 +901,195 @@ test("keeps the registered name where no result names the server and tool", (t) 
     details: { calls: [{ id: "call-codemode-mcp/1", name: "mcp__docs_v2__search_pages", args: "{}", status: "ok" }] },
   });
   assert.match(textOf(html), /mcp__docs_v2__search_pages\{\}/);
+});
+
+test("collapses the compaction summary to its title and token count, as pi's TUI does (#1026)", () => {
+  const summary = "## Goal\n\nShip the parser fix.\n\n<read-files>\nlib/read.ts\n</read-files>\n\n<modified-files>\nlib/changed.ts\n</modified-files>";
+  const message = {
+    role: "custom",
+    customType: "compaction",
+    content: summary,
+    display: true,
+    details: { tokensBefore: 123456, firstKeptEntryId: "kept0001" },
+  };
+  const html = renderMessage(message);
+
+  assert.match(html, /<button type="button" aria-expanded="false" title="Expand"/);
+  assert.match(html, /Conversation compacted/);
+  assert.ok(html.includes(`Compacted from ${(123456).toLocaleString()} tokens`));
+  assert.doesNotMatch(html, /Ship the parser fix|following summary|File context|lib\/read\.ts|lib\/changed\.ts/);
+  assert.doesNotMatch(renderMessage({ ...message, details: undefined }), /Compacted from/);
+
+  // What the toggle reveals.
+  const details = renderToStaticMarkup(React.createElement(
+    I18nProvider,
+    null,
+    React.createElement(CompactionSummaryDetails, { summary }),
+  ));
+  assert.match(details, /following summary/);
+  assert.match(details, /Ship the parser fix/);
+  assert.match(details, /File context: 1 read, 1 modified/);
+  assert.match(details, /lib\/read\.ts/);
+  assert.match(details, /lib\/changed\.ts/);
+});
+
+// ── A tool card's patch: two columns where there is room, one where there is not ──
+
+const EDIT_PATCH = `--- a/src/demo.ts
++++ b/src/demo.ts
+@@ -10,3 +10,3 @@
+ const keep = true;
+-const value = "old";
++const value = "new";
+done();
+`;
+
+const TWO_COLUMN_GRID = "grid-template-columns:minmax(0, 1fr) minmax(0, 1fr)";
+
+function renderPatchFiles(files, layout) {
+  return renderToStaticMarkup(
+    React.createElement(I18nProvider, null, React.createElement(PatchDiffFiles, { files, layout })),
+  );
+}
+
+function countIn(haystack, needle) {
+  return haystack.split(needle).length - 1;
+}
+
+// pi-hashline-edit-pro's insert/replace address lines by anchor and name no file (#1460).
+test("a call that names no file is labelled with the one file its result's patch changed", () => {
+  const block = { type: "toolCall", toolCallId: "call-insert-path", toolName: "insert", input: { anchor: "kqzmv", direction: "after", text: "x" } };
+  const resultWith = (patch) => ({
+    role: "toolResult",
+    toolCallId: block.toolCallId,
+    toolName: "insert",
+    content: [{ type: "text", text: "Successfully inserted in src/demo.ts." }],
+    details: { patch },
+  });
+  const render = (result) => renderMessage(
+    { role: "assistant", provider: "anthropic", model: "claude-test", content: [block] },
+    { toolResults: result ? new Map([[block.toolCallId, result]]) : new Map() },
+  );
+
+  const html = render(resultWith(EDIT_PATCH.replace("--- a/", "--- ").replace("+++ b/", "+++ ")));
+  assert.match(html, />src\/demo\.ts</);
+  assert.doesNotMatch(html, />kqzmv</);
+
+  // No result yet, or a patch over two files: the first argument, as before.
+  assert.match(render(undefined), />kqzmv</);
+  const onePatch = (file) => `--- ${file}\n+++ ${file}\n@@ -1,1 +1,1 @@\n-old\n+new\n`;
+  const twoFiles = onePatch("src/demo.ts") + onePatch("src/other.ts");
+  assert.match(render(resultWith(twoFiles)), />kqzmv</);
+});
+
+test("a call's own path stays its label over its result's patch", () => {
+  const block = { type: "toolCall", toolCallId: "call-edit-own-path", toolName: "edit", input: { path: "src/given.ts" } };
+  const result = { role: "toolResult", toolCallId: block.toolCallId, toolName: "edit", content: [{ type: "text", text: "ok" }], details: { patch: EDIT_PATCH } };
+  const html = renderMessage(
+    { role: "assistant", provider: "anthropic", model: "claude-test", content: [block] },
+    { toolResults: new Map([[block.toolCallId, result]]) },
+  );
+  assert.match(html, />src\/given\.ts</);
+});
+
+test("an edit card draws the applied patch in two columns while there is room", () => {
+  const block = { type: "toolCall", toolCallId: "call-edit-columns", toolName: "edit", input: { path: "src/demo.ts" } };
+  const result = {
+    role: "toolResult",
+    toolCallId: block.toolCallId,
+    toolName: "edit",
+    content: [{ type: "text", text: "ok" }],
+    details: { patch: EDIT_PATCH },
+  };
+  setToolCallExpanded(block.toolCallId, true);
+  try {
+    const html = renderMessage(
+      { role: "assistant", provider: "anthropic", model: "claude-test", content: [block] },
+      { toolResults: new Map([[block.toolCallId, result]]) },
+    );
+    assert.ok(html.includes(TWO_COLUMN_GRID), "the card reaches the patch view");
+    assert.ok(html.includes("const value = &quot;new&quot;;"));
+  } finally {
+    clearExpandedToolCalls();
+  }
+});
+
+test("the same patch in one column: no line twice, the removed line above what replaces it", () => {
+  const stacked = renderPatchFiles(parseUnifiedPatch(EDIT_PATCH), "stacked");
+
+  assert.ok(!stacked.includes("grid-template-columns"), "nothing stands beside anything");
+  assert.equal(countIn(stacked, "const keep = true;"), 1);
+  assert.equal(countIn(stacked, "const value = &quot;old&quot;;"), 1);
+  assert.equal(countIn(stacked, "const value = &quot;new&quot;;"), 1);
+  assert.ok(stacked.indexOf("&quot;old&quot;;") < stacked.indexOf("&quot;new&quot;;"));
+
+  // The two columns pay for themselves by printing every context line twice.
+  const split = renderPatchFiles(parseUnifiedPatch(EDIT_PATCH), "split");
+  assert.ok(split.includes(TWO_COLUMN_GRID));
+  assert.equal(countIn(split, "const keep = true;"), 2);
+});
+
+test("one column names a file section by the file's own path, not by Before and After", () => {
+  const files = parseUnifiedPatch(`--- a/one.ts
++++ b/one.ts
+@@ -1 +1 @@
+-a
++b
+--- a/two.ts
++++ b/two.ts
+@@ -1 +1 @@
+-c
++d
+`);
+  const html = renderPatchFiles(files, "stacked");
+
+  assert.ok(html.includes("b/one.ts"), "the first file names its section");
+  assert.ok(html.includes("b/two.ts"), "the second file names its section");
+  assert.ok(!html.includes(">Before<") && !html.includes(">After<"), "two labels over one column read as two columns");
+});
+
+test("the layout is the viewport's choice, taken once for both the patch input and the patch result", () => {
+  const source = readFileSync(new URL("./MessageView.tsx", import.meta.url), "utf8");
+
+  // Both the applied-patch card and a result's patch render through SplitFilesView,
+  // so a phone never gets one of each.
+  assert.match(source, /const layout: PatchDiffLayout = useIsMobile\(\) \? "stacked" : "split";/);
+  assert.equal(countIn(source, "<SplitFilesView"), 2);
+});
+
+test("one column numbers a removed line by the old file and every other line by the new one", () => {
+  const stacked = renderPatchFiles(parseUnifiedPatch(`--- a/src/demo.ts
++++ b/src/demo.ts
+@@ -10,3 +10,4 @@
+ const keep = true;
+-const value = "old";
++const value = "new";
++const extra = 1;
+ done();
+@@ -30,1 +31,1 @@
+-late
++LATE
+`), "stacked");
+
+  const gutter = [...stacked.matchAll(/width:42px[^>]*>(\d*)</g)].map((match) => match[1]);
+  // done() is old line 12 but new line 13: the new file's number, as in the file viewer's gutter.
+  assert.deepEqual(gutter, ["10", "11", "11", "12", "13", "30", "31"]);
+  // The lines between the hunks stay marked, as in the two-column view.
+  assert.equal(countIn(stacked, "⋯ 17 unchanged lines"), 1);
+});
+
+test("one column names a deleted file's section by its old path", () => {
+  const html = renderPatchFiles(parseUnifiedPatch(`--- a/gone.ts
++++ /dev/null
+@@ -1 +0,0 @@
+-bye
+--- a/kept.ts
++++ b/kept.ts
+@@ -1 +1 @@
+-a
++b
+`), "stacked");
+
+  assert.ok(html.includes(">a/gone.ts<"));
+  assert.ok(!html.includes("/dev/null"));
 });

@@ -347,7 +347,8 @@ export async function checkArchive(page, fixtures) {
     const set = await readArchiveSet(page);
     assert.ok(set.includes(alphaId) && set.includes(betaId),
       "the archive set must be restored from localStorage after reload");
-    assert.equal(await archiveEntryCount(page), 2, "entry count must survive the reload");
+    await assertEventually(() => archiveEntryCount(page), 2,
+      "entry count must survive the reload");
   });
 
   // Scenario: Opening the archive view. The probe's project is selected so
@@ -463,7 +464,7 @@ export async function checkArchive(page, fixtures) {
     await ensureSidebar(page);
     await assertEventually(async () => (await readArchiveSet(page)).includes(betaId), false,
       "the externally deleted session id must be pruned from the archive set");
-    assert.equal(await archiveEntryCount(page), 1,
+    await assertEventually(() => archiveEntryCount(page), 1,
       "the entry count must reflect the pruned session (no stale counts or ghost rows)");
     await openArchiveView(page);
     await sessionRow(page, alphaTitle).waitFor({ state: "visible", timeout: WAIT_MS * 2 });

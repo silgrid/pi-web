@@ -9,8 +9,10 @@ import {
   MEMORY_RESULT_LIMIT,
   MEMORY_TYPE_FILTERS,
   isMemoryBodyTruncated,
+  isMemoryTagList,
   isPolyforgeMemoryId,
   memoryPage,
+  mergeMemoryPages,
   sortMemoryHitsNewestFirst,
   type PolyforgeMemoryDetail,
   type PolyforgeMemoryHit,
@@ -18,11 +20,17 @@ import {
 import { MarkdownBody } from "./MarkdownBody";
 
 /**
- * The dock's Memory surface: search-then-view, pull-only. One
- * scope read when the tab first renders (the config read behind the project
- * dropdown — no memory verb); a search on submit only; a single-memory read
- * on selection. No timer, no polling, no storage: query, results and detail
- * live in component state and die with the tab.
+ * The dock's Memory surface (browse mode):
+ * browse-or-search, then view, pull-only. One scope read when the tab first
+ * renders (the config read behind the project dropdown — no memory verb);
+ * then the first BROWSE page of the selected project (updated-desc, 20 rows,
+ * the total shown) with "load more" appending the next keyset page. A
+ * submitted non-empty keyword switches to the #99 relevance read (one
+ * 200-row `pf recall`, newest-first, 20-row client pages); submitting an
+ * empty keyword returns to browse. Project, type and tags re-issue the
+ * current mode's read. A single-memory read on selection. No timer, no
+ * polling, no storage: query, results and detail live in component state and
+ * die with the tab.
  */
 
 export interface PolyforgeMemoryProps {
@@ -43,7 +51,17 @@ interface MemoryScope {
 
 interface SearchResponse extends Partial<MemoryScope> {
   hits?: PolyforgeMemoryHit[];
+  /** Browse face only: the project total and the next page's cursor. */
+  total?: number;
+  next_cursor?: string;
   error?: string;
+}
+
+/** The browse list: every page loaded so far, merged in order. */
+interface BrowseList {
+  rows: PolyforgeMemoryHit[];
+  total: number;
+  nextCursor: string | null;
 }
 
 interface ShowResponse extends Partial<MemoryScope> {
@@ -74,10 +92,16 @@ export function PolyforgeMemory({ cwd, onOpenWorkItem }: PolyforgeMemoryProps) {
   const [type, setType] = useState<string>(MEMORY_TYPE_FILTERS[0]);
   const [project, setProject] = useState("");
 
+  // The submitted keyword ("" = browse mode) and a submit counter, so
+  // re-submitting the same keyword reads again.
+  const [activeQuery, setActiveQuery] = useState("");
+  const [submits, setSubmits] = useState(0);
+
+  const [browse, setBrowse] = useState<BrowseList | null>(null);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [hits, setHits] = useState<PolyforgeMemoryHit[] | null>(null);
   const [page, setPage] = useState(1);
-  const [searchError, setSearchError] = useState<string | null>(null);
-  const [searching, setSearching] = useState(false);
+  const [listError, setListError] = useState<string | null>(null);
 
   const [detail, setDetail] = useState<PolyforgeMemoryDetail | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
@@ -85,6 +109,10 @@ export function PolyforgeMemory({ cwd, onOpenWorkItem }: PolyforgeMemoryProps) {
   const [copied, setCopied] = useState(false);
 
   const detailScrollRef = useRef<HTMLDivElement | null>(null);
+  // A list-read sequence: only the newest browse/search read may write list
+  // state, so a slow read for an old filter or mode never lands over a newer
+  // one (the same rule as the detail reads below).
+  const listSeqRef = useRef(0);
   // A selection sequence: only the newest openDetail (or the back button)
   // may write detail state, so a slow earlier read cannot overwrite a later
   // selection's answer (the review finding,).
@@ -151,33 +179,76 @@ export function PolyforgeMemory({ cwd, onOpenWorkItem }: PolyforgeMemoryProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- one read per selection; t() is stable per locale
   }, []);
 
-  const submit = useCallback((event: React.FormEvent) => {
-    event.preventDefault();
-    const q = keyword.trim();
-    // An empty keyword keeps the guidance state and spawns nothing; an
-    // unmapped cwd offers no runnable search at all.
-    if (!q || !scope?.mapped || !cwd || searching) return;
-    const params = new URLSearchParams({ cwd, q, project, type });
+  // One list read: a browse page (no keyword; `after` continues the walk)
+  // or the keyword search. Page 1 of either mode replaces that mode's list;
+  // a browse continuation appends through mergeMemoryPages (no scroll reset:
+  // the list container stays mounted).
+  const readList = (query: string, after: string | null) => {
+    if (!cwd || !project) return;
+    const seq = ++listSeqRef.current;
+    const params = new URLSearchParams({ cwd, project, type });
     if (tags.trim()) params.set("tags", tags.trim());
-    if (anyWord) params.set("any", "1");
-    setSearching(true);
-    setSearchError(null);
+    if (query) {
+      params.set("q", query);
+      if (anyWord) params.set("any", "1");
+      setHits(null);
+    } else if (after) {
+      params.set("after", after);
+      setLoadingMore(true);
+    } else {
+      setBrowse(null);
+    }
+    setListError(null);
     fetch(`/api/polyforge/memory?${params}`)
       .then(async (response) => {
         const body = await response.json() as SearchResponse;
+        if (seq !== listSeqRef.current) return;
+        const failure = query ? t("polyforge.memory.error") : t("polyforge.memory.loadError");
         if (!response.ok) {
-          setSearchError(body.error ?? t("polyforge.memory.error"));
+          setListError(body.error ?? failure);
           return;
         }
-        // Newest-first is the display order (pf answers relevance order).
-        setHits(sortMemoryHitsNewestFirst(Array.isArray(body.hits) ? body.hits : []));
-        setPage(1);
-        setSearchError(body.error ?? null);
+        const items = Array.isArray(body.hits) ? body.hits : [];
+        if (query) {
+          // Newest-first is the display order (pf answers relevance order).
+          setHits(sortMemoryHitsNewestFirst(items));
+          setPage(1);
+        } else {
+          setBrowse((previous) => ({
+            rows: after && previous ? mergeMemoryPages(previous.rows, items) : items,
+            total: typeof body.total === "number" ? body.total : items.length,
+            nextCursor: typeof body.next_cursor === "string" && body.next_cursor ? body.next_cursor : null,
+          }));
+        }
+        setListError(body.error ?? null);
       })
-      .catch(() => setSearchError(t("polyforge.memory.error")))
-      .finally(() => setSearching(false));
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- the read follows the submit gesture; t() is stable per locale
-  }, [keyword, scope, cwd, searching, project, type, tags, anyWord]);
+      .catch(() => {
+        if (seq === listSeqRef.current) setListError(query ? t("polyforge.memory.error") : t("polyforge.memory.loadError"));
+      })
+      .finally(() => {
+        if (seq === listSeqRef.current) setLoadingMore(false);
+      });
+  };
+
+  // The current mode's first read: when the scope is ready (mapped, capable,
+  // a project selected), and again on a project/type/tags change or a submit.
+  // An unmapped cwd, a below-floor pf and a half-typed tag list read nothing.
+  useEffect(() => {
+    if (!cwd || !scope?.mapped || !scope.capable || !project) return;
+    const tagFilter = tags.trim();
+    if (tagFilter && !isMemoryTagList(tagFilter)) return;
+    readList(activeQuery, null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- reads follow these gestures only; `any` applies at the next submit
+  }, [cwd, scope, project, type, tags, activeQuery, submits]);
+
+  const submit = useCallback((event: React.FormEvent) => {
+    event.preventDefault();
+    // A non-empty keyword switches to the relevance read; an empty one
+    // returns to browse — both keep the project and filters.
+    if (!scope?.mapped || !cwd) return;
+    setActiveQuery(keyword.trim());
+    setSubmits((count) => count + 1);
+  }, [keyword, scope, cwd]);
 
   // Expanding reveals the whole body: the clip comes off and the region
   // scrolls to the body's end, so the last line is truly shown — not just
@@ -288,8 +359,7 @@ export function PolyforgeMemory({ cwd, onOpenWorkItem }: PolyforgeMemoryProps) {
       </label>
       <button
         type="submit"
-        disabled={searching}
-        style={{ alignSelf: "flex-end", background: "var(--accent)", color: "var(--bg-panel)", border: "none", borderRadius: 4, padding: "4px 12px", fontSize: 12, cursor: searching ? "default" : "pointer" }}
+        style={{ alignSelf: "flex-end", background: "var(--accent)", color: "var(--bg-panel)", border: "none", borderRadius: 4, padding: "4px 12px", fontSize: 12, cursor: "pointer" }}
       >
         {t("polyforge.memory.search")}
       </button>
@@ -390,25 +460,35 @@ export function PolyforgeMemory({ cwd, onOpenWorkItem }: PolyforgeMemoryProps) {
     );
   }
 
+  const keywordMode = activeQuery !== "";
   const pages = hits ? Math.max(1, Math.ceil(hits.length / MEMORY_PAGE_SIZE)) : 1;
-  const rows = hits ? memoryPage(hits, page) : [];
+  const rows = keywordMode ? (hits ? memoryPage(hits, page) : []) : (browse?.rows ?? []);
+  const loading = !listError && (keywordMode ? hits === null : browse === null);
   return (
     <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
       {renderForm()}
       <div style={{ flex: 1, minHeight: 0, overflowY: "auto", display: "flex", flexDirection: "column" }}>
-        {searchError && (
+        {listError && (
           <div style={{ padding: "8px 12px", display: "flex", flexDirection: "column", gap: 4, fontSize: 12 }}>
-            <span style={{ color: "#dc2626" }}>{t("polyforge.memory.error")}</span>
-            <span style={{ color: "var(--text-dim)" }}>{searchError}</span>
+            <span style={{ color: "#dc2626" }}>{keywordMode ? t("polyforge.memory.error") : t("polyforge.memory.loadError")}</span>
+            <span style={{ color: "var(--text-dim)" }}>{listError}</span>
           </div>
         )}
-        {hits === null && !searchError && (
-          <div style={{ padding: 16, color: "var(--text-dim)", fontSize: 12 }}>{t("polyforge.memory.guidance")}</div>
+        {loading && (
+          <div style={{ padding: 16, color: "var(--text-dim)", fontSize: 12 }}>{t("polyforge.loading")}</div>
         )}
-        {hits !== null && hits.length === 0 && !searchError && (
+        {!keywordMode && browse !== null && (
+          <div style={{ padding: "6px 12px", color: "var(--text-dim)", fontSize: 11, flexShrink: 0 }}>
+            {t("polyforge.memory.total", { total: browse.total })}
+          </div>
+        )}
+        {!keywordMode && browse !== null && browse.rows.length === 0 && !listError && (
+          <div style={{ padding: 16, color: "var(--text-dim)", fontSize: 12 }}>{t("polyforge.memory.browseEmpty")}</div>
+        )}
+        {keywordMode && hits !== null && hits.length === 0 && !listError && (
           <div style={{ padding: 16, color: "var(--text-dim)", fontSize: 12 }}>{t("polyforge.memory.empty")}</div>
         )}
-        {hits !== null && hits.length >= MEMORY_RESULT_LIMIT && (
+        {keywordMode && hits !== null && hits.length >= MEMORY_RESULT_LIMIT && (
           <div style={{ padding: "8px 12px", color: "#d97706", fontSize: 11 }}>{t("polyforge.memory.narrow")}</div>
         )}
         {rows.map((hit) => (
@@ -419,7 +499,7 @@ export function PolyforgeMemory({ cwd, onOpenWorkItem }: PolyforgeMemoryProps) {
             style={{
               display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 2,
               padding: "6px 12px", background: "none", border: "none", borderBottom: "1px solid var(--border)",
-              cursor: "pointer", textAlign: "left", width: "100%", font: "inherit",
+              cursor: "pointer", textAlign: "left", width: "100%", font: "inherit", flexShrink: 0,
             }}
           >
             <span style={{ display: "flex", gap: 6, width: "100%", fontSize: 12, color: "var(--text)" }}>
@@ -432,7 +512,13 @@ export function PolyforgeMemory({ cwd, onOpenWorkItem }: PolyforgeMemoryProps) {
             </span>
           </button>
         ))}
-        {hits !== null && hits.length > 0 && (
+        {!keywordMode && browse?.nextCursor && (
+          <button type="button" disabled={loadingMore} onClick={() => readList("", browse.nextCursor)}
+            style={{ alignSelf: "center", margin: "8px 12px", background: "none", border: "1px solid var(--border)", borderRadius: 4, color: "var(--text-muted)", cursor: loadingMore ? "default" : "pointer", fontSize: 11, padding: "2px 12px", flexShrink: 0 }}>
+            {loadingMore ? t("polyforge.loading") : t("polyforge.memory.loadMore")}
+          </button>
+        )}
+        {keywordMode && hits !== null && hits.length > 0 && (
           <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 12px", fontSize: 11, color: "var(--text-dim)", flexShrink: 0 }}>
             <button type="button" disabled={page <= 1} onClick={() => setPage((value) => Math.max(1, value - 1))}
               style={{ background: "none", border: "1px solid var(--border)", borderRadius: 4, color: "var(--text-muted)", cursor: "pointer", fontSize: 11, padding: "2px 8px" }}>

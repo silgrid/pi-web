@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
 import { useI18n } from "@/hooks/useI18n";
 import { useIsMobile } from "@/hooks/useIsMobile";
-import type { SubagentProfilesResponse, SubagentSettingsResponse } from "@/lib/api-types";
+import type { ProjectTrustStatus, SubagentProfilesResponse, SubagentSettingsResponse } from "@/lib/api-types";
 import { sendAgentCommand } from "@/lib/agent-client";
 import { displayPathWithin, shortenPath } from "@/lib/display-path";
 import type { ModelsData } from "@/lib/models-cache";
@@ -25,6 +25,8 @@ import {
   ConfigFooter,
   ConfigListAction,
   ConfigPanelShell,
+  ConfigSaveTarget,
+  ConfigScopeTag,
   ConfigSidebar,
   ConfigSidebarGroupLabel,
   ConfigSidebarItem,
@@ -35,6 +37,7 @@ import {
   ConfigSwitch,
 } from "./SettingsUi";
 import { ModelSelector } from "./ModelSelector";
+import { projectTrustReloadKey } from "./settings-ui-helpers";
 
 const TOOL_OPTIONS = ["read", "bash", "edit", "write", "grep", "find", "ls"];
 const THINKING_OPTIONS = ["", "off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
@@ -100,6 +103,17 @@ function editableProfile(profile: SubagentProfile): EditableProfile {
   };
 }
 
+/**
+ * The model a profile reference names. It may end in pi's `:<thinking level>` (`provider/model:high`),
+ * which the runtime reads as the model plus its level; a listed id that contains a colon matches whole.
+ */
+function profileModelBase(reference: string, isListed: (reference: string) => boolean): string {
+  if (isListed(reference)) return reference;
+  const colon = reference.lastIndexOf(":");
+  const level = reference.slice(colon + 1);
+  return colon > 0 && level && (THINKING_OPTIONS as readonly string[]).includes(level) ? reference.slice(0, colon) : reference;
+}
+
 function profileKey(profile: Pick<SubagentProfile, "scope" | "name">): string {
   return `${profile.scope}:${profile.name}`;
 }
@@ -152,12 +166,15 @@ export function AgentsConfig({
   onClose,
   onReloaded,
   embedded = false,
+  trust,
 }: {
   cwd: string;
   sessionId?: string | null;
   onClose: () => void;
   onReloaded?: () => void;
   embedded?: boolean;
+  /** The page's trust status for `cwd`; a new decision loads the model list again. */
+  trust?: ProjectTrustStatus | null;
 }) {
   const isMobile = useIsMobile();
   const { t } = useI18n();
@@ -254,6 +271,12 @@ export function AgentsConfig({
     if (selectedKey) setLastSettingsSelection("agents", selectedKey, cwd);
   }, [cwd, selectedKey]);
 
+  // The model list follows the folder's trust: GET /api/models leaves out an
+  // untrusted project's extensions, which can register providers. Trust can
+  // change while this section stays mounted (hidden) in Settings, by trusting
+  // from Settings › MCP; a new decision loads the list again in place, keeping
+  // any profile draft.
+  const trustKey = projectTrustReloadKey(trust);
   useEffect(() => {
     const controller = new AbortController();
     setModelsLoading(true);
@@ -273,7 +296,7 @@ export function AgentsConfig({
       }
     })();
     return () => controller.abort();
-  }, [cwd]);
+  }, [cwd, trustKey]);
 
   const selectProfile = (profile: SubagentProfile) => {
     setSelectedKey(profileKey(profile));
@@ -363,13 +386,15 @@ export function AgentsConfig({
       ? displayProfilePath(selected, cwd) ?? t("agents.builtinPath")
       : "";
   const fullPath = creating ? displayedPath : selected?.filePath ?? displayedPath;
-  const selectedModelAvailable = !draft.model || modelOptions.some((model) => `${model.provider}/${model.id}` === draft.model);
+  const isListedModel = (reference: string) => modelOptions.some((model) => `${model.provider}/${model.id}` === reference);
+  const draftModelBase = draft.model && profileModelBase(draft.model, isListedModel);
+  const selectedModelAvailable = !draftModelBase || isListedModel(draftModelBase);
   const selectedModel = (() => {
-    if (!draft.model) return null;
-    const separator = draft.model.indexOf("/");
+    if (!draftModelBase) return null;
+    const separator = draftModelBase.indexOf("/");
     return separator < 0
-      ? { provider: "", modelId: draft.model }
-      : { provider: draft.model.slice(0, separator), modelId: draft.model.slice(separator + 1) };
+      ? { provider: "", modelId: draftModelBase }
+      : { provider: draftModelBase.slice(0, separator), modelId: draftModelBase.slice(separator + 1) };
   })();
   const controlStyle = disabled ? { ...inputStyle, ...disabledInputStyle } : inputStyle;
   const switchDisabled = creating
@@ -542,14 +567,29 @@ export function AgentsConfig({
                 <ConfigDetailStack>
                   <ConfigDetailHeader>
                     <ConfigDetailHeaderInfo>
-                      {displayedScope && (
-                        <span className={`config-scope-tag${displayedScope === "project" ? " is-project" : ""}`}>
-                          {t(`agents.scope.${displayedScope}`)}
-                        </span>
+                      {/* A new profile chooses its scope where a saved one shows it. */}
+                      {creating ? (
+                        <ConfigSaveTarget
+                          value={targetScope}
+                          label={t("config.saveTo")}
+                          options={(["global", "project"] as const).map((scope) => ({
+                            value: scope,
+                            label: t(`agents.scope.${scope}`),
+                            disabled: saving,
+                          }))}
+                          path={displayedPath}
+                          onChange={setTargetScope}
+                        />
+                      ) : (
+                        <>
+                          {displayedScope && (
+                            <ConfigScopeTag scope={displayedScope}>{t(`agents.scope.${displayedScope}`)}</ConfigScopeTag>
+                          )}
+                          <span title={fullPath} className="config-detail-path">
+                            {displayedPath}
+                          </span>
+                        </>
                       )}
-                      <span title={fullPath} className="config-detail-path">
-                        {displayedPath}
-                      </span>
                     </ConfigDetailHeaderInfo>
                     <ConfigDetailActions>
                       {selected && (mode === "view" || mode === "edit") && <ConfigButton size="small" onClick={beginDuplicate} disabled={saving || toggling}>{t("agents.duplicate")}</ConfigButton>}
@@ -557,24 +597,6 @@ export function AgentsConfig({
                       <ConfigSwitch checked={draft.enabled} disabled={switchDisabled} label={draft.enabled ? t("agents.disable") : t("agents.enable")} onChange={(checked) => void toggleEnabled(checked)} />
                     </ConfigDetailActions>
                   </ConfigDetailHeader>
-
-                  {creating && (
-                    <Field label={t("agents.saveScope")}>
-                      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 3, padding: 3, border: "1px solid var(--border)", borderRadius: 5, background: "var(--bg-panel)" }}>
-                        {(["global", "project"] as const).map((scope) => (
-                          <button
-                            key={scope}
-                            type="button"
-                            onClick={() => setTargetScope(scope)}
-                            disabled={saving}
-                            style={{ height: 28, border: "none", borderRadius: 4, background: targetScope === scope ? "var(--bg-selected)" : "transparent", color: targetScope === scope ? "var(--text)" : "var(--text-muted)", cursor: saving ? "default" : "pointer", fontSize: 11, fontWeight: targetScope === scope ? 600 : 400 }}
-                          >
-                            {t(`agents.scope.${scope}`)}
-                          </button>
-                        ))}
-                      </div>
-                    </Field>
-                  )}
 
                   <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "minmax(0, 1fr) minmax(0, 1fr)", gap: 12 }}>
                     <Field label={t("agents.name")}>
@@ -612,6 +634,21 @@ export function AgentsConfig({
                       {/* A chat-only child cannot start with MCP on; the switch still turns it off. */}
                       <Toggle label={t("agents.mcp")} disabled={disabled || (chatOnlyDraft && draft.mcp !== "on")} checked={draft.mcp === "on"} onChange={(checked) => update("mcp", checked ? "on" : "off")} />
                     </div>
+                    {/* `skills:` and `extensions:` lists are edited in the profile file; show what they load. */}
+                    {draft.loadSkills && draft.skills !== undefined && (
+                      <span style={{ color: "var(--text-dim)", fontSize: 11, lineHeight: 1.4, overflowWrap: "anywhere" }}>
+                        {draft.skills.length > 0
+                          ? t("agents.skillsOnly", { skills: draft.skills.join(", ") })
+                          : t("agents.skillsNone")}
+                      </span>
+                    )}
+                    {draft.loadExtensions && draft.extensions !== undefined && (
+                      <span style={{ color: "var(--text-dim)", fontSize: 11, lineHeight: 1.4, overflowWrap: "anywhere" }}>
+                        {draft.extensions.length > 0
+                          ? t("agents.extensionsOnly", { extensions: draft.extensions.join(", ") })
+                          : t("agents.extensionsNone")}
+                      </span>
+                    )}
                     {!disabled && chatOnlyDraft ? (
                       <span style={{ color: "var(--text-dim)", fontSize: 11, lineHeight: 1.4 }}>
                         {t("agents.mcpChatOnly")}
@@ -640,21 +677,6 @@ export function AgentsConfig({
                         {t("agents.codemodeHint")}
                       </span>
                     </div>
-                    {/* `skills:` and `extensions:` lists are edited in the profile file; show what they load. */}
-                    {draft.loadSkills && draft.skills !== undefined && (
-                      <span style={{ color: "var(--text-dim)", fontSize: 11, lineHeight: 1.4, overflowWrap: "anywhere" }}>
-                        {draft.skills.length > 0
-                          ? t("agents.skillsOnly", { skills: draft.skills.join(", ") })
-                          : t("agents.skillsNone")}
-                      </span>
-                    )}
-                    {draft.loadExtensions && draft.extensions !== undefined && (
-                      <span style={{ color: "var(--text-dim)", fontSize: 11, lineHeight: 1.4, overflowWrap: "anywhere" }}>
-                        {draft.extensions.length > 0
-                          ? t("agents.extensionsOnly", { extensions: draft.extensions.join(", ") })
-                          : t("agents.extensionsNone")}
-                      </span>
-                    )}
                   </Field>
 
                   <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "minmax(0, 1.5fr) minmax(120px, 0.75fr) minmax(100px, 0.5fr)", gap: 12 }}>
@@ -666,7 +688,9 @@ export function AgentsConfig({
                           onChange={(provider, modelId) => update("model", `${provider}/${modelId}`)}
                           onClear={() => update("model", undefined)}
                           emptyLabel={modelsLoading ? t("agents.modelsLoading") : t("agents.inherit")}
-                          selectedLabel={draft.model && !selectedModelAvailable ? t("agents.modelUnavailable", { model: draft.model }) : undefined}
+                          selectedLabel={draft.model && !selectedModelAvailable
+                            ? t("agents.modelUnavailable", { model: draft.model })
+                            : draft.model !== draftModelBase ? draft.model : undefined}
                           disabled={disabled || modelsLoading || (modelOptions.length === 0 && !draft.model)}
                           ariaLabel={t("agents.model")}
                           variant="field"
