@@ -61,3 +61,15 @@ test("a list-read failure stays capable so no false upgrade state replaces an op
   assert.match(read, /conversations: \[\]/, "a failed poll returns an empty list, not a capability downgrade");
   assert.match(list, /capable: true,\s*error: "the messages read failed/, "the route's catch does not invent a floor state");
 });
+
+test("the list route's answer carries contacts on every branch", () => {
+  assert.match(list, /configured `contacts`/, "the GET face documents the contacts field");
+  assert.match(list, /conversations: \[\],\s*contacts: \[\],/, "the route's catch answers an empty contact set too");
+  const start = lib.indexOf("export async function readPolyforgeMessages(");
+  const end = lib.indexOf("export async function readPolyforgeMessagesPage", start);
+  const read = lib.slice(start, end);
+  assert.match(read, /return \{ \.\.\.capability, conversations: \[\], contacts: \[\] \};/, "below the floor no contact read starts");
+  assert.equal((read.match(/contacts: await contactsRead/g) ?? []).length, 2, "both the list-failure and success answers carry the contact read");
+  assert.match(lib, /runPfJson\(\["--json", "msg", "contacts"\], CONTACT_READ_TIMEOUT_MS\)/, "one bounded `pf --json msg contacts` spawn");
+  assert.match(lib, /const CONTACT_READ_TIMEOUT_MS = 2000;/, "the contact read is bounded well below the 15 s read timeout");
+});

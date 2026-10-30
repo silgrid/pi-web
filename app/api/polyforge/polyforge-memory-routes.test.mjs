@@ -70,3 +70,28 @@ test("every failure degrades to 200 through an error or reason field, never a ca
     assert.doesNotMatch(source, /capable: true,\s*error/, `${name} never invents a capability on failure`);
   }
 });
+
+test("the browse face (no q, a project) validates, gates, checks membership and only then spawns one recall", () => {
+  const scopeGuard = search.indexOf("if (q === null && project === null)");
+  const browseGuard = search.indexOf("if (q === null) {");
+  const validate = search.indexOf("const browse = validateMemoryBrowse({");
+  const capability = search.indexOf("await readPolyforgeMemoryCapability()", validate);
+  const projects = search.indexOf("readPolyforgeMemoryProjects(browse.value.cwd)");
+  const membership = search.indexOf("browseScope.projects.includes(browse.value.project)");
+  const spawn = search.indexOf("browsePolyforgeMemory(browse.value)");
+  const searchValidate = search.indexOf("const validated = validateMemorySearch({");
+  assert.ok(scopeGuard >= 0 && browseGuard > scopeGuard, "the scope face (no project) is decided before the browse face");
+  assert.ok(validate > browseGuard && capability > validate, "shape validation precedes the browse face's version probe");
+  assert.ok(projects > capability && membership > projects && spawn > membership, "the recall spawn runs after every refusal path");
+  assert.ok(searchValidate > spawn, "the keyword search face is unchanged and comes after browse");
+  assert.match(search, /return NextResponse\.json\(\{ error: browse\.error \}, \{ status: 400 \}\)/);
+  assert.match(search, /total: page\.total, next_cursor: page\.next_cursor/, "the browse answer carries total and the cursor");
+  assert.match(lib, /sanitizeMemoryBrowseAnswer/, "the browse answer goes through the page passport");
+});
+
+test("the memory routes export GET only", () => {
+  for (const [name, source] of [["search", search], ["show", show]]) {
+    const handlers = [...source.matchAll(/export (?:async )?function (\w+)/g)].map((m) => m[1]);
+    assert.deepEqual(handlers, ["GET"], `${name} exports only GET`);
+  }
+});

@@ -20,6 +20,14 @@
 // name, an id where a name must be, the old 2.20.7 floor) — never a build or
 // fixture error.
 //
+// (the contact list): the stub also answers `pf msg contacts`
+// from a configured contact set and its base version is the new 2.20.12
+// floor. The compose entry, recipient picker and typed-id field are gone
+// (ruling 5 removes the feature), so PM5/PM9/PM10/PM11/PM13/PM17 drive their
+// first contact and identity surfaces through silent contact rows instead;
+// PM8 moves to the 2.20.12 floor. Every other assertion is unchanged; the
+// new contact-list behaviour itself is e2e/polyforge-messages-contacts.mjs.
+//
 //   node e2e/polyforge-messages.mjs
 import assert from "node:assert/strict";
 import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
@@ -105,8 +113,11 @@ const NAMELESS = conversation("conv_nameless", "u_e2e_nameless_peer", "", [
 ]);
 const ABSENT = conversation("conv_absent", "u_e2e_absent_peer", null, [msg(1, "peer", "ABSENT-ONE")]);
 const baseState = () => ({
-  version: "v2.20.10", mode: "ok", self: USER_SENTINEL, selfName: SELF_NAME, running: 2, blocked: false, sendError: "",
+  version: "v2.20.12", mode: "ok", self: USER_SENTINEL, selfName: SELF_NAME, running: 2, blocked: false, sendError: "",
   conversations: [DOT, PAGED, ANCHOR, BUBBLES, LONG],
+  // The configured contact set `pf msg contacts` answers;
+  // empty unless a check seeds one.
+  contacts: [],
   // acked seeds name each conversation's newest sequence (task-42 owner ruling
   // task-42-pm1-stub-acked-fixture): conv_paged's messages carry seqs 1001–1120,
   // so its cursor is 1120 — the earlier 120 left every message permanently
@@ -239,9 +250,11 @@ if (rest[0] === "msg") {
       const to = at("--to"); const text = at("--text");
       if (!to || !text) return { fail: ["CORE-400", "--to and --text are required"] };
       let c = fresh.conversations.find((x) => x.peer === to);
-      // A first contact has no directory entry, so aihub knows no display name:
-      // the row carries an empty name (未知用户), never the id as a name.
-      if (!c) { c = { id: "conv_new_" + Date.now(), peer: to, peerName: "", messages: [], lastSeq: 0 }; fresh.conversations.push(c); }
+      // A first contact's row carries the configured contact's display name;
+      // a blank (or unconfigured) one is an empty name (未知用户), never the
+      // id as a name.
+      const contact = (fresh.contacts || []).find((x) => x.id === to);
+      if (!c) { c = { id: "conv_new_" + Date.now(), peer: to, peerName: contact ? contact.display_name : "", messages: [], lastSeq: 0 }; fresh.conversations.push(c); }
       const row = { id: "msg_sent_" + (c.lastSeq + 1), seq: c.lastSeq + 1, sender: "self", text,
         about_wi: at("--about-wi") || "", reply_to: at("--reply-to") || "" };
       c.messages.push(row); c.lastSeq = row.seq; fresh.sends.push({ to, text, aboutWi: row.about_wi, replyTo: row.reply_to });
@@ -268,6 +281,7 @@ if (rest[0] === "msg") {
     })), last_seq: c.lastSeq });
   }
   if (rest[1] === "list") { record(); out({ conversations: s.conversations.map(listRow) }); }
+  if (rest[1] === "contacts") { record(); out({ contacts: s.contacts || [] }); }
   fail("CORE-400", "msg: unknown action " + rest[1]);
 }
 die(2, "pf: unknown command");
@@ -297,19 +311,19 @@ const T = {
   PM2: "PM2: opening a conversation shows the newest page at the bottom and scroll-up prepends the page immediately above with no gap or duplicate, stopping at the oldest message",
   PM3: "PM3: a visible conversation acks exactly the newest displayed sequence once and clears unread, and a newer unseen sequence is never the acked one",
   PM4: "PM4: a hidden conversation and a locally blocked job suppress automatic ack, and an explicit conversation click acks the newest displayed sequence",
-  PM5: "PM5: a send spawns exactly one pf msg send (with its anchor), a reply passes --reply-to and quotes the loaded original, a first contact uses the typed id, and a refused send answers a 4xx with the documented text",
+  PM5: "PM5: a send spawns exactly one pf msg send (with its anchor), a reply passes --reply-to and quotes the loaded original, a first contact is sent from its silent contact row, and a refused send answers a 4xx with the documented text",
   PM6: "PM6: a work-item anchor opens the existing Jobs detail through the watch read, a deep reference exposes only its work-item part, the analyzer appears only on received messages and its conclusion is transient, and incoming messages never enter chat or the composer",
   PM7: "PM7: no messages route response or server log carries the operator key, the self id or self display name, the server address or a message body, and a CORE-422-refused send leaves no trace",
-  PM8: "PM8: below the pf 2.20.10 Messages floor the tab shows an upgrade-needed state and spawns no message verb, and at the floor the panel works with names",
+  PM8: "PM8: below the pf 2.20.12 Messages floor the tab shows an upgrade-needed state and spawns no message verb, and at the floor the panel works with names",
   PM9: "PM9: the two-user panel's text, titles and aria-labels carry neither the peer id nor the self id",
-  PM10: "PM10: the list row, chat header, bubble attribution and recipient picker identify the peer by display name and initial avatar",
+  PM10: "PM10: the list row, chat header, bubble attribution and silent contact row identify the peer by display name and initial avatar",
   PM11: "PM11: an unnamed peer renders 未知用户 with a ? avatar on every surface and never an id",
   PM12: "PM12: opening Messages selects nothing and acks nothing, and a click opens the conversation and acknowledges it",
-  PM13: "PM13: the conversation list is a right-hand column of 120–220px with avatars, names, unread badges, 单聊/群聊 sections, 尚无群聊 and the compose entry on top",
+  PM13: "PM13: the conversation list is a right-hand column of 120–220px with avatars, names, unread badges, 单聊/群聊 sections, 尚无群聊, contact rows and no compose entry",
   PM14: "PM14: the open conversation header shows the peer's avatar and display name",
   PM15: "PM15: own bubbles sit right without attribution while peer bubbles sit left with avatar and name on the first of a run, keeping timestamps, anchor quotes and reply quotes",
   PM16: "PM16: desktop keeps two columns at the default and the minimum dock width and mobile stays a single view with a back control",
-  PM17: "PM17: the recipient picker offers exactly the existing peers by display name and first contact stays a typed user id",
+  PM17: "PM17: the list offers the existing peers and silent contacts by display name, a peer row sends to its id and a first contact is its silent contact row",
   PM18: "PM18: the conversation route keeps peer as the send address and adds peer_name, and a send still addresses the peer id",
 };
 const failures = new Map(Object.values(T).map((title) => [title, []]));
@@ -400,7 +414,19 @@ async function openConversation(page, conv, extraLabels = []) {
       for (let i = 0; i < Math.min(count, 6); i++) {
         lastFailure = `the click on ${label} did not open ${conv.id}`;
         await matches.nth(i).click({ timeout: 4000 }).catch(() => {});
-        if (!needle || await historyShows()) return;
+        if (!needle) return;
+        // Two unnamed rows share the 未知用户 label, so the next candidate can
+        // be another conversation. Give this click's read time to land before
+        // replacing it: clicking the next candidate immediately cancels an
+        // in-flight read (the hook drops it by selection identity), and a
+        // loaded host then alternates rows until the deadline instead of
+        // opening `conv`. Bounded by the outer deadline and a per-click settle
+        // window; the history text is the condition, not a fixed pause.
+        const settleUntil = Math.min(deadline, Date.now() + 15_000);
+        while (Date.now() < settleUntil) {
+          if (await historyShows()) return;
+          await delay(100);
+        }
       }
     }
   }
@@ -492,14 +518,16 @@ const avatarBeside = (root, text, initial) => root.evaluate((node, [text, initia
   return hits;
 }, [text, initial]);
 
-// The list column: the innermost element holding the compose entry and both
-// section headers. Its box is measured for the geometry assertions.
+// The list column: the innermost element holding both section headers and
+// the empty-群聊 placeholder (the compose entry it used to hold is gone —
+// ruling 5 removes the feature). Its box is measured for the geometry
+// assertions.
 const listColumn = (panel) => panel.evaluate((root) => {
   const has = (node, needle) => (node.textContent || "").includes(needle);
   const header = [...root.querySelectorAll("*")].find((node) => (node.textContent || "").trim() === "单聊");
   if (!header) return null;
   for (let node = header; node && node !== root; node = node.parentElement) {
-    if (has(node, "新消息") && has(node, "群聊") && has(node, "尚无群聊")) {
+    if (has(node, "单聊") && has(node, "群聊") && has(node, "尚无群聊")) {
       const box = node.getBoundingClientRect();
       return { x: box.x, y: box.y, width: box.width, height: box.height, right: box.x + box.width };
     }
@@ -642,16 +670,17 @@ try {
 
   await check(T.PM5, "PM5 list-view first contact starts a conversation", () => withPage(async (page) => {
     const FIRST_PEER = "u_e2e_first_peer";
-    seed({ conversations: [], acked: {} });
+    // The configured contact has no display name yet (ruling 5 removes the
+    // feature: the first contact is its silent contact row, not a typed id).
+    seed({ conversations: [], acked: {}, contacts: [{ id: FIRST_PEER, display_name: "" }] });
     await openDock(page); await messagesTab(page);
     const panel = dock(page);
-    // The empty list still carries the compose entry: a user with no
-    // conversation can send the first message to a typed user id.
-    if (await composeEntry(panel).count()) await composeEntry(panel).click();
-    const to = recipientField(panel).or(panel.getByLabel(/recipient|^to\b/i)).first();
+    // The empty conversation list still carries the configured contact: a
+    // user with no conversation sends the first message from its row.
+    await unknownText(panel).first().waitFor({ timeout: 15_000 });
+    await (await requireVisible(unknownText(panel), "the silent contact row for the first contact")).click();
     const text = messageTextField(panel).or(panel.getByLabel(/^message|message text/i)).first();
     const anchor = anchorField(panel).or(panel.getByLabel(/work item|anchor/i)).first();
-    await to.fill(FIRST_PEER);
     await text.fill("FIRST-MESSAGE");
     if (await anchor.count()) await anchor.fill("task-42");
     await sendButton(panel).click();
@@ -791,14 +820,15 @@ try {
 
   await check(T.PM8, "PM8 below-floor upgrade state", async () => {
     // A fresh server process re-probes pf, so the floor is seen (the probe is
-    // cached per process); no message verb may be spawned below 2.20.10.
+    // cached per process); no message verb may be spawned below 2.20.12
+    // ( moves the floor: below-floor fixture 2.20.11).
     await stop();
     writeFileSync(argvLog, "");
-    await startServer("floor", "v2.20.9");
+    await startServer("floor", "v2.20.11");
     const floor = await get("/api/polyforge/messages");
     assert.equal(floor.status, 200, `the below-floor messages route answered ${floor.status}`);
     assert.match(floor.text, /"capable"\s*:\s*false/, "below the floor the route must report capable:false");
-    assert.match(floor.text, /2\.20\.10|upgrade|升级/i, "below the floor the reason must name the 2.20.10 upgrade");
+    assert.match(floor.text, /2\.20\.12|upgrade|升级/i, "below the floor the reason must name the 2.20.12 upgrade");
     assert.equal(msgCalls().length, 0, "below the floor no message verb may be spawned");
     const page3 = await openPage();
     try {
@@ -806,12 +836,12 @@ try {
       assert.ok(await dock(page3).getByText(/upgrade|升级/i).count() > 0, "below the floor the tab must show the upgrade-needed state");
       assert.equal(await dock(page3).getByText("单聊", { exact: true }).count(), 0, "below the floor no conversation list may render");
     } finally { await page3.context().close(); }
-    // At or above the floor (2.20.10) the panel is usable with names.
+    // At or above the floor (2.20.12) the panel is usable with names.
     await stop();
     writeFileSync(argvLog, "");
-    await startServer("supported", "v2.20.10");
+    await startServer("supported", "v2.20.12");
     const supported = await get("/api/polyforge/messages");
-    assert.match(supported.text, /"capable"\s*:\s*true/, "at 2.20.10 the route must report capable:true");
+    assert.match(supported.text, /"capable"\s*:\s*true/, "at 2.20.12 the route must report capable:true");
     const page4 = await openPage();
     try {
       await openDock(page4); await messagesTab(page4);
@@ -819,22 +849,22 @@ try {
     } finally { await page4.context().close(); }
   });
 
-  seed({ conversations: [ANCHOR, BUBBLES], acked: { conv_anchor: 4, conv_bubbles: 5 } });
+  // A silent contact is part of the inspected surface (the compose entry and
+  // its picker are gone — ruling 5 removes the feature).
+  seed({ conversations: [ANCHOR, BUBBLES], acked: { conv_anchor: 4, conv_bubbles: 5 }, contacts: [{ id: "u_e2e_silent_peer", display_name: "Sid Silent" }] });
   await check(T.PM9, "PM9 zero raw id in the panel", () => withPage(async (page) => {
     await openDock(page); await messagesTab(page); await openConversation(page, ANCHOR);
     const panel = dock(page);
-    // Open the compose entry too, so the picker and the typed field are part
-    // of the inspected surface.
-    if (await composeEntry(panel).count()) await composeEntry(panel).click();
+    await requireVisible(panel.getByText("Sid Silent", { exact: true }), "the silent contact row");
     const shown = await disclosure(panel);
     assert.ok(shown.text.includes(PEER_NAME), "the peer display name must be rendered (the panel is on its names)");
-    for (const id of [PEER, USER_SENTINEL]) {
+    for (const id of [PEER, USER_SENTINEL, "u_e2e_silent_peer"]) {
       assert.ok(!shown.text.includes(id), `the panel text must not carry the raw user id ${id}`);
       assert.ok(!appearsIn(shown.labels, id), `no title or aria-label may carry the raw user id ${id}`);
     }
   }));
 
-  seed({ conversations: [ANCHOR, BUBBLES], acked: { conv_anchor: 4, conv_bubbles: 5 } });
+  seed({ conversations: [ANCHOR, BUBBLES], acked: { conv_anchor: 4, conv_bubbles: 5 }, contacts: [{ id: "u_e2e_cleo_peer", display_name: "Cleo Silent" }] });
   await check(T.PM10, "PM10 names and avatars on every surface", () => withPage(async (page) => {
     await openDock(page); await messagesTab(page); await openConversation(page, ANCHOR);
     const panel = dock(page);
@@ -844,7 +874,7 @@ try {
     assert.ok(historyBox, "the history must have a box");
 
     // Every surface inside the panel: the list row, the chat header, the peer
-    // bubble attribution, and the recipient picker.
+    // bubble attribution, and a silent contact row.
     const boxes = await leafBoxes(panel, PEER_NAME);
     assert.ok(boxes.length > 0, `the peer display name ${PEER_NAME} is not rendered anywhere`);
     assert.ok(boxes.some((box) => box.x >= column.x - 2), "the list row must show the peer display name");
@@ -853,13 +883,12 @@ try {
     assert.ok((await avatarBeside(panel, PEER_NAME, avatarInitialOf(PEER_NAME))).length > 0,
       "an initial avatar must sit beside every rendered display name");
 
-    const beforePicker = (await leafBoxes(panel, "Bea Run")).length;
-    await requireVisible(composeEntry(panel), "the 新消息 compose entry").then((entry) => entry.click());
-    await requireVisible(recipientField(panel), "the typed recipient field");
-    const afterPicker = (await leafBoxes(panel, "Bea Run")).length;
-    assert.ok(afterPicker > beforePicker, "the recipient picker must list the existing peers by display name");
-    assert.ok((await avatarBeside(panel, "Bea Run", avatarInitialOf("Bea Run"))).length > 0,
-      "a picker row must show the peer's initial avatar");
+    // The picker is gone (ruling 5 removes the feature): the silent contact
+    // row is the remaining list surface, by display name and avatar.
+    const silent = await leafBoxes(panel, "Cleo Silent");
+    assert.ok(silent.some((box) => box.x >= column.x - 2), "a silent contact row must list the contact by display name");
+    assert.ok((await avatarBeside(panel, "Cleo Silent", avatarInitialOf("Cleo Silent"))).length > 0,
+      "a silent contact row must show the contact's initial avatar");
   }));
 
   seed({ conversations: [NAMELESS, ABSENT], acked: {} });
@@ -884,12 +913,16 @@ try {
     assert.ok(boxes.some((box) => box.y >= historyBox.y), "the peer bubble attribution must show 未知用户");
     assert.ok((await avatarBeside(panel, "未知用户", "?")).length > 0, "the header/attribution must show the ? avatar");
 
-    // Picker: both unnamed peers are offered as 未知用户, still without ids.
-    await requireVisible(composeEntry(panel), "the 新消息 compose entry").then((entry) => entry.click());
-    await requireVisible(recipientField(panel), "the typed recipient field");
-    assert.ok((await avatarElements(panel, "?")).length >= 2, "the picker must show a ? avatar for an unnamed peer");
+    // A blank-name silent contact (the picker is gone — ruling 5 removes the
+    // feature) is offered as 未知用户 with a ? avatar, still without ids.
+    const BLANK_CONTACT = "u_e2e_blank_contact";
+    const placeholders = await unknownText(panel).count();
+    const configured = readState(); configured.contacts = [{ id: BLANK_CONTACT, display_name: "" }]; write(configured);
+    for (let i = 0; i < 40 && await unknownText(panel).count() <= placeholders; i++) await delay(250);
+    assert.ok(await unknownText(panel).count() > placeholders, "the blank-name silent contact must render 未知用户");
+    assert.ok((await avatarElements(panel, "?")).length >= 2, "the silent contact must show a ? avatar for an unnamed peer");
     const shown = await disclosure(panel);
-    for (const id of [NAMELESS.peer, ABSENT.peer, USER_SENTINEL]) {
+    for (const id of [NAMELESS.peer, ABSENT.peer, USER_SENTINEL, BLANK_CONTACT]) {
       assert.ok(!shown.text.includes(id), `no surface may render the raw id ${id}`);
       assert.ok(!appearsIn(shown.labels, id), `no title or aria-label may carry the raw id ${id}`);
     }
@@ -914,12 +947,12 @@ try {
     assert.equal(readState().acked.conv_dot, 1, "the click must clear the unread state server-side");
   }));
 
-  seed();
+  seed({ contacts: [{ id: "u_e2e_sam_peer", display_name: "Sam Silent" }] });
   await check(T.PM13, "PM13 right-hand list column and rows", () => withPage(async (page) => {
     await openDock(page); await messagesTab(page); await openConversation(page, ANCHOR);
     const panel = dock(page);
     const column = await listColumn(panel);
-    assert.ok(column, "the conversation list column (compose + 单聊/群聊 + 尚无群聊) is not rendered");
+    assert.ok(column, "the conversation list column (单聊/群聊 + 尚无群聊) is not rendered");
     const panelBox = await panel.boundingBox();
     const historyBox = await (await requireVisible(historyRegion(panel), "the bubble stream")).boundingBox();
     assert.ok(panelBox && historyBox);
@@ -935,14 +968,17 @@ try {
     assert.ok((await avatarBeside(panel, "Dot Rowan", avatarInitialOf("Dot Rowan"))).length > 0, "a row must show the initial-plus-colour avatar");
     assert.ok(await unreadDots(panel.getByRole("button", { name: /Dot Rowan/ }).first()).count() > 0, "an unread row must show its unread badge");
 
-    // Sections in order, 群聊 empty with 尚无群聊, compose entry on top.
+    // Sections in order, 群聊 empty with 尚无群聊; no compose entry (ruling 5
+    // removes the feature) — a contact row sits in the 单聊 area instead.
     const directBox = await (await requireVisible(sectionDirect(panel), "the 单聊 section")).boundingBox();
     const groupsBox = await (await requireVisible(sectionGroups(panel), "the 群聊 section")).boundingBox();
     const noGroupsBox = await (await requireVisible(noGroupsText(panel), "the 尚无群聊 placeholder")).boundingBox();
     assert.ok(directBox.y < groupsBox.y && groupsBox.y < noGroupsBox.y, "单聊, then 群聊, then 尚无群聊 must render in that order");
-    const entryBox = await (await requireVisible(composeEntry(panel), "the 新消息 compose entry")).boundingBox();
-    assert.ok(entryBox.y < directBox.y, "the compose entry must sit above the sections");
-    assert.ok(entryBox.x >= column.x - 2, "the compose entry must be inside the list column");
+    assert.equal(await composeEntry(panel).count(), 0, "no 新消息 compose entry may remain");
+    assert.equal(await recipientField(panel).count(), 0, "no typed recipient field may remain");
+    const contactBox = await (await requireVisible(panel.getByText("Sam Silent", { exact: true }), "the silent contact row")).boundingBox();
+    assert.ok(directBox.y < contactBox.y && contactBox.y < groupsBox.y, "the contact row must sit in the 单聊 area");
+    assert.ok(contactBox.x >= column.x - 2, "the contact row must be inside the list column");
 
     // Long names are ellipsized inside the column.
     const ellipsis = await panel.evaluate((dom, name) => {
@@ -1075,44 +1111,47 @@ try {
     assert.equal(await historyRegion(panel).count(), 0, "going back must return to the list-only view");
   }, { viewport: { width: 600, height: 900 } }));
 
-  seed({ conversations: [ANCHOR, BUBBLES], acked: { conv_anchor: 4, conv_bubbles: 5 } });
-  await check(T.PM17, "PM17 recipient picker and typed first contact", () => withPage(async (page) => {
+  // The picker and the typed id are gone (ruling 5 removes the feature): the
+  // list itself offers the existing peers (a configured contact that already
+  // has a conversation appears once) and the silent contacts.
+  seed({ conversations: [ANCHOR, BUBBLES], acked: { conv_anchor: 4, conv_bubbles: 5 }, contacts: [{ id: PEER, display_name: PEER_NAME }] });
+  await check(T.PM17, "PM17 peer rows and a silent first contact", () => withPage(async (page) => {
     await openDock(page); await messagesTab(page);
     const panel = dock(page);
-    const entry = await requireVisible(composeEntry(panel), "the 新消息 compose entry");
-    await entry.click();
-    await requireVisible(recipientField(panel), "the typed recipient field");
+    assert.equal(await composeEntry(panel).count(), 0, "no 新消息 compose entry may remain");
+    assert.equal(await recipientField(panel).count(), 0, "no typed recipient field may remain");
 
-    // The picker offers exactly the existing peers, by display name + avatar.
+    // The list offers exactly the existing peers, by display name + avatar.
     for (const name of [PEER_NAME, "Bea Run"]) {
-      assert.ok(await panel.getByText(name, { exact: true }).count() >= 1, `the picker must list ${name}`);
-      assert.ok((await avatarBeside(panel, name, avatarInitialOf(name))).length > 0, `the picker must show ${name}'s initial avatar`);
+      assert.ok(await panel.getByText(name, { exact: true }).count() >= 1, `the list must offer ${name}`);
+      assert.ok((await avatarBeside(panel, name, avatarInitialOf(name))).length > 0, `the list must show ${name}'s initial avatar`);
     }
+    assert.equal(await panel.getByText(PEER_NAME, { exact: true }).count(), 1, "a contact with a conversation must appear once");
     assert.equal(await unknownText(panel).count(), 0, "no unnamed peer exists in this seed");
     const shown = await disclosure(panel);
     for (const id of [PEER, "u_e2e_bubbles_peer", USER_SENTINEL]) {
-      assert.ok(!shown.text.includes(id), `the picker panel must not render the raw id ${id}`);
+      assert.ok(!shown.text.includes(id), `the panel must not render the raw id ${id}`);
       assert.ok(!appearsIn(shown.labels, id), `no title or aria-label may carry the raw id ${id}`);
     }
 
-    // Picking a peer sends to that conversation's peer id (no name lookup).
-    await panel.getByRole("button", { name: new RegExp("Bea Run") }).first().click();
+    // A peer row sends to that conversation's peer id (no name lookup).
+    await openConversation(page, BUBBLES);
     await messageTextField(panel).fill("PICKED-PEER");
     await sendButton(panel).click();
     for (let i = 0; i < 20 && !sends().length; i++) await delay(500);
-    assert.equal(sends().length, 1, `picking a peer must spawn exactly one send, got ${JSON.stringify(sends())}`);
-    assert.equal(argAfter(sends()[0], "--to"), "u_e2e_bubbles_peer", "a picked peer must be addressed by its user id, never its name");
+    assert.equal(sends().length, 1, `a peer row must spawn exactly one send, got ${JSON.stringify(sends())}`);
+    assert.equal(argAfter(sends()[0], "--to"), "u_e2e_bubbles_peer", "a peer must be addressed by its user id, never its name");
 
-    // A first contact is a typed user id; the created row has no name.
-    if (!(await recipientField(panel).count()) && await composeEntry(panel).count()) await composeEntry(panel).click();
-    if (!(await recipientField(panel).count()) && await composeEntry(panel).count()) await composeEntry(panel).click();
-    const typed = await requireVisible(recipientField(panel), "the typed recipient field for a first contact");
-    await typed.fill("u_e2e_typed_peer");
+    // A first contact is its silent contact row; the created row has no name.
+    const configured = readState(); configured.contacts = [...configured.contacts, { id: "u_e2e_typed_peer", display_name: "" }]; write(configured);
+    const silent = unknownText(panel);
+    for (let i = 0; i < 40 && !(await silent.count()); i++) await delay(250);
+    await (await requireVisible(silent, "the silent contact row for a first contact")).click();
     await messageTextField(panel).fill("FIRST-CONTACT");
     await sendButton(panel).click();
     for (let i = 0; i < 20 && sends().length < 2; i++) await delay(500);
-    assert.equal(sends().length, 2, "a typed first contact must spawn exactly one more send");
-    assert.equal(argAfter(sends()[1], "--to"), "u_e2e_typed_peer", "the typed user id must be the send address");
+    assert.equal(sends().length, 2, "a first contact must spawn exactly one more send");
+    assert.equal(argAfter(sends()[1], "--to"), "u_e2e_typed_peer", "the contact's user id must be the send address");
     assert.equal(argAfter(sends()[1], "--text"), "FIRST-CONTACT");
     await panel.getByText("FIRST-CONTACT", { exact: false }).first().waitFor({ timeout: 15_000 });
     await requireVisible(unknownText(panel), "the 未知用户 placeholder for the new unnamed peer");

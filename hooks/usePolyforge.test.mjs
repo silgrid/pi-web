@@ -118,13 +118,33 @@ test("task-42: a send's answer opens the conversation it names, not a raced list
   assert.match(source, /if \(selectedConversation\) \{\s*\/\/ Await the open conversation's refresh/);
 });
 
-test("the tab gains memory; Messages refresh stays gated on messages", () => {
-  assert.match(source, /export type PolyforgeTab = "jobs" \| "messages" \| "memory";/);
+test("the top-level tabs are memory, messages, work; Messages refresh stays gated on messages", () => {
+  assert.match(source, /export type PolyforgeTab = "memory" \| "messages" \| "work";/);
+  assert.match(source, /export type PolyforgeWorkTab = "jobs" \| "tasks";/);
   const start = source.indexOf("const setActiveTab = useCallback");
   const end = source.indexOf("}, [refreshMessages]);", start);
   const body = source.slice(start, end);
   assert.match(body, /if \(tab === "messages"\) void refreshMessages\(\);/, "only the messages tab refreshes the hook's list");
   assert.doesNotMatch(body, /memory/, "activating the Memory tab triggers no hook read");
+  assert.doesNotMatch(body, /work|tasks/, "activating the Work tab triggers no hook read (the Tasks surface reads on its own gestures)");
+});
+
+test("the dock opens on Work › Jobs and the sub-tab lives in page memory only", () => {
+  assert.match(source, /useState<PolyforgeTab>\("work"\)/, "Work is the default top-level tab");
+  assert.match(source, /const \[workTab, setWorkTab\] = useState<PolyforgeWorkTab>\("jobs"\);/, "Jobs is the default sub-tab");
+  assert.doesNotMatch(source, /(?:localStorage|sessionStorage)\.|setItem\(/, "no storage key for workTab (a reload resets it)");
+  assert.doesNotMatch(source, /pi-web:polyforge-work/, "no storage key name for the sub-tab");
+  assert.match(source, /\n    workTab,\n    setWorkTab,\n/, "the sub-tab state is exposed to the shell");
+});
+
+test("a work-item anchor lands on Work › Jobs with the item selected", () => {
+  const start = source.indexOf("const openAnchor = useCallback");
+  const body = source.slice(start, source.indexOf("}, [select]);", start));
+  assert.match(body, /setActiveTabState\("work"\);\s*setWorkTab\("jobs"\);\s*select\(ref\);/);
+});
+
+test("the cards poll is gated on Work › Jobs", () => {
+  assert.match(source, /if \(!probed \|\| !pfPresent \|\| !panelOpen \|\| activeTab !== "work" \|\| workTab !== "jobs"\) return;/);
 });
 
 test("task-42: the list read accepts responses by landing order, not start order", () => {

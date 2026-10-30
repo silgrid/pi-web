@@ -6,9 +6,36 @@
 # the 10-minute idle auto-exit so the server does not appear to "self-exit"
 # while running unattended as a service.
 #
-# The server binds 0.0.0.0 (override with PIWEB_HOST) so it is reachable from
-# outside the container, and PI_WEB_PASSWORD set in the calling environment is
-# passed through so the deployed service keeps its existing auth behavior.
+# The service shape (port, password, allowed hosts, install channel) comes
+# from the caller's environment. The lane runs from the daemon environment,
+# which by design carries no PIWEB_*/PI_WEB_* values, so any shape variable the
+# caller does not set is read from the operator's
+# ~/.config/piweb/deploy.env (0600). Explicit caller values always win.
+#
+# Dependencies: bash, tmux, npm and curl (curl runs the post-swap service
+# probe and the TLS edge probe; without it the service probe fails naming
+# curl and the edge probe is skipped with one line naming curl).
+#
+# The deploy fails closed: a bind address that is not loopback is refused
+# before any install or tmux side effect unless both PIWEB_PORT and
+# PI_WEB_PASSWORD are set, so an incomplete shape can never fall back to
+# pi-web's default port or start without web auth. After the swap, a complete
+# shape (port + password) is probed on the configured port: GET /login must
+# answer 200 and an anonymous /api request must answer 401, within a bounded
+# wait. A failed probe exits 3 so .polyforge/deploy.sh can report the
+# post-swap failure truthfully instead of claiming not_changed.
+# Then the deploy checks that the served pi-web is the installed one: the
+# package `command -v pi-web` resolves to, its version against the version
+# npm just installed under its global root, and the package of the script the
+# running 'piweb' loop process executes must all agree (up to 3 attempts in a
+# 30s deadline, after the loop's first process is up). Any disagreement, or a
+# point that cannot be read ("unknown"), prints exactly one
+# "warn: serving <old>, installed <new>" line and never changes the exit code.
+# Then the TLS edge of the first PI_WEB_ALLOWED_HOSTS entry is probed once
+# (https GET /, 5s timeout; any HTTP answer counts). The edge is an
+# independent service, so a failure only prints
+# "warn: TLS edge unreachable (<host>)" and never changes the exit code; an
+# empty list skips the edge probe with one line.
 #
 # Exposure modes (opt-in via PIWEB_EXPOSE; leaving it unset keeps the legacy
 # self-managed deployment — same bind, same allowed-hosts passthrough, no
@@ -43,9 +70,12 @@
 # Usage: ./deploy-piweb.sh   (or: pi-web-deploy after `npm i -g @silgrid/pi-web`)
 # Env:
 #   PIWEB_TMUX_SESSION  tmux session name (default: piweb)
-#   PIWEB_PORT          optional port override passed to pi-web
-#   PIWEB_HOST          bind address (default: 0.0.0.0)
-#   PI_WEB_PASSWORD     optional web-auth password passed through to pi-web
+#   PIWEB_PORT          port passed to pi-web (required for a non-loopback
+#                       bind; deploy.env may supply it)
+#   PIWEB_HOST          bind address (default: 0.0.0.0; non-loopback binds
+#                       require PIWEB_PORT and PI_WEB_PASSWORD)
+#   PI_WEB_PASSWORD     web-auth password passed through to pi-web (required
+#                       for a non-loopback bind; deploy.env may supply it)
 #   PIWEB_EXPOSE        optional exposure mode: lan | tailscale | cloudflare
 #   PIWEB_TUNNEL        cloudflare mode only: quick | named (default: quick)
 #   PIWEB_CF_CONFIG     cloudflare named mode: path to the operator-supplied
@@ -66,7 +96,87 @@
 #                        the requested tag, and only its tarball installed
 #                        — latest is never resolved. Unset keeps the
 #                        latest-release-wins channel (no version filtering).
+#
+# ~/.config/piweb/deploy.env (0600) may supply the shape keys above
+# (PIWEB_PORT, PIWEB_HOST, PI_WEB_PASSWORD, PI_WEB_ALLOWED_HOSTS,
+# PIWEB_INSTALL_REPO, PIWEB_INSTALL_VERSION). It is parsed as KEY=VALUE, never
+# sourced, and only those keys are read. An unquoted value ends at a ` #`
+# (whitespace, then `#`): the rest of the line is a comment; a quoted value
+# keeps its content, `#` included. A file that is not mode 0600 or not owned
+# by the deploying user is used anyway, with one `warn:` line. Values are
+# never printed; only the names of the keys actually loaded are logged.
 set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# Service-shape loader: fill only variables the caller left unset. An
+# explicitly set variable (even an empty one) wins over the file. Parsing
+# KEY=VALUE avoids executing operator content, and the allowlist keeps the
+# file from smuggling unrelated environment into the deployed service.
+# ---------------------------------------------------------------------------
+load_deploy_env() {
+  local file="${HOME}/.config/piweb/deploy.env"
+  [ -f "${file}" ] || return 0
+  if [ ! -r "${file}" ]; then
+    echo "==> Note: ${file} is not readable; using the caller environment only." >&2
+    return 0
+  fi
+
+  local line key value stripped loaded=""
+  local quoted_double='^"(.*)"[[:space:]]*(#.*)?$' quoted_single="^'(.*)'[[:space:]]*(#.*)?\$"
+  while IFS= read -r line || [ -n "${line}" ]; do
+    line="${line%$'\r'}"
+    line="${line#"${line%%[![:space:]]*}"}"
+    case "${line}" in
+      "" | "#"*) continue ;;
+    esac
+    line="${line#export }"
+    case "${line}" in
+      *=*) ;;
+      *) continue ;;
+    esac
+    key="${line%%=*}"
+    value="${line#*=}"
+    case "${key}" in
+      PIWEB_PORT | PIWEB_HOST | PI_WEB_PASSWORD | PI_WEB_ALLOWED_HOSTS | \
+        PIWEB_INSTALL_REPO | PIWEB_INSTALL_VERSION) ;;
+      *) continue ;;
+    esac
+    # Explicit caller environment wins, including an explicitly empty value.
+    if [ -n "${!key+x}" ]; then
+      continue
+    fi
+    # A quoted value keeps its content (a trailing comment after the closing
+    # quote is dropped); an unquoted value ends at whitespace followed by `#`.
+    if [[ "${value}" =~ ${quoted_double} ]] || [[ "${value}" =~ ${quoted_single} ]]; then
+      value="${BASH_REMATCH[1]}"
+    else
+      stripped="${value%%[[:space:]]#*}"
+      if [ "${stripped}" != "${value}" ]; then
+        value="${stripped%"${stripped##*[![:space:]]}"}"
+      fi
+    fi
+    printf -v "${key}" '%s' "${value}"
+    loaded="${loaded}${loaded:+ }${key}"
+  done < "${file}"
+
+  if [ -n "${loaded}" ]; then
+    echo "==> Loaded service shape from ${file} (${loaded})"
+  fi
+
+  # The file holds the web-auth password: warn (never fail) when its mode is
+  # not 0600 or it is not the deploying user's. Names the file, mode and
+  # owner only, never a value.
+  local mode owner
+  case "$(uname -s)" in
+    Darwin | *BSD) mode="$(stat -f %Lp "${file}" 2>/dev/null || true)"; owner="$(stat -f %u "${file}" 2>/dev/null || true)" ;;
+    *) mode="$(stat -c %a "${file}" 2>/dev/null || true)"; owner="$(stat -c %u "${file}" 2>/dev/null || true)" ;;
+  esac
+  if [ -n "${mode}" ] && { [ "${mode}" != "600" ] || [ "${owner}" != "$(id -u)" ]; }; then
+    echo "warn: ${file} has mode ${mode} and owner uid ${owner}; expected mode 0600 owned by uid $(id -u) (it holds the service password)."
+  fi
+}
+
+load_deploy_env
 
 SESSION="${PIWEB_TMUX_SESSION:-piweb}"
 PKG="@silgrid/pi-web"
@@ -124,16 +234,43 @@ append_allowed_host() {
   fi
 }
 
-# Port wiring: an unset PIWEB_PORT keeps the legacy behavior (no --port flag;
-# pi-web uses its own default). Exposed modes need a predictable local port
-# for the serve/tunnel backends, so they default to 8142 and pass it
-# explicitly so pi-web binds exactly where serve/tunnel proxy to.
+# Port wiring: an unset PIWEB_PORT keeps the legacy behavior only on a
+# loopback bind (no --port flag; pi-web uses its own default); a non-loopback
+# bind without PIWEB_PORT is refused by the fail-closed guard below. Exposed
+# modes need a predictable local port for the serve/tunnel backends, so they
+# default to 8142 and pass it explicitly so pi-web binds exactly where
+# serve/tunnel proxy to.
 PORT_ARGS="${PIWEB_PORT:+--port ${PIWEB_PORT}}"
 if [ -n "${EXPOSE}" ] && [ -z "${PIWEB_PORT:-}" ]; then
   PIWEB_PORT=8142
   PORT_ARGS="--port ${PIWEB_PORT}"
 fi
 LOCAL_PORT="${PIWEB_PORT:-30141}"
+
+# ---------------------------------------------------------------------------
+# Fail closed: a non-loopback bind without both a configured port and a
+# password would silently fall back to pi-web's default port and disable web
+# auth. Refuse before prepare_mode or any install/tmux side effect, and name
+# exactly what is missing.
+# ---------------------------------------------------------------------------
+is_loopback_host() {
+  case "$1" in
+    127.* | localhost | ::1 | "[::1]") return 0 ;;
+  esac
+  return 1
+}
+
+if ! is_loopback_host "${HOST}"; then
+  missing=""
+  [ -n "${PIWEB_PORT:-}" ] || missing="${missing} PIWEB_PORT"
+  [ -n "${PI_WEB_PASSWORD:-}" ] || missing="${missing} PI_WEB_PASSWORD"
+  if [ -n "${missing}" ]; then
+    echo "ERROR: refusing to deploy pi-web on non-loopback '${HOST}' without the complete service shape." >&2
+    echo "       Missing:${missing}." >&2
+    echo "       Set these in the caller environment or in ~/.config/piweb/deploy.env." >&2
+    exit 1
+  fi
+fi
 
 # ---------------------------------------------------------------------------
 # Tooling helpers for the exposure modes (best-effort install when absent).
@@ -573,6 +710,172 @@ case "${EXPOSE}" in
     fi
     ;;
 esac
+
+# ---------------------------------------------------------------------------
+# Service probe. A complete shape (configured port + password) has an endpoint
+# the deploy can actually verify; probe it after the swap, before the deploy
+# may claim success. The loop window starts asynchronously, so wait on the real
+# condition with a deadline instead of assuming the bind is immediate.
+# ---------------------------------------------------------------------------
+probe_configured_service() {
+  local host="$1" port="$2"
+  local deadline=$((SECONDS + 20)) login="" anon=""
+  while [ "${SECONDS}" -lt "${deadline}" ]; do
+    login="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 2 "http://${host}:${port}/login" 2>/dev/null || true)"
+    anon="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 2 "http://${host}:${port}/api/sessions" 2>/dev/null || true)"
+    if [ "${login}" = "200" ] && [ "${anon}" = "401" ]; then
+      return 0
+    fi
+    sleep 1
+  done
+  echo "ERROR: pi-web on ${host}:${port} did not answer GET /login with 200 and the anonymous API with 401 within 20s (last: /login ${login:-unreachable}, /api/sessions ${anon:-unreachable})." >&2
+  return 1
+}
+
+# The probe runs only when BOTH the port and the password are set: only then
+# is there a known endpoint whose anonymous API must answer 401. A loopback
+# deploy with a port but no password (allowed: it is not exposed) therefore
+# gets no reachability check at all; an operator who wants one sets
+# PI_WEB_PASSWORD too, or checks http://127.0.0.1:<port>/ by hand.
+if [ -n "${PIWEB_PORT:-}" ] && [ -n "${PI_WEB_PASSWORD:-}" ]; then
+  if ! command -v curl >/dev/null 2>&1; then
+    echo "ERROR: the service probe needs curl, and curl is not installed; pi-web on port ${LOCAL_PORT} was swapped but not verified." >&2
+    exit 3
+  fi
+  PROBE_HOST="${HOST}"
+  case "${PROBE_HOST}" in
+    0.0.0.0 | :: | "[::]") PROBE_HOST="127.0.0.1" ;;
+  esac
+  if ! probe_configured_service "${PROBE_HOST}" "${LOCAL_PORT}"; then
+    echo "==> pi-web was installed and its tmux window was swapped, but the configured service is not healthy." >&2
+    exit 3
+  fi
+  echo "==> Service probe OK: http://${PROBE_HOST}:${LOCAL_PORT}/login 200, anonymous /api/sessions 401"
+fi
+
+# ---------------------------------------------------------------------------
+# Served == installed self-check (warn-only). npm may install into a prefix
+# whose bin dir is not on the service PATH, leaving the loop serving an older
+# pi-web while the deploy reports success. Three points must agree: the
+# package `command -v pi-web` resolves to, its version against the version
+# npm just installed, and the package of the script the running loop process
+# executes. Paths and versions only are printed, never a deploy.env value.
+# ---------------------------------------------------------------------------
+
+# Print "<version>|<package dir>" of the PKG package that owns <path> (symlinks
+# resolved, nearest package.json upwards, which must be PKG), or nothing.
+piweb_package_of() {
+  # shellcheck disable=SC2016  # the single-quoted program is JavaScript
+  node -e '
+const fs = require("fs");
+const path = require("path");
+let dir;
+try { dir = path.dirname(fs.realpathSync(process.argv[1])); } catch { process.exit(0); }
+for (;;) {
+  let pkg = null;
+  try { pkg = JSON.parse(fs.readFileSync(path.join(dir, "package.json"), "utf8")); } catch {}
+  if (pkg) {
+    if (pkg.name === process.argv[2] && pkg.version) process.stdout.write(`${pkg.version}|${dir}`);
+    process.exit(0);
+  }
+  const up = path.dirname(dir);
+  if (up === dir) process.exit(0);
+  dir = up;
+}' "$1" "${PKG}" 2>/dev/null || true
+}
+
+# The version the install just wrote under npm's global root; falls back to
+# `npm ls -g`, then "unknown".
+installed_piweb_version() {
+  local root version=""
+  root="$(npm root -g 2>/dev/null || true)"
+  if [ -n "${root}" ]; then
+    version="$(piweb_package_of "${root}/${PKG}/package.json")"
+    version="${version%%|*}"
+  fi
+  if [ -z "${version}" ]; then
+    version="$(npm ls -g "${PKG}" --depth=0 2>/dev/null | grep -oE "${PKG}@[0-9][^ ]*" | head -n 1 | sed "s|^${PKG}@||" || true)"
+  fi
+  printf '%s' "${version:-unknown}"
+}
+
+# Inspect the processes of the session's 'piweb' window (each pane and its
+# direct children). Prints "path <script>" for the first absolute pi-web
+# script token, "unidentified" when the loop runs a process without one, and
+# nothing while the loop has not started a process yet.
+running_piweb_script() {
+  local panes win pane_pid pid args tok seen=""
+  local -a toks
+  panes="$(tmux list-panes -s -t "${SESSION}" -F '#{window_name} #{pane_pid}' 2>/dev/null || true)"
+  while read -r win pane_pid; do
+    if [ "${win}" != "piweb" ] || [ -z "${pane_pid}" ]; then continue; fi
+    for pid in "${pane_pid}" $(pgrep -P "${pane_pid}" 2>/dev/null || true); do
+      args="$(ps -p "${pid}" -o args= 2>/dev/null || true)"
+      [ -n "${args}" ] || continue
+      [ "${pid}" = "${pane_pid}" ] || seen=1
+      read -r -a toks <<<"${args}"
+      for tok in "${toks[@]}"; do
+        case "${tok}" in
+          /*/pi-web | /*/pi-web.js) printf 'path %s' "${tok}"; return 0 ;;
+        esac
+      done
+    done
+  done <<EOF
+${panes}
+EOF
+  [ -z "${seen}" ] || printf 'unidentified'
+}
+
+# Bounded: wait (polling every second) for the loop's first live process, then
+# compare up to 3 times, all inside one 30 s deadline; the last attempt rules.
+check_served_installed() {
+  local installed served="" proc="" proc_pkg="" attempts=0 deadline=$((SECONDS + 30)) cmd_path
+  installed="$(installed_piweb_version)"
+  cmd_path="$(command -v pi-web 2>/dev/null || true)"
+  [ -z "${cmd_path}" ] || served="$(piweb_package_of "${cmd_path}")"
+  while [ "${attempts}" -lt 3 ] && [ "${SECONDS}" -lt "${deadline}" ]; do
+    proc="$(running_piweb_script)"
+    if [ -n "${proc}" ]; then
+      attempts=$((attempts + 1))
+      proc_pkg=""
+      case "${proc}" in
+        "path "*) proc_pkg="$(piweb_package_of "${proc#path }")" ;;
+      esac
+      if [ -n "${served}" ] && [ "${proc_pkg}" = "${served}" ] && [ "${served%%|*}" = "${installed}" ]; then
+        echo "==> Served == installed: pi-web ${installed} (${served#*|})"
+        return 0
+      fi
+      [ "${attempts}" -ge 3 ] && break
+    fi
+    sleep 1
+  done
+  # The running process's package is what is served; when it cannot be read,
+  # fall back to the package PATH resolves to.
+  local serving="${proc_pkg%%|*}"
+  [ -n "${serving}" ] || serving="${served%%|*}"
+  echo "warn: serving ${serving:-unknown}, installed ${installed}"
+}
+
+check_served_installed
+
+# TLS edge probe: warn-only (the edge is not this script's service), single
+# attempt, no retry. Only the operator's own first allowed host is probed;
+# tunnel hostnames appended above are not an edge this script fronts.
+EDGE_HOST="${PI_WEB_ALLOWED_HOSTS:-}"
+EDGE_HOST="${EDGE_HOST%%,*}"
+EDGE_HOST="$(printf '%s' "${EDGE_HOST}" | tr -d " \t\"'")"
+if [ -z "${EDGE_HOST}" ]; then
+  echo "==> PI_WEB_ALLOWED_HOSTS is empty; skipping the TLS edge probe."
+elif ! command -v curl >/dev/null 2>&1; then
+  echo "warn: TLS edge probe skipped: curl is not installed (${EDGE_HOST})"
+else
+  EDGE_CODE="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 "https://${EDGE_HOST}/" 2>/dev/null)" || EDGE_CODE=""
+  if [ -n "${EDGE_CODE}" ] && [ "${EDGE_CODE}" != "000" ]; then
+    echo "==> TLS edge probe OK: https://${EDGE_HOST}/ answered (${EDGE_CODE})"
+  else
+    echo "warn: TLS edge unreachable (${EDGE_HOST})"
+  fi
+fi
 
 echo "==> pi-web running in tmux session '${SESSION}'"
 tmux ls

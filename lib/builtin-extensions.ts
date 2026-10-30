@@ -1,3 +1,4 @@
+import { join } from "node:path";
 import {
   CONFIG_DIR_NAME,
   createCodemodeExtension,
@@ -12,7 +13,6 @@ import {
   type LoadedMcpConfig,
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
-import { join } from "node:path";
 import { McpHost, type McpHostOptions } from "./mcp-host";
 import { createPiWebMcpTransportFactory } from "./mcp-transport";
 import { loadPiSdkInternals, type PiSdkInternals, type PiSdkInternalsResult } from "./pi-sdk-internals";
@@ -138,6 +138,25 @@ export function checkCodemodeSandbox(): Promise<BuiltinFeatureStatus> {
     if (!status.available) console.warn(`[pi-web] Code mode is off: ${status.reason}`);
     return status;
   });
+}
+
+export type CodemodeSandboxPeek = { checked: false } | ({ checked: true } & BuiltinFeatureStatus);
+
+const NOT_SETTLED: unique symbol = Symbol("not settled");
+
+/**
+ * The self-test's result once it has settled, without ever starting it: the
+ * first normal session runs it, and Settings only reports what it found. A
+ * test still running, or not started since the server did, is `checked:
+ * false`. A promise that has already settled wins the race against one
+ * resolved now, because their reactions run in the order they were attached.
+ */
+export async function peekCodemodeSandbox(): Promise<CodemodeSandboxPeek> {
+  const store = globalThis as Record<symbol, Promise<BuiltinFeatureStatus> | undefined>;
+  const pending = store[CODEMODE_SANDBOX_KEY];
+  if (!pending) return { checked: false };
+  const settled = await Promise.race([pending, Promise.resolve(NOT_SETTLED)]);
+  return settled === NOT_SETTLED ? { checked: false } : { checked: true, ...settled };
 }
 
 // ---------------------------------------------------------------------------

@@ -30,7 +30,7 @@ test("the badge is keyed on the archivedSessionIds prop", () => {
 });
 
 test("the click path is unchanged — view-only open, no archive mutation", () => {
-  const row = source.match(/\{response\?\.results\.map\(\(\{ session, entryId, blockIndex, before, match, after \}\) => \([\s\S]*?\)\)\}/);
+  const row = source.match(/\{response\?\.results\.map\(\(\{ session, entryId, blockIndex, titleMatch, before, match, after \}\) => \([\s\S]*?\)\)\}/);
   assert.ok(row, "the result row render must be found");
   assert.match(row[0], /onClick=\{\(\) => onSelectSession\(session, entryId, blockIndex\)\}/);
   // The only archive-set interaction in the file is the badge READ (has) —

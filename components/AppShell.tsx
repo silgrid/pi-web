@@ -15,11 +15,13 @@ import { PolyforgePanel, shortenCandidate } from "./PolyforgePanel";
 import { TabBar, type Tab } from "./TabBar";
 import { openFileTab, saveFileViewerState, saveParkedFileViewerState, switchFileWorkspace, type ParkedFileWorkspace } from "./file-tab-state";
 import { SettingsPanel, SettingsSectionIcon } from "./SettingsPanel";
-import { ProjectTrustDialog } from "./ProjectTrustDialog";
+import { ProjectTrustDialog, type ProjectTrustFailure } from "./ProjectTrustDialog";
 import { BranchNavigator, hasSessionBranches } from "./BranchNavigator";
 import { SystemPromptPanel } from "./SystemPromptPanel";
 import { ToolDefinitionsPanel } from "./ToolDefinitionsPanel";
 import { AgentSessionPanel } from "./AgentSessionPanel";
+import { DebugPanel, DebugPanelBoundary } from "./DebugPanel";
+import { SubagentViewer } from "./SubagentViewer";
 import { TerminalPanel } from "./TerminalPanel";
 import { newTerminalTab, restoreTerminalTabs, TERMINAL_TABS_KEY, type TerminalTab } from "./terminal-tab-state";
 import { useTheme } from "@/hooks/useTheme";
@@ -60,10 +62,13 @@ import {
   showBrowserNotification,
 } from "@/lib/browser-notifications";
 import { setupPushSubscription } from "@/lib/push-client";
+import { startPageVisibilityTracking } from "@/lib/page-debug";
+import type { DebugClientSession } from "@/lib/debug-types";
 import { getInitialNavigation, linkedSessionId, withTabOpen } from "@/lib/initial-navigation";
 import { clearTabOpenSession, getTabOpen, setTabOpenNewSession, setTabOpenSession } from "@/lib/tab-session";
 import { mergeCatalogRow } from "./session-catalog-helpers";
 import { rekeyDraft } from "@/lib/draft-store";
+import { MachineLoadSection } from "./MachineLoadSection";
 import {
   clearLastOpen,
   getLastOpenSession,
@@ -86,13 +91,16 @@ import {
   SIDEBAR_MIN_WIDTH,
 } from "@/lib/panel-layout";
 import type { BackgroundTasksClientEvent, BlockingExtensionUiRequest, SessionInfo, SessionTreeNode } from "@/lib/types";
-import type { ProjectTrustStatus } from "@/lib/api-types";
+import type { McpErrorResponse, ProjectTrustStatus } from "@/lib/api-types";
+import type { AgentEndInfo } from "@/hooks/useAgentSession";
 import type { ChatInputHandle } from "./ChatInput";
 import type { SessionStatsInfo } from "@/lib/pi-types";
+import { formatActiveDuration, formatCompactCount, formatCostShort } from "@/lib/session-stats-format";
 import type { FileViewerState } from "@/lib/file-viewer-state";
 import { PRESET_READ_ONLY, type ToolEntry } from "@/lib/tool-presets";
-import { getSessionFamily } from "@/lib/session-family";
-import { getLastSettingsSection, type SettingsSection } from "@/lib/settings-navigation";
+import { getAgentsBadge, getFoldedMoreAgentsBadge, getSessionFamily } from "@/lib/session-family";
+import { getLastSettingsSection, settingsSectionRequiresProject, type SettingsSection } from "@/lib/settings-navigation";
+import { focusIfLost } from "@/lib/stacked-dialog";
 
 type SessionCopyField = "file" | "id" | "projectDir" | "gitBranch" | "gitWorktree";
 type AutoNameStatus =
@@ -110,6 +118,10 @@ const TOOL_END_REFRESH_MS = 1000;
 // Split-view preference (pi#27): tab mode is the DEFAULT; the stored value
 // only exists to honor an explicit opt-out. Absent/corrupt → default ON.
 const SPLIT_VIEW_ENABLED_STORAGE_KEY = "pi-web:split-view-enabled";
+/** the desktop dock's persisted pin ("1" = pinned). */
+const PF_DOCK_PINNED_KEY = "pi-web:polyforge-dock-pinned";
+/** The mobile breakpoint (hooks/useIsMobile.ts, app/globals.css). */
+const MOBILE_MEDIA_QUERY = "(max-width: 640px)";
 
 function readSplitPaneEnabled(): boolean {
   if (typeof window === "undefined") return true;
@@ -131,6 +143,12 @@ function writeSplitPaneEnabled(enabled: boolean): void {
 
 function parkedNewSessionDraftKey(cwd: string): string {
   return `parked-new:${cwd}`;
+}
+
+/** Panel tab id of the last sub-agent tab, or null when there is none. */
+function lastAgentTabId(tabs: readonly { sessionId: string }[]): string | null {
+  const last = tabs.at(-1);
+  return last ? `agent:${last.sessionId}` : null;
 }
 
 export function AppShell() {
@@ -227,6 +245,13 @@ export function AppShell() {
   // pi#108: the Polyforge dock panel shares the bg-tasks slot; the two are
   // mutually exclusive (each open handler closes the other).
   const [pfPanelOpen, setPfPanelOpen] = useState(false);
+  // the desktop dock's pin, persisted globally under
+  // PF_DOCK_PINNED_KEY ("1" = pinned; absent/invalid = unpinned). While
+  // pinned the outside-press dismissal below is not installed; the topbar
+  // toggle and the panel's close still close the dock and keep the pin; a
+  // load while pinned reopens the dock on a desktop viewport. The mobile
+  // sheet has no pin.
+  const [pfDockPinned, setPfDockPinned] = useState(false);
   // pi#28: the background-tasks panel follows the FOCUSED pane's session. In
   // split view pane focus only updates focusedPaneId (never selectedSession),
   // so the old selectedSession?.id read left the panel permanently
@@ -281,6 +306,8 @@ export function AppShell() {
     pfPresent,
     opsStatus: pfOpsStatus,
     opsError: pfOpsError,
+    cards: pfCards,
+    cardsError: pfCardsError,
     runningCount: pfRunningCount,
     selectedWi: pfSelectedWi,
     watchStatus: pfWatchStatus,
@@ -288,13 +315,18 @@ export function AppShell() {
     refreshStatus: refreshPolyforgeStatus,
     activeTab: pfActiveTab,
     setActiveTab: setPfActiveTab,
+    workTab: pfWorkTab,
+    setWorkTab: setPfWorkTab,
     messagesCapable: pfMessagesCapable,
     messagesReason: pfMessagesReason,
     messagesError: pfMessagesError,
     conversations: pfConversations,
+    contacts: pfContacts,
     unreadTotal: pfUnreadTotal,
     selectedConversation: pfSelectedConversation,
     selectConversation: selectPfConversation,
+    selectedContact: pfSelectedContact,
+    selectContact: selectPfContact,
     messages: pfMessages,
     initialPageLoaded: pfMessagesInitialPageLoaded,
     blocked: pfMessagesBlocked,
@@ -312,9 +344,12 @@ export function AppShell() {
     capable: pfMessagesCapable,
     reason: pfMessagesReason,
     conversations: pfConversations,
+    contacts: pfContacts,
     error: pfMessagesError,
     selectedConversation: pfSelectedConversation,
     onSelectConversation: selectPfConversation,
+    selectedContact: pfSelectedContact,
+    onSelectContact: selectPfContact,
     messages: pfMessages,
     initialPageLoaded: pfMessagesInitialPageLoaded,
     blocked: pfMessagesBlocked,
@@ -352,7 +387,7 @@ export function AppShell() {
   // keeps its backdrop tap (unchanged); the listener exists only while the
   // desktop dock is open.
   useEffect(() => {
-    if (!pfPanelOpen || isMobile) return;
+    if (!pfPanelOpen || isMobile || pfDockPinned) return;
     const dismissOnOutsidePress = (event: PointerEvent) => {
       const target = event.target;
       if (!(target instanceof Element)) return;
@@ -361,7 +396,36 @@ export function AppShell() {
     };
     document.addEventListener("pointerdown", dismissOnOutsidePress);
     return () => document.removeEventListener("pointerdown", dismissOnOutsidePress);
-  }, [pfPanelOpen, isMobile]);
+  }, [pfPanelOpen, isMobile, pfDockPinned]);
+
+  // one-shot at mount — read the pin, and reopen the dock when
+  // pinned on a desktop viewport (the shared slot: bg-tasks closes first).
+  // The viewport is read from the media query itself: useIsMobile's first
+  // snapshot may not reflect it yet at mount.
+  useEffect(() => {
+    let pinned = false;
+    try {
+      pinned = window.localStorage.getItem(PF_DOCK_PINNED_KEY) === "1";
+    } catch {
+      // storage unavailable — unpinned
+    }
+    if (!pinned) return;
+    setPfDockPinned(true);
+    if (window.matchMedia(MOBILE_MEDIA_QUERY).matches) return;
+    setBgPanelOpen(false);
+    setPfPanelOpen(true);
+  }, []);
+
+  const togglePfDockPin = useCallback(() => {
+    const next = !pfDockPinned;
+    setPfDockPinned(next);
+    try {
+      if (next) window.localStorage.setItem(PF_DOCK_PINNED_KEY, "1");
+      else window.localStorage.removeItem(PF_DOCK_PINNED_KEY);
+    } catch {
+      // best effort persistence
+    }
+  }, [pfDockPinned]);
 
   // Live background-task events arrive per session pane (split view feeds every
   // pane's stream; the classic single chat feeds its own). Panel state only
@@ -437,6 +501,10 @@ export function AppShell() {
       return ids;
     });
   }, []);
+  const agentsBadge = activeSessionFamily ? getAgentsBadge(activeSessionFamily.subagents, runningSessionIds) : null;
+  const agentsButtonLabel = agentsBadge?.running
+    ? translate("agentSwitcher.titleRunning", { count: agentsBadge.count })
+    : translate("agentSwitcher.title");
   // The temporary id distinguishes consecutive fresh composers in one cwd.
   const [newSessionCwd, setNewSessionCwd] = useState<string | null>(null);
   const [newSessionDraftId, setNewSessionDraftId] = useState("initial");
@@ -461,7 +529,7 @@ export function AppShell() {
   const [projectTrust, setProjectTrust] = useState<ProjectTrustStatus | null>(null);
   const [projectTrustDialogOpen, setProjectTrustDialogOpen] = useState(false);
   const [projectTrustBusy, setProjectTrustBusy] = useState(false);
-  const [projectTrustError, setProjectTrustError] = useState<string | null>(null);
+  const [projectTrustError, setProjectTrustError] = useState<ProjectTrustFailure | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(() => !initialNavigation.sidebarCollapsed);
   const desktopSidebarOpenRef = useRef(!initialNavigation.sidebarCollapsed);
   const [rightPanelOpen, setRightPanelOpen] = useState(false);
@@ -477,6 +545,13 @@ export function AppShell() {
     if (!rightPanelOpen) setHistoryExportSessionId(null);
   }, [rightPanelOpen]);
   const [mobileToolbarMoreOpen, setMobileToolbarMoreOpen] = useState(false);
+  // A narrow phone folds the Agents button into More: the folded button says that subagents run.
+  const foldedMoreAgentsBadge = isNarrowMobile ? getFoldedMoreAgentsBadge(agentsBadge, mobileToolbarMoreOpen) : null;
+  const moreControlsLabel = mobileToolbarMoreOpen
+    ? translate("chat.close")
+    : foldedMoreAgentsBadge
+      ? translate("chat.moreControlsAgentsRunning", { count: foldedMoreAgentsBadge.count })
+      : translate("chat.moreControls");
   const [mobileSidebarReady, setMobileSidebarReady] = useState(false);
   const sidebarWidthRef = useRef(SIDEBAR_DEFAULT_WIDTH);
   const rightPanelWidthRef = useRef(RIGHT_PANEL_FALLBACK_WIDTH);
@@ -666,6 +741,17 @@ export function AppShell() {
     setSystemInfoLoading(false);
   }, []);
 
+  // The debug panel's reader of the chat's own state: kept in a ref, so registering renders
+  // nothing, and read only by the open panel (DebugPanel), never on AppShell's renders.
+  const debugSnapshotReaderRef = useRef<(() => DebugClientSession) | null>(null);
+  const handleDebugSnapshotReaderChange = useCallback((reader: (() => DebugClientSession) | null) => {
+    debugSnapshotReaderRef.current = reader;
+  }, []);
+  // The panel reports the page's visibility history from the first mount on, opened or not.
+  useEffect(() => {
+    startPageVisibilityTracking();
+  }, []);
+
   // Session stats (tokens + cost) — populated by ChatWindow, displayed in top bar
   const [sessionStats, setSessionStats] = useState<SessionStatsInfo | null>(null);
   const [autoNameStatus, setAutoNameStatus] = useState<AutoNameStatus>({ kind: "idle" });
@@ -675,6 +761,11 @@ export function AppShell() {
   const handleSessionStatsChange = useCallback((stats: SessionStatsInfo | null) => {
     setSessionStats(stats);
   }, []);
+  // The toolbar's ↻ manual fetch: each click bumps the key the
+  // focused chat acts on; the chat reports whether it offers one (a saved
+  // session) and whether one is under way.
+  const [manualFetchKey, setManualFetchKey] = useState(0);
+  const [manualFetchState, setManualFetchState] = useState<{ available: boolean; inProgress: boolean } | null>(null);
   const [copiedSessionField, setCopiedSessionField] = useState<SessionCopyField | null>(null);
   const sessionCopyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const handleCopySessionField = useCallback((field: SessionCopyField, value: string) => {
@@ -699,7 +790,7 @@ export function AppShell() {
   }, []);
 
   // Single active panel — only one dropdown open at a time
-  const [activeTopPanel, setActiveTopPanel] = useState<"agents" | "branches" | "system" | "tools" | "session" | null>(null);
+  const [activeTopPanel, setActiveTopPanel] = useState<"agents" | "branches" | "system" | "tools" | "session" | "debug" | null>(null);
   const [topPanelPos, setTopPanelPos] = useState<{ top: number; left: number; width: number } | null>(null);
 
   useEffect(() => {
@@ -719,13 +810,24 @@ export function AppShell() {
   }, [rightPanelFullWidth]);
 
   const toggleTopPanel = useCallback((
-    panel: "agents" | "branches" | "system" | "tools" | "session",
+    panel: "agents" | "branches" | "system" | "tools" | "session" | "debug",
     keepMobileToolbarOpen = false,
   ) => {
     if (isMobile) setSidebarOpen(false);
     setActiveTopPanel((cur) => cur === panel ? null : panel);
     if (isMobile && isNarrowMobile && keepMobileToolbarOpen) setMobileToolbarMoreOpen(true);
   }, [isMobile, isNarrowMobile]);
+
+  // The Debug button on screen (one of its three places at a time); Escape gives focus back to it.
+  const debugButtonRef = useRef<HTMLButtonElement | null>(null);
+
+  // Escape inside the debug panel; it never closes another panel that took its place. With focus
+  // in the panel, that focus leaves the page with it: once the panel is gone (the next frame), the
+  // Debug button gets it back, unless the user moved it meanwhile (focusIfLost).
+  const closeDebugPanel = useCallback((restoreFocus: boolean) => {
+    setActiveTopPanel((panel) => panel === "debug" ? null : panel);
+    if (restoreFocus) requestAnimationFrame(() => focusIfLost(document, debugButtonRef.current));
+  }, []);
 
   const handleSystemInfoToggle = useCallback((
     panel: "system" | "tools",
@@ -753,6 +855,11 @@ export function AppShell() {
     setMobileToolbarMoreOpen(false);
     setActiveTopPanel("session");
   }, [isMobile]);
+
+  // The composer opens Settings too: a bare /mcp opens Settings › MCP (useAgentSession).
+  const openSettingsSection = useCallback((section: SettingsSection) => {
+    setSettingsSection(section);
+  }, []);
 
   const handleSidebarToggle = useCallback(() => {
     if (isMobile) {
@@ -852,12 +959,20 @@ export function AppShell() {
   const fileWorkspaceGenerationRef = useRef(0);
   const [terminalTabs, setTerminalTabs] = useState<TerminalTab[]>([]);
   const [terminalsRestored, setTerminalsRestored] = useState(false);
+  // Subagent work tabs are session-scoped and transient: no persistence, and
+  // they are dropped when the project changes (they belong to its sessions).
+  const [agentTabs, setAgentTabs] = useState<{ sessionId: string; label: string }[]>([]);
   const rawPanelTabs: Tab[] = [...fileTabs, ...terminalTabs.map((tab) => ({
     id: tab.id,
     label: getFileName(tab.cwd) || tab.cwd,
     filePath: tab.cwd,
     kind: "terminal" as const,
     closing: Boolean(tab.closing),
+  })), ...agentTabs.map((tab) => ({
+    id: `agent:${tab.sessionId}`,
+    label: tab.label,
+    filePath: tab.label,
+    kind: "agent" as const,
   }))];
   // Right-panel tab order (pi#70): fileTabs/terminalTabs are separate state
   // arrays, concatenated file-first above, so neither array alone can
@@ -921,8 +1036,10 @@ export function AppShell() {
     fileWorkspaceGenerationRef.current += 1;
     setFileWorkspaceGeneration(fileWorkspaceGenerationRef.current);
     setFileTabs(next.tabs);
+    // Subagent tabs belong to the previous project's sessions: dropped, not parked.
+    setAgentTabs([]);
     // Terminal tabs span workspaces and keep control of the panel while active.
-    if (!activeFileTabId || activeFileId) {
+    if (!activeFileTabId || activeFileId || activeFileTabId.startsWith("agent:")) {
       setActiveFileTabId(next.activeTabId);
       setRightPanelOpen(next.open);
     }
@@ -1148,7 +1265,8 @@ export function AppShell() {
     setSystemPrompt(null);
     setSystemTools(null);
     setSystemInfoLoading(false);
-    setActiveTopPanel(null);
+    // The debug panel stays open across the switch: it follows whichever session is shown.
+    setActiveTopPanel((panel) => panel === "debug" ? panel : null);
     if (currentProject !== newProject) {
       // Keep #281's project isolation, but park each workspace's file tabs
       // instead of discarding them so they return when the user switches back.
@@ -1173,7 +1291,7 @@ export function AppShell() {
     const projectKey = workspaceKeyOf(session);
     if (activeProjectKeyRef.current !== projectKey) {
       changeFileWorkspace(activeProjectKeyRef.current, projectKey);
-      setActiveTopPanel(null);
+      setActiveTopPanel((panel) => panel === "debug" ? panel : null);
     }
     activeProjectKeyRef.current = projectKey;
     // Re-clicking the already-open session must not remount the chat and
@@ -1269,7 +1387,7 @@ export function AppShell() {
     setSystemPrompt(null);
     setSystemTools(null);
     setSystemInfoLoading(false);
-    setActiveTopPanel(null);
+    setActiveTopPanel((panel) => panel === "debug" ? panel : null);
     if (isMobile) setSidebarOpen(false);
     if (splitPaneEnabled && !isMobile) {
       // Open the new-session pane tab (at most one exists by construction)
@@ -1343,24 +1461,6 @@ export function AppShell() {
       })
       .catch(() => {});
   }, []);
-
-  const handleOpenSession = useCallback(async (sessionId: string) => {
-    // Prefer the catalogue the sidebar already delivered: selecting from it
-    // avoids a full detail round trip just to obtain the SessionInfo.
-    const catalogued = sessionCatalog.find((s) => s.id === sessionId);
-    if (catalogued && !catalogued.transient) {
-      handleSelectSession(catalogued);
-      return;
-    }
-    try {
-      const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`, { cache: "no-store" });
-      const data = await response.json() as { info?: SessionInfo; error?: string };
-      if (!response.ok || !data.info) throw new Error(data.error ?? `HTTP ${response.status}`);
-      handleSelectSession(data.info);
-    } catch (error) {
-      console.error("[pi-web] failed to open session:", error instanceof Error ? error.message : error);
-    }
-  }, [handleSelectSession, sessionCatalog]);
 
   // Called by ChatWindow when a new session gets its real id from pi
   const handleSessionCreated = useCallback((session: SessionInfo, sourceDraftKey: string) => {
@@ -1436,13 +1536,13 @@ export function AppShell() {
     }
   }, [handleSelectSession, locale]);
 
-  const handleAgentEnd = useCallback(() => {
+  const handleAgentEnd = useCallback((end: AgentEndInfo) => {
     // The sidebar's reload merges the selected session's new row into it
     // (handleSessionsChange), so no list fetch of its own here.
     setRefreshKey((k) => k + 1);
     setExplorerRefreshKey((k) => k + 1);
 
-    if (selectedSession?.relation?.kind === "subagent") return;
+    if (end.aborted || end.subagentsActive || selectedSession?.relation?.kind === "subagent") return;
     if (!shouldShowBrowserNotification()) return;
     const targetSession = selectedSession;
     deliverSessionNotification({
@@ -1582,7 +1682,7 @@ export function AppShell() {
       setSystemPrompt(null);
       setSystemTools(null);
       setSystemInfoLoading(false);
-      setActiveTopPanel(null);
+      setActiveTopPanel((panel) => panel === "debug" ? panel : null);
       router.replace(cwd ? `?cwd=${encodeURIComponent(cwd)}` : (typeof window !== "undefined" ? window.location.pathname : "/"), { scroll: false });
     }
   }, [invalidateWorkspaceRestore, router]);
@@ -1614,6 +1714,25 @@ export function AppShell() {
     handleOpenFile(filePath, getFileName(filePath), { sourceSessionId: selectedSession?.id ?? null, page });
   }, [handleOpenFile, selectedSession?.id]);
 
+  // Split panes open a link against their OWN session (pane focus never
+  // updates selectedSession), but the callback identity must stay stable:
+  // MarkdownBody rebuilds its component map whenever onOpenFile changes, and
+  // a fresh inline arrow per AppShell render let a trusted click land on a
+  // replaced <a> ( the review finding). Cache one handler per pane id and
+  // read the latest handleOpenFile through a ref.
+  const handleOpenFileRef = useRef(handleOpenFile);
+  useEffect(() => { handleOpenFileRef.current = handleOpenFile; }, [handleOpenFile]);
+  const paneOpenFileHandlersRef = useRef(new Map<string, (filePath: string, page?: number) => void>());
+  const getPaneOpenFileHandler = useCallback((sid: string) => {
+    const cached = paneOpenFileHandlersRef.current.get(sid);
+    if (cached) return cached;
+    const handler = (filePath: string, page?: number) => {
+      handleOpenFileRef.current(filePath, getFileName(filePath), { sourceSessionId: sid, page });
+    };
+    paneOpenFileHandlersRef.current.set(sid, handler);
+    return handler;
+  }, []);
+
   const handleOpenTerminal = useCallback((cwd: string) => {
     const existing = terminalTabs.find((tab) => tab.cwd === cwd);
     const tab = existing ?? newTerminalTab(cwd);
@@ -1623,12 +1742,37 @@ export function AppShell() {
     if (isMobile) setSidebarOpen(false);
   }, [terminalTabs, isMobile]);
 
+  // Subagent work opens in a right-panel tab instead of hijacking the main chat.
+  const handleOpenSubagentTab = useCallback((sessionId: string, label: string) => {
+    setAgentTabs((prev) => prev.some((tab) => tab.sessionId === sessionId) ? prev : [...prev, { sessionId, label }]);
+    setActiveFileTabId(`agent:${sessionId}`);
+    setRightPanelOpen(true);
+    if (isMobile) setSidebarOpen(false);
+  }, [isMobile]);
+
+  // The agent switcher's side-panel button: opens a subagent's tab, or closes
+  // it when the open panel already has it (the panel closes with its last tab).
+  // The switcher stays open beside the panel, except on phones, where the
+  // panel covers the chat.
+  const openSubagentTabIds = useMemo(
+    () => new Set(rightPanelOpen ? agentTabs.map((tab) => tab.sessionId) : []),
+    [agentTabs, rightPanelOpen],
+  );
+  const handleToggleSubagentTab = (sessionId: string, label: string) => {
+    if (openSubagentTabIds.has(sessionId)) {
+      handleCloseFileTab(`agent:${sessionId}`);
+      return;
+    }
+    if (isMobile) setActiveTopPanel(null);
+    handleOpenSubagentTab(sessionId, label);
+  };
+
   const handleTerminalClosed = (tab: TerminalTab) => {
     const replacement = tab.closing === "restart" ? newTerminalTab(tab.cwd) : null;
     const remaining = terminalTabs.filter((item) => item.id !== tab.id);
     setTerminalTabs((tabs) => tabs.flatMap((item) => item.id !== tab.id ? [item] : replacement ? [replacement] : []));
-    setActiveFileTabId((current) => current !== tab.id ? current : replacement?.id ?? remaining.at(-1)?.id ?? fileTabs.at(-1)?.id ?? null);
-    if (!replacement && !remaining.length && !fileTabs.length) setRightPanelOpen(false);
+    setActiveFileTabId((current) => current !== tab.id ? current : replacement?.id ?? remaining.at(-1)?.id ?? fileTabs.at(-1)?.id ?? lastAgentTabId(agentTabs));
+    if (!replacement && !remaining.length && !fileTabs.length && !agentTabs.length) setRightPanelOpen(false);
   };
 
   const handleCloseFileTab = useCallback((tabId: string) => {
@@ -1636,17 +1780,27 @@ export function AppShell() {
       setTerminalTabs((tabs) => tabs.map((tab) => tab.id === tabId && !tab.closing ? { ...tab, closing: "close" } : tab));
       return;
     }
+    if (tabId.startsWith("agent:")) {
+      const remainingAgents = agentTabs.filter((tab) => `agent:${tab.sessionId}` !== tabId);
+      setAgentTabs(remainingAgents);
+      setActiveFileTabId((cur) => {
+        if (cur !== tabId) return cur;
+        return fileTabs.at(-1)?.id ?? terminalTabs.at(-1)?.id ?? lastAgentTabId(remainingAgents);
+      });
+      if (fileTabs.length === 0 && terminalTabs.length === 0 && remainingAgents.length === 0) setRightPanelOpen(false);
+      return;
+    }
     setFileTabs((prev) => {
       const next = prev.filter((t) => t.id !== tabId);
-      if (next.length === 0 && terminalTabs.length === 0) setRightPanelOpen(false);
+      if (next.length === 0 && terminalTabs.length === 0 && agentTabs.length === 0) setRightPanelOpen(false);
       return next;
     });
     setActiveFileTabId((cur) => {
       if (cur !== tabId) return cur;
       const remaining = fileTabs.filter((t) => t.id !== tabId);
-      return remaining.at(-1)?.id ?? terminalTabs.at(-1)?.id ?? null;
+      return remaining.at(-1)?.id ?? terminalTabs.at(-1)?.id ?? lastAgentTabId(agentTabs);
     });
-  }, [fileTabs, terminalTabs]);
+  }, [fileTabs, terminalTabs, agentTabs]);
 
   const handleViewFullHistory = useCallback(() => {
     if (!selectedSession) return;
@@ -1785,6 +1939,10 @@ export function AppShell() {
       if (cwd) handleNewSession(`entry-${Date.now()}`, cwd);
     });
   }, [initialSessionRestored, selectedSession, effectiveNewSessionCwd, paneTabs.length, splitPaneEnabled, isMobile, paneRestoreAttempted, resolveNewSessionTabCwd, handleNewSession]);
+  // The Debug button shows with a chat only: without one, its panel would have nothing to close it.
+  useEffect(() => {
+    if (!showChat) setActiveTopPanel((panel) => panel === "debug" ? null : panel);
+  }, [showChat]);
 
   useEffect(() => {
     setProjectTrust(null);
@@ -1820,20 +1978,39 @@ export function AppShell() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ cwd: projectTrustCwd }),
       });
-      const data = await response.json() as ProjectTrustStatus & { error?: string };
-      if (!response.ok || data.error) throw new Error(data.error ?? `HTTP ${response.status}`);
+      const data = await response.json() as ProjectTrustStatus & Partial<McpErrorResponse>;
+      if (!response.ok || data.error) {
+        // The dialog translates the reason; the English error is only its diagnostic.
+        setProjectTrustError({ error: data.error ?? `HTTP ${response.status}`, ...(data.reason ? { reason: data.reason } : {}) });
+        return;
+      }
       setProjectTrust(data);
       setProjectTrustDialogOpen(false);
       setModelsRefreshKey((key) => key + 1);
       setSessionKey((key) => key + 1);
     } catch (error) {
-      setProjectTrustError(error instanceof Error ? error.message : String(error));
+      setProjectTrustError({ error: error instanceof Error ? error.message : String(error) });
     } finally {
       setProjectTrustBusy(false);
     }
   }, [projectTrustBusy, projectTrustCwd]);
 
+  // The restricted-mode banner and Settings › MCP's trust notice open the same dialog.
+  const openProjectTrustDialog = useCallback(() => {
+    setProjectTrustError(null);
+    setProjectTrustDialogOpen(true);
+  }, []);
+
+  // Settings › MCP added a project server: `.pi/mcp.json` alone makes a folder require trust, and a
+  // fresh folder was trusted in the same step. Every mounted section reloads in place on the new
+  // status (projectTrustReloadKey); nothing was rebuilt, so the chat needs no new session key.
+  const handleProjectTrustChanged = useCallback((cwd: string, status: ProjectTrustStatus) => {
+    if (cwd === projectTrustCwd) setProjectTrust(status);
+  }, [projectTrustCwd]);
+
   const activeFileTab = fileTabs.find((tab) => tab.id === activeFileTabId) ?? null;
+  // Subagent work tabs: like files, only the active one is mounted.
+  const activeAgentTab = agentTabs.find((tab) => `agent:${tab.sessionId}` === activeFileTabId) ?? null;
   const activeCwdName = activeCwd ? getFileName(activeCwd) || activeCwd : null;
   const windowTitle = activeCwdName ? `${activeCwdName} - Pi Web` : "Pi Web";
 
@@ -1880,7 +2057,7 @@ export function AppShell() {
           ["models", translate("common.models")],
           ["skills", translate("common.skills")],
         ] as const).map(([section, label]) => {
-          const disabled = section !== "models" && !projectTrustCwd;
+          const disabled = settingsSectionRequiresProject(section) && !projectTrustCwd;
           return (
             <button
               key={section}
@@ -1930,10 +2107,7 @@ export function AppShell() {
     return (
       <button
         type="button"
-        onClick={() => {
-          setProjectTrustError(null);
-          setProjectTrustDialogOpen(true);
-        }}
+        onClick={openProjectTrustDialog}
         title={translate("trust.resourcesNotLoaded")}
         aria-label={translate("trust.resourcesNotLoaded")}
         style={{
@@ -1978,6 +2152,35 @@ export function AppShell() {
       </button>
     );
   };
+
+  // While subagents run: their count, ringed by a spinner; otherwise all of them.
+  const renderAgentsBadge = (badge: { count: number; running: boolean }, mobile: boolean) => (
+    <span
+      aria-hidden="true"
+      style={{
+        position: "relative",
+        minWidth: 15, height: 15, padding: "0 4px", display: "grid", placeItems: "center",
+        borderRadius: 7,
+        background: badge.running ? "color-mix(in srgb, var(--accent) 22%, var(--bg-panel))" : "var(--bg-selected)",
+        color: "var(--accent)",
+        fontSize: 10, lineHeight: 1, fontVariantNumeric: "tabular-nums",
+        fontWeight: badge.running ? 600 : undefined,
+        ...(mobile ? { position: "absolute", top: 3, right: 3, minWidth: 13, height: 13, padding: "0 3px", fontSize: 9 } : {}),
+      }}
+    >
+      {badge.running && (
+        <svg
+          className="animate-spin motion-reduce:animate-none"
+          viewBox="0 0 24 24" fill="none" aria-hidden="true"
+          style={{ position: "absolute", top: -3, left: -3, width: "calc(100% + 6px)", height: "calc(100% + 6px)", pointerEvents: "none" }}
+        >
+          <circle cx="12" cy="12" r="11" stroke="currentColor" strokeWidth="2" opacity="0.2" />
+          <path d="M23 12a11 11 0 0 0-11-11" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+        </svg>
+      )}
+      {badge.count}
+    </span>
+  );
 
   const renderChatToolbarActions = (mobile: boolean) => {
     // The Polyforge button is gated by pf presence alone (independent of
@@ -2265,12 +2468,12 @@ export function AppShell() {
             </button>
           );
         })()}
-        {hasSubagentSessions && (
+        {hasSubagentSessions && agentsBadge && (
           <button
             type="button"
             onClick={() => toggleTopPanel("agents", mobile)}
-            title={translate("agentSwitcher.title")}
-            aria-label={translate("agentSwitcher.title")}
+            title={agentsButtonLabel}
+            aria-label={agentsButtonLabel}
             aria-pressed={activeTopPanel === "agents"}
             style={{
               position: "relative",
@@ -2291,17 +2494,7 @@ export function AppShell() {
               <rect x="5" y="7" width="14" height="11" rx="2" /><path d="M9 11h.01M15 11h.01M9 15h6M12 7V4M10 4h4" />
             </svg>
             {!mobile && <span>{translate("agentSwitcher.title")}</span>}
-            <span
-              aria-hidden="true"
-              style={{
-                minWidth: 15, height: 15, padding: "0 4px", display: "grid", placeItems: "center",
-                borderRadius: 7, background: "var(--bg-selected)", color: "var(--accent)",
-                fontSize: 10, lineHeight: 1, fontVariantNumeric: "tabular-nums",
-                ...(mobile ? { position: "absolute", top: 2, right: 2, minWidth: 13, height: 13, padding: "0 3px", fontSize: 9 } : {}),
-              }}
-            >
-              {activeSessionFamily!.subagents.length}
-            </span>
+            {renderAgentsBadge(agentsBadge, mobile)}
           </button>
         )}
         {sessionHasBranches && (mobile ? (
@@ -2420,8 +2613,55 @@ export function AppShell() {
     );
   };
 
+  // The ↻ manual fetch, immediately before the session stats on a desktop and on a phone
+  // (outside the narrow phone's "more" panel). It stays clickable while a fetch runs: the
+  // chat joins a second click to the fetch under way.
+  const renderManualFetchButton = (mobile: boolean) => {
+    if (!showChat || !manualFetchState?.available) return null;
+    const busy = manualFetchState.inProgress;
+    const label = translate(busy ? "chat.manualFetchBusy" : "chat.manualFetch");
+    const covered = mobile && isNarrowMobile && mobileToolbarMoreOpen;
+    return (
+      <button
+        type="button"
+        onClick={() => setManualFetchKey((key) => key + 1)}
+        disabled={covered}
+        tabIndex={covered ? -1 : undefined}
+        title={label}
+        aria-label={label}
+        aria-busy={busy}
+        aria-hidden={covered ? true : undefined}
+        data-mobile-toolbar-action={mobile ? "manual-fetch" : undefined}
+        style={{
+          visibility: covered ? "hidden" : "visible",
+          display: "flex", alignItems: "center", justifyContent: "center",
+          width: TOP_BAR_ICON_BUTTON_SIZE, height: "100%", padding: 0,
+          background: "none",
+          border: "none",
+          borderTop: "2px solid transparent",
+          ...(mobile ? { borderRight: "1px solid var(--border)" } : { borderLeft: "1px solid var(--border)" }),
+          color: busy ? "var(--text)" : "var(--text-muted)",
+          cursor: "pointer", flexShrink: 0, transition: "color 0.1s, background 0.1s",
+          fontSize: 15, lineHeight: 1,
+        }}
+        onMouseEnter={(event) => {
+          event.currentTarget.style.color = "var(--text)";
+        }}
+        onMouseLeave={(event) => {
+          event.currentTarget.style.color = busy ? "var(--text)" : "var(--text-muted)";
+        }}
+      >
+        <span aria-hidden="true" style={{ display: "inline-block", animation: busy ? "spin 0.8s linear infinite" : undefined }}>↻</span>
+      </button>
+    );
+  };
+
+  // The ↻ manual fetch (renderManualFetchButton) comes with the stats, immediately before
+  // them, whether or not they have values yet.
   const renderSessionStatsButton = (mobile: boolean) => {
-    if (!mobile && (!showChat || (!sessionStats && !contextUsage))) return null;
+    const manualFetchButton = renderManualFetchButton(mobile);
+    // One fragment either way, so the ↻ keeps its element when the stats appear.
+    if (!mobile && (!showChat || (!sessionStats && !contextUsage))) return <>{manualFetchButton}</>;
 
     // pi#121: the current session's polyforge chat id, display-only. The
     // mobile layout has no session-name header — this stats button is the
@@ -2434,12 +2674,8 @@ export function AppShell() {
 
     const tokens = sessionStats?.tokens;
     const cost = sessionStats?.cost ?? 0;
-    const formatCompact = (value: number) => value >= 1_000_000
-      ? `${(value / 1_000_000).toFixed(1)}M`
-      : value >= 1000
-        ? `${(value / 1000).toFixed(0)}k`
-        : String(value);
-    const costText = cost > 0 ? (cost >= 0.01 ? `$${cost.toFixed(2)}` : `<$0.01`) : null;
+    const formatCompact = formatCompactCount;
+    const costText = formatCostShort(cost);
 
     let contextColor = "var(--text-muted)";
     let desktopContextText: string | null = null;
@@ -2456,15 +2692,15 @@ export function AppShell() {
 
     const tooltipParts: string[] = [];
     if (tokens) {
-      tooltipParts.push(`in: ${tokens.input.toLocaleString(locale)}`);
-      tooltipParts.push(`out: ${tokens.output.toLocaleString(locale)}`);
-      tooltipParts.push(`cache read: ${tokens.cacheRead.toLocaleString(locale)}`);
-      tooltipParts.push(`cache write: ${tokens.cacheWrite.toLocaleString(locale)}`);
-      if (cost > 0) tooltipParts.push(`cost: $${cost.toFixed(4)}`);
+      tooltipParts.push(`${translate("session.input")}: ${tokens.input.toLocaleString(locale)}`);
+      tooltipParts.push(`${translate("session.output")}: ${tokens.output.toLocaleString(locale)}`);
+      tooltipParts.push(`${translate("session.cacheRead")}: ${tokens.cacheRead.toLocaleString(locale)}`);
+      tooltipParts.push(`${translate("session.cacheWrite")}: ${tokens.cacheWrite.toLocaleString(locale)}`);
+      if (cost > 0) tooltipParts.push(`${translate("session.cost")}: $${cost.toFixed(4)}`);
     }
     if (contextUsage?.contextWindow) {
       const percent = contextUsage.percent;
-      tooltipParts.push(`context: ${percent !== null ? percent.toFixed(1) + "%" : "unknown"} of ${contextUsage.contextWindow.toLocaleString()} tokens`);
+      tooltipParts.push(`${translate("session.context")}: ${percent !== null ? `${percent.toFixed(1)}%` : "?"} / ${contextUsage.contextWindow.toLocaleString(locale)}`);
     }
     const tooltip = tooltipParts.join("  |  ");
     const covered = mobile && isNarrowMobile && mobileToolbarMoreOpen;
@@ -2475,6 +2711,8 @@ export function AppShell() {
     );
 
     return (
+      <>
+      {manualFetchButton}
       <button
         type="button"
         onClick={() => toggleTopPanel("session")}
@@ -2487,7 +2725,8 @@ export function AppShell() {
         className={mobile ? "mobile-session-stats" : undefined}
         data-mobile-toolbar-stats={mobile ? "true" : undefined}
         style={{
-          marginLeft: mobile ? 0 : "auto",
+          // The Debug button before it takes the free space (renderDebugButton).
+          marginLeft: 0,
           display: "flex", alignItems: "center", justifyContent: "flex-end",
           flex: mobile ? 1 : undefined,
           minWidth: 0,
@@ -2603,6 +2842,48 @@ export function AppShell() {
           </>
         )}
       </button>
+      </>
+    );
+  };
+
+  // Icon only, right of the chat's actions; on a desktop it takes the bar's free space, so it
+  // sits left of the session stats. It only opens or closes its panel: nothing is loaded here.
+  const renderDebugButton = (mobile: boolean) => {
+    if (!showChat) return null;
+    const open = activeTopPanel === "debug";
+    return (
+      <button
+        ref={debugButtonRef}
+        type="button"
+        onClick={() => toggleTopPanel("debug", mobile)}
+        title={translate("debug.title")}
+        aria-label={translate("debug.title")}
+        aria-pressed={open}
+        style={{
+          marginLeft: mobile ? 0 : "auto",
+          display: "flex", alignItems: "center", justifyContent: "center",
+          width: TOP_BAR_ICON_BUTTON_SIZE, height: "100%", padding: 0,
+          background: open ? "var(--bg-selected)" : "none",
+          border: "none",
+          borderTop: open ? "2px solid var(--accent)" : "2px solid transparent",
+          ...(mobile ? { borderRight: "1px solid var(--border)" } : { borderLeft: "1px solid var(--border)" }),
+          color: open ? "var(--text)" : "var(--text-muted)",
+          cursor: "pointer", flexShrink: 0, transition: "color 0.1s, background 0.1s",
+        }}
+        onMouseEnter={(event) => {
+          event.currentTarget.style.color = "var(--text)";
+        }}
+        onMouseLeave={(event) => {
+          event.currentTarget.style.color = open ? "var(--text)" : "var(--text-muted)";
+        }}
+        data-mobile-toolbar-action={mobile ? "debug" : undefined}
+      >
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: open ? "var(--accent)" : "var(--text-dim)", flexShrink: 0 }} aria-hidden="true">
+          <path d="M8 2l1.9 1.9M16 2l-1.9 1.9M9 7.1v-1a3 3 0 0 1 6 0v1" />
+          <path d="M12 20c-3.3 0-6-2.7-6-6v-3a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v3c0 3.3-2.7 6-6 6zM12 20v-9" />
+          <path d="M6.5 9C4.6 8.8 3 7.1 3 5M6 13H2M3 21c0-2.1 1.7-3.9 3.8-4M21 5c0 2.1-1.6 3.8-3.5 4M22 13h-4M17.2 17c2.1.1 3.8 1.9 3.8 4" />
+        </svg>
+      </button>
     );
   };
 
@@ -2621,7 +2902,8 @@ export function AppShell() {
         aria-label={rightPanelOpen ? translate("files.hidePanel") : translate("files.showPanel")}
         data-mobile-toolbar-file={mobile ? "true" : undefined}
         style={{
-          marginLeft: !mobile && !sessionStats && !contextUsage ? "auto" : 0,
+          // With a chat the Debug button is right-aligned instead (renderDebugButton).
+          marginLeft: !mobile && !showChat ? "auto" : 0,
           display: "flex", alignItems: "center", justifyContent: "center",
           width: TOP_BAR_ICON_BUTTON_SIZE, height: TOP_BAR_ICON_BUTTON_SIZE, padding: 0,
           visibility: covered ? "hidden" : "visible",
@@ -2852,8 +3134,8 @@ export function AppShell() {
                 <button
                   type="button"
                   onClick={handleMobileToolbarMoreToggle}
-                  title={mobileToolbarMoreOpen ? translate("chat.close") : translate("chat.moreControls")}
-                  aria-label={mobileToolbarMoreOpen ? translate("chat.close") : translate("chat.moreControls")}
+                  title={moreControlsLabel}
+                  aria-label={moreControlsLabel}
                   aria-controls="mobile-toolbar-actions"
                   aria-expanded={mobileToolbarMoreOpen}
                   data-mobile-toolbar-more="true"
@@ -2877,9 +3159,11 @@ export function AppShell() {
                       <circle cx="5" cy="12" r="1.5" /><circle cx="12" cy="12" r="1.5" /><circle cx="19" cy="12" r="1.5" />
                     </svg>
                   )}
+                  {foldedMoreAgentsBadge && renderAgentsBadge(foldedMoreAgentsBadge, true)}
                 </button>
               )}
               {!isNarrowMobile && renderChatToolbarActions(true)}
+              {!isNarrowMobile && renderDebugButton(true)}
               {renderSessionStatsButton(true)}
               {renderMainFileToggle(true)}
               {isNarrowMobile && mobileToolbarMoreOpen && (
@@ -2897,12 +3181,17 @@ export function AppShell() {
                     zIndex: 20,
                     display: "flex",
                     alignItems: "stretch",
+                    // More buttons than a 320px phone fits (the Debug button made seven): scroll, never clip.
+                    overflowX: "auto",
+                    overflowY: "hidden",
+                    scrollbarWidth: "none",
                     background: "color-mix(in srgb, var(--bg-panel) 94%, var(--bg))",
                     boxShadow: "4px 0 18px rgba(0,0,0,0.12)",
                     backdropFilter: "blur(10px)",
                   }}
                 >
                   {renderChatToolbarActions(true)}
+                  {renderDebugButton(true)}
                 </div>
               )}
             </div>
@@ -2911,6 +3200,7 @@ export function AppShell() {
             <>
               {renderProjectTrustWarning(false)}
               {renderChatToolbarActions(false)}
+              {renderDebugButton(false)}
               {renderSessionStatsButton(false)}
             </>
           )}
@@ -2948,6 +3238,8 @@ export function AppShell() {
                   selectedSessionId={selectedSession.id}
                   runningSessionIds={runningSessionIds}
                   onSelectSession={handleSelectSession}
+                  openSubagentTabIds={openSubagentTabIds}
+                  onToggleSubagentTab={handleToggleSubagentTab}
                 />
               )}
               {activeTopPanel === "system" && (
@@ -2972,23 +3264,13 @@ export function AppShell() {
                   padding: "12px 16px",
                 }}>
                   {sessionStats ? (() => {
-                    const formatDuration = (ms: number) => {
-                      if (ms <= 0) return "0s";
-                      const totalSec = Math.floor(ms / 1000);
-                      const h = Math.floor(totalSec / 3600);
-                      const m = Math.floor((totalSec % 3600) / 60);
-                      const s = totalSec % 60;
-                      if (h > 0) return `${h}h ${m}m`;
-                      if (m > 0) return `${m}m ${s}s`;
-                      return `${s}s`;
-                    };
                     const totalActiveMs = sessionStats.totalActiveMs ?? 0;
                     const ws = selectedSession;
                     const sessionRows = [
                        ...(sessionStats.sessionName ? [{ label: translate("session.name"), value: sessionStats.sessionName, copyField: null }] : []),
                        { label: translate("session.file"), value: sessionStats.sessionFile ?? translate("session.inMemory"), copyField: "file" as const },
                        { label: translate("session.id"), value: sessionStats.sessionId, copyField: "id" as const },
-                       ...(totalActiveMs > 0 ? [{ label: translate("session.totalActive"), value: formatDuration(totalActiveMs), copyField: null }] : []),
+                       ...(totalActiveMs > 0 ? [{ label: translate("session.totalActive"), value: formatActiveDuration(totalActiveMs), copyField: null }] : []),
                     ];
                     const projectRows = [
                       ...(ws ? [{ label: translate("session.projectDir"), value: ws.projectRoot ?? ws.cwd, copyField: "projectDir" as const }] : []),
@@ -3010,10 +3292,9 @@ export function AppShell() {
                        [translate("session.total"), sessionStats.tokens.total.toLocaleString(locale)],
                     ];
                     const ctx = contextUsage ?? sessionStats.contextUsage;
-                    const formatCompact = (n: number) => n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${(n / 1000).toFixed(0)}k` : String(n);
                     const extraTokenRows = [
                        ...(sessionStats.cost > 0 ? [[translate("session.cost"), `$${sessionStats.cost.toFixed(4)}`]] : []),
-                       ...(ctx?.contextWindow ? [[translate("session.context"), `${ctx.percent !== null ? `${ctx.percent.toFixed(1)}%` : "?"} / ${formatCompact(ctx.contextWindow)}`]] : []),
+                       ...(ctx?.contextWindow ? [[translate("session.context"), `${ctx.percent !== null ? `${ctx.percent.toFixed(1)}%` : "?"} / ${formatCompactCount(ctx.contextWindow)}`]] : []),
                        // Cache hit rate = cache reads / (input + cache writes + cache reads) — the denominator covers all input-class tokens.
                        ...(sessionStats.tokens.cacheRead + sessionStats.tokens.cacheWrite > 0 && sessionStats.tokens.cacheRead + sessionStats.tokens.cacheWrite + sessionStats.tokens.input > 0
                          ? [[translate("session.cacheHitRate"), `${(sessionStats.tokens.cacheRead / (sessionStats.tokens.cacheRead + sessionStats.tokens.cacheWrite + sessionStats.tokens.input) * 100).toFixed(1)}%`]]
@@ -3168,7 +3449,18 @@ export function AppShell() {
                        {translate("session.load")}
                     </div>
                   )}
+                  <MachineLoadSection translate={translate} />
                 </div>
+              )}
+              {activeTopPanel === "debug" && (
+                <DebugPanelBoundary fallback={translate("debug.failed")}>
+                  <DebugPanel
+                    readerRef={debugSnapshotReaderRef}
+                    selectedSessionId={selectedSession?.id ?? null}
+                    sessions={sessionsWithSelection}
+                    onClose={closeDebugPanel}
+                  />
+                </DebugPanelBoundary>
               )}
             </div>
           )}
@@ -3248,6 +3540,7 @@ export function AppShell() {
                       sessionRunning={false}
                       chatInputRef={getPaneChatInputRef(NEW_SESSION_TAB_ID)}
                       onSessionCreated={handleSessionCreated}
+                      onOpenSettings={openSettingsSection}
                     />
                   );
                 }
@@ -3270,13 +3563,28 @@ export function AppShell() {
                     // always the focused pane, never an unfocused one.
                     onSessionStatsChange={focused ? handleSessionStatsChange : undefined}
                     onContextUsageChange={focused ? handleContextUsageChange : undefined}
+                    // every pane follows the key, only the focused
+                    // one fetches on it and reports whether it offers the ↻.
+                    manualFetchKey={manualFetchKey}
+                    onManualFetchStateChange={focused ? setManualFetchState : undefined}
                     // pi#28: every pane feeds its own background-task events;
                     // handleBackgroundTasksEvent filters by the session the
                     // panel currently follows. Terminal notifications stay
                     // session-wide, so tasks finishing in an unfocused pane
                     // still notify (pane focus only gates panel state).
                     onBackgroundTasksEvent={(event) => handleBackgroundTasksEvent(sid, event)}
-                    onAgentEnd={() => {
+                    // Split view is the default layout, so local-file markdown
+                    // links must reach the same viewer as the classic window;
+                    // without this they render target=_blank and open a bare
+                    // popup. Authorize against THIS pane's
+                    // session: pane focus never updates selectedSession, so
+                    // handleOpenLinkedFile would tag a non-selected pane's
+                    // link with another session's id (403 outside the roots).
+                    onOpenFile={getPaneOpenFileHandler(sid)}
+                    onOpenSettings={openSettingsSection}
+                    onAgentEnd={(end) => {
+                      // A stopped run did not finish anything: no badge, no chime.
+                      if (end.aborted) return;
                       if (sid !== focusedPaneId) {
                         setPaneTabs((prev) => setCompletionBadge(prev, sid));
                         const now = Date.now();
@@ -3313,13 +3621,17 @@ export function AppShell() {
               onSystemPromptChange={handleSystemPromptChange}
               onSystemToolsChange={handleSystemToolsChange}
               onSystemInfoLoaderChange={handleSystemInfoLoaderChange}
+              onDebugSnapshotReaderChange={handleDebugSnapshotReaderChange}
               onSessionStatsChange={handleSessionStatsChange}
               onSessionStatsPanelOpen={openSessionStatsPanel}
+              onOpenSettings={openSettingsSection}
               onContextUsageChange={handleContextUsageChange}
               externalSessionChange={externalSessionChange}
+              manualFetchKey={manualFetchKey}
+              onManualFetchStateChange={setManualFetchState}
               onOpenFile={handleOpenLinkedFile}
               onFilesUploaded={handleExplorerRefresh}
-              onOpenSession={handleOpenSession}
+              onOpenSubagent={handleOpenSubagentTab}
               onAskInNewChat={handleAskInNewChat}
               quoteSelectionEnabled={quoteSelectionEnabled}
               initialPrompt={pendingQuotePrompt?.sessionId === selectedSession?.id ? pendingQuotePrompt?.text : undefined}
@@ -3463,6 +3775,8 @@ export function AppShell() {
                   <PolyforgePanel
                     opsStatus={pfOpsStatus}
                     opsError={pfOpsError}
+                    cards={pfCards}
+                    cardsError={pfCardsError}
                     watchStatus={pfWatchStatus}
                     selectedWi={pfSelectedWi}
                     onSelect={selectPolyforgeJob}
@@ -3470,8 +3784,13 @@ export function AppShell() {
                     onRefresh={refreshPolyforgeStatus}
                     activeTab={pfActiveTab}
                     onActiveTab={setPfActiveTab}
+                    workTab={pfWorkTab}
+                    onWorkTab={setPfWorkTab}
                     memoryCwd={projectTrustCwd}
                     messagesSurface={pfMessagesSurface}
+                    showPin={false}
+                    pinned={pfDockPinned}
+                    onTogglePin={togglePfDockPin}
                   />
                 </div>
               </>
@@ -3504,6 +3823,8 @@ export function AppShell() {
                 <PolyforgePanel
                   opsStatus={pfOpsStatus}
                   opsError={pfOpsError}
+                  cards={pfCards}
+                  cardsError={pfCardsError}
                   watchStatus={pfWatchStatus}
                   selectedWi={pfSelectedWi}
                   onSelect={selectPolyforgeJob}
@@ -3511,8 +3832,13 @@ export function AppShell() {
                   onRefresh={refreshPolyforgeStatus}
                   activeTab={pfActiveTab}
                   onActiveTab={setPfActiveTab}
+                  workTab={pfWorkTab}
+                  onWorkTab={setPfWorkTab}
                   memoryCwd={projectTrustCwd}
                   messagesSurface={pfMessagesSurface}
+                  showPin
+                  pinned={pfDockPinned}
+                  onTogglePin={togglePfDockPin}
                 />
               </div>
             )
@@ -3657,7 +3983,7 @@ export function AppShell() {
                 { sourceSessionId: activeFileTab.sourceSessionId, page },
               )}
             />
-          ) : !terminalTabs.some((tab) => tab.id === activeFileTabId) ? (
+          ) : !terminalTabs.some((tab) => tab.id === activeFileTabId) && !activeAgentTab ? (
             <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-dim)", fontSize: 12 }}>
                {translate("files.noneOpen")}
             </div>
@@ -3673,6 +3999,15 @@ export function AppShell() {
               />
             </div>
           ))}
+          {activeAgentTab && (
+            <SubagentViewer
+              key={activeAgentTab.sessionId}
+              sessionId={activeAgentTab.sessionId}
+              fallbackLabel={activeAgentTab.label}
+              running={runningSessionIds.has(activeAgentTab.sessionId)}
+              onOpenFile={handleOpenLinkedFile}
+            />
+          )}
         </div>
       </div>
     </div>
@@ -3688,6 +4023,9 @@ export function AppShell() {
           setModelsRefreshKey((key) => key + 1);
         }}
         onSessionReloaded={() => setSessionKey((key) => key + 1)}
+        projectTrust={projectTrust}
+        onOpenTrustDialog={openProjectTrustDialog}
+        onProjectTrustChanged={handleProjectTrustChanged}
       />
     )}
     {projectTrustDialogOpen && projectTrustCwd && (
@@ -3699,6 +4037,7 @@ export function AppShell() {
           if (!projectTrustBusy) setProjectTrustDialogOpen(false);
         }}
         onConfirm={() => void handleTrustProject()}
+        onStatus={setProjectTrust}
       />
     )}
     </>

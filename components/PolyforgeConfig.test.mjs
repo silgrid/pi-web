@@ -88,8 +88,11 @@ test("the section reuses the shared SettingsUi blocks and every word is a prop",
   assert.match(source, /t\("polyforge\.title"\)/);
 });
 
-test("the panel hosts the section without a project and re-detects on every open", () => {
-  assert.match(panelSource, /\{ id: "polyforge", label: t\("polyforge\.title"\), requiresProject: false \}/);
+test("the panel hosts the section without a project and re-detects on every open", async () => {
+  assert.match(panelSource, /\{ id: "polyforge", label: t\("polyforge\.title"\) \}/);
+  // Which sections need a project is decided in lib/settings-navigation.ts; polyforge is not one.
+  const { settingsSectionRequiresProject } = await import("../lib/settings-navigation.ts");
+  assert.equal(settingsSectionRequiresProject("polyforge"), false);
   assert.match(panelSource, /<PolyforgeConfig cwd=\{cwd\} active=\{section === "polyforge"\} \/>/);
   // Not cwd-gated: the section host renders without a selected project.
   const hostLine = panelSource.slice(panelSource.indexOf('sectionHost("polyforge"'));
@@ -192,42 +195,82 @@ test("items render in source cards with a title and a visible one-line hint", ()
   assert.match(source, /function isDaemonColumnKey\(key: string\): boolean \{\s*\n\s*return key === "max_concurrent_jobs" \|\| key === "step_timeout" \|\| key === "stall_window";/);
 });
 
-test("every row renders all five grid cells, never gated behind writable", () => {
+test("each card declares only its effective columns and the page shares one column system", () => {
   for (const label of ["configColKey", "configColClass", "configColFile", "configColDaemon"]) {
     assert.match(source, new RegExp(`t\\("polyforge\\.settings\\.${label}"\\)`), `grid header ${label}`);
   }
-  const row = source.slice(source.indexOf('className={`polyforge-config-row'), source.indexOf("</section>"));
-  const cells = ["polyforge-config-key", "polyforge-config-class", "polyforge-config-file", "polyforge-config-daemon", "polyforge-config-actions"];
+  // Only the daemon card declares the daemon column: no header and no cell in
+  // every other card (the #88 five-cells-in-every-row rule is reversed).
+  assert.match(source, /const hasDaemon = group\.id === "daemon";/);
+  assert.match(source, /className=\{`polyforge-config-grid/);
+  assert.match(source, /hasDaemon \? " has-daemon" : ""/);
+  assert.match(source, /\{hasDaemon && <span>\{t\("polyforge\.settings\.configColDaemon"\)\}<\/span>\}/);
+  assert.match(source, /const daemonCell = hasDaemon && isDaemonColumnKey\(item\.key\);/);
+  assert.match(source, /\{daemonCell && \(/, "the daemon cell is per group and per key");
+  assert.doesNotMatch(source, /<span className="polyforge-config-daemon">\s*\{isDaemonColumnKey/, "no unconditional daemon placeholder cell");
+  // The row still renders key | class | value unconditionally, in that column
+  // order, so no cell collapses when a row is read-only (the #88 intent kept).
+  // Only the daemon cell may be conditional, and only behind daemonCell.
+  const row = source.slice(source.indexOf("<div key={item.key} className={`polyforge-config-row"), source.indexOf("</div>", source.indexOf("<div key={item.key} className={`polyforge-config-row")));
   let at = 0;
-  for (const cell of cells) {
+  for (const cell of ["polyforge-config-key", "polyforge-config-class", "polyforge-config-file"]) {
     const index = row.indexOf(`<span className="${cell}">`, at);
     assert.ok(index > at, `${cell} renders unconditionally, in column order`);
-    // The line opening the cell is the cell itself, not a `cond && (` wrapper.
+    // The line opening the cell is the cell itself, not a `cond && (` wrapper,
+    // and no conditional opens on an earlier line either.
     const before = row.slice(row.lastIndexOf("\n", index), index);
     assert.match(before, /^\n\s*$/, `${cell} is not wrapped in a condition`);
+    assert.doesNotMatch(row.slice(0, index), /&&\s*\(/, `${cell} is not behind a condition`);
     at = index;
   }
-  assert.match(source, /<span className="polyforge-config-badge">\{item\.class\}<\/span>/, "the reload class is a badge");
-  assert.match(source, /<span className="polyforge-config-empty">\{unset\}<\/span>/, "unset values show the placeholder");
+  assert.match(source, /<span className="polyforge-config-badge" title=\{item\.class\}>\{reloadClassLabel\(item\.class\)\}<\/span>/, "the reload class is a localized badge");
   assert.match(source, /const unset = t\("polyforge\.settings\.configUnset"\)/);
+  // renderValue still renders the unset placeholder for unset file values and
+  // empty project/model lists; the WI removed only the whole-column daemon one.
+  assert.match(source, /<span className="polyforge-config-empty">\{unset\}<\/span>/, "unset values show the placeholder");
   assert.match(source, /is-readonly/, "read-only rows are muted");
+});
+
+test("the Save action sits beside its input, and model lists render as chips", () => {
+  // The write control and the Save button share one cell; the old far-right
+  // actions column is gone.
+  assert.match(source, /<span className="polyforge-config-write">\s*\n\s*<input/, "the input opens the write cell");
+  assert.match(source, /<span className="polyforge-config-write-row">/);
+  assert.match(source, /<ConfigButton size="small" disabled=\{writeBusy !== null\} onClick=\{\(\) => void save\(item\)\}>/);
+  assert.doesNotMatch(source, /polyforge-config-actions/);
+  // summarize.models is a chip list with an add input, never String(array).
+  assert.match(source, /function isModelListKey\(item: PolyforgeConfigItem\): boolean \{/);
+  assert.match(source, /kind === "model-list" \|\| item\.key === "summarize\.models"/);
+  assert.match(source, /<span className="polyforge-config-chip-label">\{model\}<\/span>/);
+  assert.match(source, /polyforge\.settings\.configAddModel/);
+  assert.match(source, /polyforge\.settings\.configRemoveModel/);
+  // The save path still hands a comma string to formValue, which splits it.
+  assert.match(source, /isModelListKey\(item\)\s*\n\s*\? \[/);
+  assert.match(source, /\.join\(","\)/);
 });
 
 test("a workspace row shows the path and project chips, never the raw TOML header", () => {
   assert.match(source, /workspaceSectionPath\(item\.key\)/);
   assert.match(source, /shortenPath\(workspacePath\)/);
-  assert.match(source, /workspaceProjects\(item\.value\)\.map\(\(project\) =>/);
+  assert.match(source, /const projects = workspaceProjects\(item\.value\);/);
+  assert.match(source, /\{projects\.map\(\(project\) =>/);
   assert.match(source, /<span key=\{project\} className="polyforge-config-chip">\{project\}<\/span>/);
   assert.match(source, /aria-label=\{t\("polyforge\.settings\.configProjects"\)\}/);
   // The raw key renders only when the header did not parse (a visible degradation).
   assert.match(source, /workspacePath !== null\s*\n\s*\? <span className="polyforge-config-workspace-path">/);
 });
 
-test("the grid CSS aligns rows by subgrid and stacks on phones", async () => {
+test("the grid CSS shares fixed tracks and stacks on phones", async () => {
   const css = await readFile(new URL("../app/settings.css", import.meta.url), "utf8");
-  for (const cls of ["polyforge-config-card", "polyforge-config-grid", "polyforge-config-badge", "polyforge-config-empty", "polyforge-config-chips", "polyforge-config-chip", "polyforge-config-workspace-path"]) {
+  for (const cls of ["polyforge-config-card", "polyforge-config-grid", "polyforge-config-badge", "polyforge-config-empty", "polyforge-config-chips", "polyforge-config-chip", "polyforge-config-write", "polyforge-config-workspace-path"]) {
     assert.match(css, new RegExp(`\\.${cls}\\b`), `${cls} is styled`);
   }
+  // Page-level shared tracks: key/class are fixed, so the value column starts
+  // at the same x in every card regardless of a daemon column.
+  assert.match(css, /--polyforge-col-key: \d+px;/);
+  assert.match(css, /--polyforge-col-class: \d+px;/);
+  assert.match(css, /\.polyforge-config-grid \{[^}]*grid-template-columns: var\(--polyforge-col-key\) var\(--polyforge-col-class\) var\(--polyforge-col-value\);/);
+  assert.match(css, /\.polyforge-config-grid\.has-daemon \{[^}]*var\(--polyforge-col-daemon\);/);
   assert.match(css, /\.polyforge-config-row \{[^}]*grid-template-columns: subgrid;/);
   assert.match(css, /@media \(max-width: 640px\) \{[^@]*\.polyforge-config-grid-header \{ display: none; \}/);
 });
@@ -239,6 +282,8 @@ test("the card, column and placeholder strings exist in all three locales", asyn
       "configGroupFlat", "configGroupFlatHint", "configGroupDaemon", "configGroupDaemonHint",
       "configGroupWorkspace", "configGroupWorkspaceHint", "configGroupSummarize", "configGroupSummarizeHint",
       "configColKey", "configColClass", "configColFile", "configColDaemon", "configUnset", "configProjects",
+      "configStatusTitle", "configPackageHint", "configLegend", "configModels", "configAddModel", "configRemoveModel",
+      "classRestartOnly", "classCliOnly", "classLive", "classNextClaim", "classUnknown",
     ]) {
       assert.match(text, new RegExp(`"polyforge\\.settings\\.${key}": "`), `${locale} must carry ${key}`);
     }
@@ -270,5 +315,33 @@ test("candidate group CSS and strings in all three locales", async () => {
       assert.match(text, new RegExp(`"polyforge\\.settings\\.${key}": "`), `${locale} must carry ${key}`);
     }
     assert.match(text, /"polyforge\.settings\.configCandidateCount": "[^"]*\{count\}/, `${locale}'s count interpolates {count}`);
+  }
+});
+
+test("exactly two browser-stored numeric controls, built from the shared blocks, with no server write", () => {
+  const start = source.indexOf("function PanelPreferenceRow(");
+  const row = source.slice(start, source.indexOf("export function PolyforgeConfig("));
+  assert.ok(start >= 0, "the preference row exists");
+  assert.match(row, /<ConfigDetailGridRow label=\{label\} tone="plain">/, "a shared grid row");
+  assert.match(row, /type="number"/);
+  assert.match(row, /min=\{spec\.min\}\s*max=\{spec\.max\}/, "the input declares the bounds");
+  assert.match(row, /<ConfigButton size="small" onClick=\{save\}>\{saveLabel\}<\/ConfigButton>/, "Save sits right after its input");
+  assert.match(row, /writePolyforgePreference\(spec, draft \?\? value\);/, "the save clamps and stores through the preferences module");
+  assert.match(row, /className="config-scope-switch-reason">\{hint\}</, "a visible hint, not a tooltip");
+  assert.doesNotMatch(row, /fetch\(|\/api\//, "no request: browser storage only");
+  const section = source.slice(source.indexOf("polyforge-config-cards"), source.indexOf("polyforge-config-package"));
+  assert.equal((section.match(/<PanelPreferenceRow/g) ?? []).length, 2, "exactly the two new controls");
+  assert.match(section, /spec=\{POLYFORGE_TITLE_LENGTH\}/);
+  assert.match(section, /spec=\{POLYFORGE_POLL_INTERVAL\}/);
+  assert.doesNotMatch(section, /detect/, "the card does not depend on pf detection");
+  assert.match(source, /const \{ titleLength, pollIntervalSec \} = usePolyforgePanelPreferences\(\);/, "the inputs show the stored (clamped) values");
+});
+
+test("the card-preference strings exist in all three locales", async () => {
+  for (const locale of ["en", "zh-CN", "zh-TW"]) {
+    const text = await readFile(new URL(`../lib/i18n/messages/${locale}.ts`, import.meta.url), "utf8");
+    for (const key of ["cardsTitle", "cardsHint", "cardsTitleLength", "cardsTitleLengthHint", "cardsPollInterval", "cardsPollIntervalHint"]) {
+      assert.match(text, new RegExp(`"polyforge\\.settings\\.${key}": "\\S`), `${locale} must carry ${key}`);
+    }
   }
 });

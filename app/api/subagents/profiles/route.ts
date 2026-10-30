@@ -86,6 +86,7 @@ export async function PATCH(req: Request) {
       loadSkills: source.loadSkills,
       ...(source.skills !== undefined ? { skills: [...source.skills] } : {}),
       loadExtensions: source.loadExtensions,
+      ...(source.extensions !== undefined ? { extensions: [...source.extensions] } : {}),
       codemode: source.codemode,
       mcp: source.mcp,
       promptMode: source.promptMode,

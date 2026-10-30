@@ -70,3 +70,4 @@ test("keeps the name list for a directory outside Git", async () => {
 
   assert.deepEqual(await listNames(plain), ["src"]);
 });
+

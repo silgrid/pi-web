@@ -13,6 +13,7 @@ import {
   getCompletionNotificationSuppressedRpcSessionIds,
   getRpcSessionInfos,
   getRunningRpcSessionIds,
+  withSubagentDisplayStatus,
 } from "@/lib/rpc-manager";
 import { startServerPerf } from "@/lib/perf";
 
@@ -39,7 +40,7 @@ export async function GET(req: Request) {
     perf?.span("scan+projects");
     // Trim at the RESPONSE layer only — the reader's view cache and the
     // detail endpoint keep full text.
-    const sessions = trimSessionListFirstMessages(mergeSessionLists(persistedSessions, runtimeSessions));
+    const sessions = withSubagentDisplayStatus(trimSessionListFirstMessages(mergeSessionLists(persistedSessions, runtimeSessions)));
     return perf?.attach(jsonResponse(
       req,
       {

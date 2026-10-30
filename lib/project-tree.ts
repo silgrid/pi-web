@@ -1,5 +1,6 @@
 import type { BranchPreview } from "@/lib/types";
 import { isRecord } from "./type-guards";
+import { withoutMessageSignatures } from "./message-signatures";
 
 // BranchNavigator still traverses recursively, so keep the response tree shallow.
 export const MAX_PROJECTED_TREE_DEPTH = 200;
@@ -159,12 +160,18 @@ export function projectTreeForResponse<T extends ProjectableTreeNode<T>>(
     }
   }
 
-  const cloneNode = (node: T, compressedEntryIds?: string[], branchPreview?: BranchPreview): T => ({
-    ...node,
-    children: [],
-    ...(compressedEntryIds?.length ? { compressedEntryIds } : {}),
-    ...(branchPreview ? { branchPreview } : {}),
-  });
+  const cloneNode = (node: T, compressedEntryIds?: string[], branchPreview?: BranchPreview): T => {
+    const message = node.entry.type === "message"
+      ? withoutMessageSignatures(node.entry.message)
+      : node.entry.message;
+    return {
+      ...node,
+      entry: message === node.entry.message ? node.entry : { ...node.entry, message },
+      children: [],
+      ...(compressedEntryIds?.length ? { compressedEntryIds } : {}),
+      ...(branchPreview ? { branchPreview } : {}),
+    };
+  };
   const projectedRoots = nodes.map((node) => cloneNode(node, undefined, previewForEntry(node.entry)));
   const tasks = nodes.map((source, index) => ({
     source,

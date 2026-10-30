@@ -366,7 +366,11 @@ try {
       // DOM between commit and compensation, so poll until the anchor settles
       // instead of measuring once (CI flake, pi#56).
       let anchoredOffset = null;
-      const settleDeadline = Date.now() + 4000;
+      // Same load-dependent wait: the prepend's passive-effect compensation
+      // can be scheduled well after the DOM commit when the default pool
+      // shares the host with other suites. Poll the real condition longer;
+      // the accepted offset window is unchanged.
+      const settleDeadline = Date.now() + 15_000;
       while (Date.now() < settleDeadline) {
         anchoredOffset = await entryViewportOffset(before.firstRenderedEntryId);
         if (anchoredOffset !== null && anchoredOffset >= 0 && anchoredOffset <= 96) break;

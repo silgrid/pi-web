@@ -17,6 +17,17 @@ export const POLYFORGE_DOCK_DEFAULT_WIDTH = 460;
 export const POLYFORGE_DOCK_MIN_WIDTH = 340;
 export const POLYFORGE_DOCK_MAX_WIDTH = 6912;
 
+/** The one block treatment of the Polyforge Work tab: the
+ *  job card and the task block share it. Existing CSS variables only; the
+ *  spacing between blocks is the container's `gap`. */
+export const POLYFORGE_BLOCK_STYLE = {
+  background: "none",
+  border: "1px solid var(--border)",
+  borderRadius: 6,
+  padding: "8px 10px",
+  boxSizing: "border-box",
+} as const;
+
 export function getPolyforgeDockMaxWidth(viewportWidth: number): number {
   return Math.round(viewportWidth * 0.9);
 }

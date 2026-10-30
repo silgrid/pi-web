@@ -6,8 +6,8 @@ import vm from "node:vm";
 import { createJiti } from "jiti";
 
 const source = await readFile(new URL("./AppShell.tsx", import.meta.url), "utf8");
-const jiti = createJiti(import.meta.url);
-const draftStore = await jiti.import("../lib/draft-store.ts");
+const jiti = createJiti(import.meta.url, { tsconfigPaths: true });
+const draftStore = await jiti.import("@/lib/draft-store");
 
 function callbackBody(name, nextName) {
   const start = source.indexOf(`const ${name} = useCallback`);
@@ -79,6 +79,7 @@ test("New restores the draft after session navigation and workspace auto-restore
         ...draftStore,
         crypto: globalThis.crypto,
         queueMicrotask,
+        requestAnimationFrame: () => {},
         URLSearchParams,
         window: { location: { pathname: "/", search: "" } },
         router: { replace() {} },
@@ -96,6 +97,8 @@ test("New restores the draft after session navigation and workspace auto-restore
         branchLeafChangeFnRef: { current: null },
         liveFollowFrameRef: { current: null },
         bashRecoveryIdRef: { current: 0 },
+        chatInputRef: { current: null },
+        newSessionBarFocusRef: { current: null },
         cancelEventStreamGrace() {},
         closeEvents() {},
         changeFileWorkspace() {},
@@ -148,6 +151,7 @@ test("New restores the draft after session navigation and workspace auto-restore
         const getSessionViewSnapshot = () => null;
         const setSessionViewSnapshot = () => false;
         const deleteSessionViewSnapshot = () => {};
+        const releaseUnconfirmedSendRef = { current() {} };
         ${hookSource.slice(cleanupStart, cleanupEnd)}
       })`), context);
       let mountedKey = context.sessionKey;

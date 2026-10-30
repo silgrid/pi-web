@@ -1,7 +1,8 @@
 // pi#114 (wi_fnV3SUypLyIN) — Polyforge step list as a flow graph. Authored
 // pre-code against artifacts/spec.md (new-behaviour acceptance criteria only);
 // standalone like e2e/polyforge.mjs (own dev server, stub `pf` on PATH). A NODE is
-// an element whose aria-label carries its visible text and a step status label; a
+// an element whose aria-label carries its visible name (the node's own text, not
+// the visible status label it also shows since) and a step status label; a
 // sequence EDGE is any visible element/text (or ::after/::before connector) between
 // DOM-consecutive nodes; a rewind EDGE is a dashed-styled element (border, outline,
 // stroke-dasharray or a ⇢-style glyph) naming gate then target. Any FAIL exits 1.
@@ -147,7 +148,10 @@ async function openPage({ viewport = { width: 1280, height: 800 }, mode, reduced
   const page = await context.newPage(); page.setDefaultTimeout(10_000); page.on("pageerror", (error) => errors.push(error.message));
   page.on("console", (event) => { if (event.type() === "error") errors.push(event.text()); });
   page.on("response", (r) => { if (r.url().startsWith(base) && r.status() >= 500) errors.push(`${r.status()} ${r.url()}`); });
-  await page.goto(`${base}/?session=${SESSION}`, { waitUntil: "domcontentloaded" });
+  // Navigation headroom only: the host is shared and other capsules' e2e
+  // servers routinely push a cold page load past this page's 10s action
+  // timeout. Assertions below still use the 10s default.
+  await page.goto(`${base}/?session=${SESSION}`, { waitUntil: "domcontentloaded", timeout: 60_000 });
   await page.getByText("E2E polyforge graph host session").first().waitFor({ state: "attached", timeout: 60_000 });
   return page;
 }
@@ -162,7 +166,10 @@ async function select(page, slug) {
     if ((await panel.getByText(marker(slug)).count()) > 0) { await delay(300); return panel; }
     if ((await panel.getByText(slug, { exact: true }).count()) === 0) { await delay(500); continue; }
     await panel.getByText(slug, { exact: true }).first().click().catch(() => {});
-    await delay(700);
+    // Wait for the watch read to land instead of a fixed 700ms: under the
+    // default pool the detail can take longer than that, and an early retry
+    // toggles the row again. The assertions are unchanged.
+    await panel.getByText(marker(slug)).first().waitFor({ timeout: 5_000 }).catch(() => {});
   }
   throw new Error(`the ${slug} detail did not render`);
 }
@@ -172,7 +179,10 @@ const STATUS_LABELS = ["Done", "In progress", "Pending", "Failed", "Blocked", "C
 const readGraph = (panel) => panel.first().evaluate((root, labels) => {
   const rgb = (c) => { const m = /rgba?\(\s*(\d+)[,\s]+(\d+)[,\s]+(\d+)(?:\s*[,/]\s*([\d.]+))?/.exec(String(c)); return m && (m[4] === undefined || Number(m[4]) > 0) ? `${m[1]},${m[2]},${m[3]}` : null; };
   const resolve = (v) => { const p = document.createElement("span"); p.style.color = v; root.appendChild(p); const c = rgb(getComputedStyle(p).color); p.remove(); return c; };
-  const all = [...root.querySelectorAll("[aria-label][title]")].filter((el) => { const aria = el.getAttribute("aria-label"); const text = (el.textContent || "").trim();
+  // a node also shows its status label as a child element, so
+  // its name is its own text nodes only.
+  const ownText = (el) => [...el.childNodes].filter((n) => n.nodeType === 3).map((n) => n.textContent).join("").trim();
+  const all = [...root.querySelectorAll("[aria-label][title]")].filter((el) => { const aria = el.getAttribute("aria-label"); const text = ownText(el);
     return !!text && aria.includes(text.replace(/…$/, "")) && labels.some((l) => aria.includes(l)); });
   const nodes = all.filter((el) => !all.some((o) => o !== el && o.contains(el)));
   const colorsOf = (el) => {
@@ -211,7 +221,7 @@ const readGraph = (panel) => panel.first().evaluate((root, labels) => {
   for (let e = nodes[0]?.parentElement; e && root.contains(e); e = e.parentElement) hscroll ||= e.scrollWidth > e.clientWidth + 1 && ["auto", "scroll"].includes(getComputedStyle(e).overflowX);
   const pr = root.getBoundingClientRect();
   return {
-    nodes: nodes.map((n) => { const r = n.getBoundingClientRect(); return { text: n.textContent.trim(), aria: n.getAttribute("aria-label"), title: n.getAttribute("title"),
+    nodes: nodes.map((n) => { const r = n.getBoundingClientRect(); return { text: ownText(n), aria: n.getAttribute("aria-label"), title: n.getAttribute("title"),
       colors: colorsOf(n), animated: animated(n), inside: r.left >= pr.left - 1 && r.right <= pr.right + 1, top: r.top, left: r.left }; }),
     edges: nodes.slice(1).map((b, i) => between(nodes[i], b)),
     dashed, rowCount: rows.length, hscroll, accent: resolve("var(--accent)") };
@@ -227,8 +237,14 @@ function assertWraps(g) {
 const requireNodes = (g, n) => assert.ok(g.nodes.length >= n, `graph shows ${g.nodes.length} nodes (${JSON.stringify(names(g))}), want ${n}`);
 // Step chips (the pre-graph display removed in pi#116): any element whose text
 // is name + status label; must count 0 in every mode — the nodes are the only
-// step display.
+// step display. the graph node itself shows name + status (the
+// owner-approved visible label), so a node, an element inside it, or a
+// wrapper holding nothing but that one node is not a chip.
 const chipCount = (panel, steps) => panel.first().evaluate((root, steps) => steps.filter(([name, label]) => [...root.querySelectorAll("*")].some((e) => {
+  const NODE = '[role="listitem"][aria-label][title]';
+  if (e.closest(NODE)) return false;
+  const inner = e.querySelectorAll(NODE);
+  if (inner.length === 1 && (e.textContent || "").trim() === (inner[0].textContent || "").trim()) return false;
   const t = (e.textContent || "").replace(/\s+/g, "");
   return t.startsWith(name) && t.includes(label.replace(/\s+/g, ""), name.length) && t.length <= name.length + label.length + 4;
 })).length, steps);
@@ -351,13 +367,29 @@ try {
       // Synchronize just after a watch poll: the next one is ~3s away.
       await page.waitForRequest((r) => new URL(r.url()).pathname === "/api/polyforge/watch", { timeout: 9000 });
       const t0 = Date.now(); await delay(300);
-      for (const n of g.nodes) await panel.getByText(n.text, { exact: true }).first().click({ timeout: 2000 });
+      for (const n of g.nodes) await panel.getByRole("listitem", { name: n.aria, exact: true }).first().click({ timeout: 2000 });
       await delay(Math.max(0, 2500 - (Date.now() - t0)));
-      // Owner-authorized amendment (Q 114-code-g11-running-poll-conflict):
-      // exclude the sidebar's background GET /api/agent/running poll
-      // (RUNNING_SESSIONS_POLL_MS=2500ms); PROBE_CLICK=0 showed an identical
-      // request signature with zero clicks. Any click-caused request still fails.
-      const early = hits.filter((h) => h.t > t0 + 250 && h.t < t0 + 2500 && h.path !== "/api/polyforge/status" && h.path !== "/api/agent/running");
+      // Background reads that are not click-caused:
+      // - GET /api/agent/running (sidebar poll, RUNNING_SESSIONS_POLL_MS).
+      //   Owner-authorized amendment Q 114-code-g11-running-poll-conflict:
+      //   PROBE_CLICK=0 showed an identical request signature with zero clicks.
+      // - GET /api/polyforge/status and /api/polyforge/messages (dock's own
+      //   OPEN_STATUS_POLL_MS interval). The messages read was added here in
+      // on code evidence: hooks/usePolyforge.ts reads it on
+      //   mount and every 3s, and otherwise only on send or a Messages-tab
+      //   switch — never on a graph-node click. It was not PROBE_CLICK-probed
+      //   and needs no owner ruling. reached the same exclusion
+      //   independently (owner answer):
+      //   that poll's own 3s timer, started at dock open, drifts against the
+      //   watch poll.
+      // - GET /api/polyforge/cards: the open Jobs tab's card
+      //   stream polls on its own browser-stored interval (default 3s),
+      //   started at dock open, so it drifts against the watch poll like
+      //   the messages read. Its effect depends only on dock-open, active
+      //   tab and interval (hooks/usePolyforge.ts), never on a node click.
+      // Any other request still fails.
+      const background = new Set(["/api/polyforge/status", "/api/agent/running", "/api/polyforge/messages", "/api/polyforge/cards"]);
+      const early = hits.filter((h) => h.t > t0 + 250 && h.t < t0 + 2500 && !background.has(h.path));
       assert.deepEqual(early, [], `clicking nodes issued ${JSON.stringify(early)}`);
       assert.equal(page.url(), url, "clicking a node navigated");
       assert.ok((await panel.getByText(marker("pi#209")).count()) > 0 && (await panel.locator("[title]").count()) === titled, "clicking a node changed the detail or filtered the tail");

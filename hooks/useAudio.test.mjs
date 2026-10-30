@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test, { mock } from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { createJiti } from "jiti";
 
 // The hook runs against a stand-in for React's hooks, mocked timers and a fake
@@ -8,7 +8,7 @@ import { createJiti } from "jiti";
 // lifecycle between chimes can be played out without a browser.
 const shimPath = fileURLToPath(new URL("./__fixtures__/react-hook-shim.mjs", import.meta.url));
 const jiti = createJiti(import.meta.url, { tsconfigPaths: true, alias: { react: shimPath } });
-const { renderHook } = await import(shimPath);
+const { renderHook } = await import(pathToFileURL(shimPath).href);
 const { AUDIO_IDLE_SUSPEND_MS, AUDIO_STALE_CHIME_MS, useAudio } = await jiti.import("./useAudio.ts");
 
 const node = () => ({ connect() {}, start() {}, stop() {}, frequency: {}, gain: { setValueAtTime() {}, linearRampToValueAtTime() {}, exponentialRampToValueAtTime() {} } });
@@ -278,4 +278,16 @@ test("a chime the browser held back for longer than AUDIO_STALE_CHIME_MS is drop
   mock.timers.tick(AUDIO_STALE_CHIME_MS);
   await resolveResumes(ctx);
   assert.equal(ctx.tones, 2, "a resume within the limit still plays");
+});
+
+test("blocked storage leaves sound on, and the toggle still applies to the page", () => {
+  Object.defineProperty(globalThis, "localStorage", {
+    configurable: true,
+    get() { throw new DOMException("blocked", "SecurityError"); },
+  });
+  const view = renderHook(() => useAudio());
+  assert.equal(view.result.soundEnabled, true, "sound stays on when storage cannot be read");
+  view.result.onSoundToggle();
+  view.flush();
+  assert.equal(view.result.soundEnabled, false, "the toggle applies though it cannot be saved");
 });

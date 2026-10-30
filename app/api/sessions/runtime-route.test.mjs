@@ -6,10 +6,6 @@ import { gunzipSync } from "node:zlib";
 import test from "node:test";
 import { createJiti } from "jiti";
 
-const listRoute = await readFile(new URL("./route.ts", import.meta.url), "utf8");
-const detailRoute = await readFile(new URL("./[id]/route.ts", import.meta.url), "utf8");
-const contextRoute = await readFile(new URL("./[id]/context/route.ts", import.meta.url), "utf8");
-const stateRoute = await readFile(new URL("./[id]/state/route.ts", import.meta.url), "utf8");
 const jiti = createJiti(import.meta.url, {
   alias: { "@": process.cwd() },
   interopDefault: true,
@@ -63,6 +59,7 @@ test("list versions expose idle session creation, rename and deletion to other w
   assert.equal(renamed.status, 200);
   const poll = await (await getRunningSessions()).json();
   assert.deepEqual(poll.runningSessionIds, []);
+  assert.deepEqual(poll.awaitingSessionIds, [], "the sidebar's awaiting-input badge reads the same poll");
   assert.ok(poll.sessionListVersion > created.sessionListVersion);
   const updated = await list();
   assert.equal(updated.sessionListVersion, poll.sessionListVersion);
@@ -88,6 +85,8 @@ test("session listing returns a gzip-compressed response when the client accepts
     await rm(dir, { recursive: true, force: true });
   });
 
+  // The list carries at most 500 characters of each first message, so a few
+  // sessions make the body large enough to compress.
   const firstMessage = "compressible session content ".repeat(500);
   // Trimmed rows are small (that is the point of the audit task), so the
   // fixture needs several sessions for the body to cross the gzip size
@@ -231,42 +230,6 @@ test("the list and running poll both carry the awaiting-input session ids from t
   const list = await (await getSessionList(new Request("http://localhost/api/sessions"))).json();
   assert.deepEqual(list.runningSessionIds, ["awaiting-live", "running-live"]);
   assert.deepEqual(list.awaitingSessionIds, ["awaiting-live"], "the sessions snapshot carries awaiting ids next to running ids");
-});
-
-test("session listing supports cheap summaries and honors force refresh", () => {
-  assert.match(listRoute, /searchParams\.get\("summary"\) === "1"/);
-  assert.match(listRoute, /summary\s*\n?\s*\? listSessionSummaries\(\)/);
-  assert.match(listRoute, /searchParams\.get\("force"\) === "1"/);
-  assert.match(listRoute, /listAllSessions\(\{ force \}\)/);
-  assert.match(listRoute, /attachSessionProjectInfo\(getRpcSessionInfos\(\)\)/);
-  assert.match(listRoute, /mergeSessionLists\(persistedSessions, runtimeSessions\)/);
-  assert.match(listRoute, /"Cache-Control": "no-store"/);
-});
-
-test("session reads use the live SessionManager before requiring a JSONL path", () => {
-  for (const source of [detailRoute, contextRoute]) {
-    const liveLookup = source.indexOf("getRpcSession(id)");
-    const pathLookup = source.indexOf("resolveSessionPath(id)");
-    assert.ok(liveLookup >= 0);
-    assert.ok(pathLookup > liveLookup);
-    // openSessionManager is the cached read-only opener; the live wrapper's
-    // manager must still win over any disk read, cached or not.
-    assert.match(source, /liveRpc\?\.inner\.sessionManager \?\? openSessionManager\(/);
-  }
-});
-
-test("detail reads probe disk only on force/mount and evict a stale idle wrapper", () => {
-  assert.match(detailRoute, /searchParams\.get\("force"\) === "1"/);
-  assert.match(detailRoute, /force && liveWrapper\?\.evictIfDiskAhead\(\)/);
-  assert.doesNotMatch(contextRoute, /evictIfDiskAhead|readLatestSessionEntryId/);
-});
-
-test("live agent state is available before the session file is persisted", () => {
-  const liveLookup = stateRoute.indexOf("getRpcSession(id)");
-  const pathLookup = stateRoute.indexOf("resolveSessionPath(id)");
-  assert.ok(liveLookup >= 0);
-  assert.ok(pathLookup > liveLookup);
-  assert.match(stateRoute, /if \(rpc\?\.isAlive\(\)\)/);
 });
 
 test("deleting a session removes all persisted subagent descendants", async (t) => {

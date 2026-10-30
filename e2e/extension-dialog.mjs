@@ -10,7 +10,7 @@ export const extensionSource = `export default function (pi) {
         result = await ctx.ui.input("E2E after timeout");
       } else if (mode === "select") {
         result = await ctx.ui.select("E2E select", Array.from({ length: 30 }, (_, i) => "Option " + (i + 1)));
-      } else if (mode === "prose") {
+      } else if (mode === "prose" || mode === "prose-again") {
         result = await ctx.ui.confirm("E2E prose", "A long sentence that wraps. ".repeat(60));
       } else if (mode === "code") {
         result = await ctx.ui.confirm("E2E code", "Run this?\\n\\n\`\`\`sql\\n" + "CREATE TABLE t (" + Array.from({ length: 2 }, (_, i) => "column_" + i + " VARCHAR(255) NOT NULL").join(", ") + ");\\n\`\`\`");
@@ -141,7 +141,8 @@ function scrollsSideways(dialog) {
 /**
  * Dialogs fit their code blocks without any hint from the extension (#947): prose keeps
  * the 560px default, code that does not fit makes the dialog just wide enough (or as
- * wide as the screen allows), and maximize/restore is a per-dialog override.
+ * wide as the screen allows, the code wrapping past that, #1360), and maximize/restore
+ * is a per-dialog override.
  */
 export async function checkExtensionDialogSizing(page, width) {
   const start = async (mode, name = `E2E ${mode}`) => {
@@ -154,6 +155,11 @@ export async function checkExtensionDialogSizing(page, width) {
     return dialog;
   };
   const close = async (dialog, mode, result) => {
+    // Notices queue for ~5s, so an earlier identical result can still be
+    // visible when the same dialog mode is exercised again (the second
+    // prose close). Drain it first, then the text below is unambiguously
+    // this close's notice instead of matching the earlier one by strict mode.
+    await page.getByText(`E2E ${mode} result: ${result}`, { exact: true }).waitFor({ state: "hidden" });
     await dialog.getByRole("button", { name: mode === "panel" ? "Close" : "Cancel", exact: true }).click();
     await dialog.waitFor({ state: "hidden" });
     await page.getByText(`E2E ${mode} result: ${result}`, { exact: true }).waitFor();
@@ -171,7 +177,7 @@ export async function checkExtensionDialogSizing(page, width) {
   assert.ok(codeWidth >= proseWidth, "A code block never makes the dialog narrower");
   assert.ok(codeWidth <= available + 1, "The dialog stays inside the content region");
   if (width > 600) assert.ok(codeWidth > 560, `Code that cannot fit in 560px widens the dialog, got ${codeWidth}px`);
-  if (codeWidth < available - 1) assert.equal(await scrollsSideways(code), false, "The code block shows whole unless the screen is the limit");
+  assert.equal(await scrollsSideways(code), false, "The code block shows whole, or wraps where the screen is the limit");
 
   // Maximize is a per-dialog override: full width, and restore goes back to the fitted width.
   await code.getByRole("button", { name: "Maximize", exact: true }).click();
@@ -181,12 +187,15 @@ export async function checkExtensionDialogSizing(page, width) {
   await close(code, "code", "false");
 
   // The next dialog starts from its own content, not from the last maximize or fit.
-  const again = await start("prose");
+  // Give its result a distinct label: the first prose notice may still be visible, and must
+  // neither make the strict locator ambiguous nor satisfy this second command's result check.
+  const again = await start("prose-again", "E2E prose");
   assert.ok(Math.abs((await settledWidth(page, again)) - proseWidth) <= 1, "A later dialog does not inherit the previous size");
-  await close(again, "prose", "false");
+  await close(again, "prose-again", "false");
 
   const huge = await start("huge");
   assert.ok(Math.abs((await settledWidth(page, huge)) - available) <= 1, "Content wider than the screen caps at the content region");
+  assert.equal(await scrollsSideways(huge), false, "Code wider than the screen wraps instead of scrolling sideways");
   await close(huge, "huge", "false");
 
   // A custom panel shows its lines whole when they are wider than 920px and the screen allows.

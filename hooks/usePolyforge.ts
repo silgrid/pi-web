@@ -6,9 +6,17 @@ import {
   ackDecision,
   mergeNewestPage,
   mergeOlderPage,
+  type PolyforgeContact,
   type PolyforgeConversation,
   type PolyforgeMessage,
 } from "@/lib/polyforge-messages-pure";
+import {
+  cardCursors,
+  nextCardSnapshot,
+  type PolyforgeCard,
+  type PolyforgeCardsResponse,
+} from "@/lib/polyforge-cards-pure";
+import { usePolyforgePanelPreferences } from "./usePolyforgePanelPreferences";
 
 /**
  * Panel-facing client state for the Polyforge dock panel (pi#108) and its
@@ -27,12 +35,25 @@ import {
  *   conversation list rides the status interval, and while a conversation is
  *   open its newer messages are fetched on the same 3s tick (one `--after`
  *   read, never a second backward page). Auto-acknowledgment goes through
- *   the one pure `ackDecision` helper.
+ *   the one pure `ackDecision` helper. The configured contacts
+ * ride the same list read — no timer of their own.
+ * - A silent contact (no conversation yet) is its own selection: it opens
+ *   an empty pane, loads no history, creates nothing and acks nothing; its
+ *   first send opens the conversation the send's answer names.
+ * - The Jobs-tab card stream is the one exception with its
+ *   own cadence: one `GET /api/polyforge/cards` per tick for every card,
+ *   only while the dock is open on Work › Jobs, at the browser-stored poll
+ *   interval (Settings › Polyforge), with an immediate read whenever that
+ *   surface becomes visible. A failed or degraded tick keeps the last cards.
  */
 
 const OPEN_STATUS_POLL_MS = 3000;
 const CLOSED_STATUS_POLL_MS = 30000;
 const OPEN_WATCH_POLL_MS = 3000;
+/** The cards request's client bound: longer than the
+ *  server's 10 s `pf ops status` timeout, so a normal answer is never cut;
+ *  a request that never settles is aborted and frees the in-flight slot. */
+const CARD_REQUEST_TIMEOUT_MS = 15000;
 
 type StatusResponse = { pfPresent?: boolean; status?: PolyforgeOpsStatus | null; error?: string };
 type WatchResponse = { status?: PolyforgeWatchStatus | null; error?: string };
@@ -42,6 +63,7 @@ type MessagesResponse = {
   capable?: boolean;
   reason?: string;
   conversations?: PolyforgeConversation[];
+  contacts?: PolyforgeContact[];
   error?: string;
 };
 type PageResponse = {
@@ -62,7 +84,16 @@ export function nextWatchSnapshot(
   return body?.status ?? previous;
 }
 
-export type PolyforgeTab = "jobs" | "messages" | "memory";
+/** The dock's top-level tabs (DOM order Work | Memory | Messages,
+ *,). Work hosts the former Jobs and Tasks tabs as its two
+ *  sub-tabs (`PolyforgeWorkTab`). The Tasks and Memory surfaces own their
+ *  reads (gesture-driven, no timer); only Jobs and Messages ride this hook's
+ *  3s/30s cadence. */
+export type PolyforgeTab = "memory" | "messages" | "work";
+
+/** Work's sub-tabs. Page memory only: kept across a dock close/reopen (this
+ *  hook outlives the dock), reset by a reload, never written to storage. */
+export type PolyforgeWorkTab = "jobs" | "tasks";
 
 export interface SendMessageInput {
   to: string;
@@ -84,12 +115,18 @@ export function usePolyforge(panelOpen: boolean) {
   const [watchStatus, setWatchStatus] = useState<PolyforgeWatchStatus | null>(null);
 
   // Messages state.
-  const [activeTab, setActiveTabState] = useState<PolyforgeTab>("jobs");
+  const [activeTab, setActiveTabState] = useState<PolyforgeTab>("work");
+  const [workTab, setWorkTab] = useState<PolyforgeWorkTab>("jobs");
   const [messagesCapable, setMessagesCapable] = useState(true);
   const [messagesReason, setMessagesReason] = useState<string | null>(null);
   const [conversations, setConversations] = useState<PolyforgeConversation[]>([]);
+  const [contacts, setContacts] = useState<PolyforgeContact[]>([]);
   const [messagesError, setMessagesError] = useState<string | null>(null);
   const [selectedConversation, setSelectedConversation] = useState<string | null>(null);
+  // The open silent contact, held as the clicked row's snapshot so a poll
+  // that drops or renames it never blanks the open pane's name or address.
+  // Mutually exclusive with selectedConversation.
+  const [selectedContact, setSelectedContact] = useState<PolyforgeContact | null>(null);
   const [messages, setMessages] = useState<PolyforgeMessage[]>([]);
   // The conversation whose newest page has settled. The panel positions the
   // history at the bottom on that first page even while a job is blocked;
@@ -98,6 +135,17 @@ export function usePolyforge(panelOpen: boolean) {
   const [hasOlder, setHasOlder] = useState(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [analyses, setAnalyses] = useState<Record<string, string>>({});
+
+  // Jobs-tab card stream. cardsRef mirrors the rendered
+  // cards so the next tick reads the newest cursors without re-running the
+  // poll effect; one request at a time (a tick that finds one in flight is
+  // skipped), so cursors advance in order.
+  const [cards, setCards] = useState<PolyforgeCard[] | null>(null);
+  const [cardsError, setCardsError] = useState<string | null>(null);
+  const cardsRef = useRef<PolyforgeCard[] | null>(null);
+  const cardsSeq = useRef(0);
+  const cardsInFlight = useRef(false);
+  const { pollIntervalSec } = usePolyforgePanelPreferences();
 
   const statusSeq = useRef(0);
   const watchSeq = useRef(0);
@@ -148,6 +196,32 @@ export function usePolyforge(panelOpen: boolean) {
       });
   }, []);
 
+  const refreshCards = useCallback(() => {
+    if (cardsInFlight.current) return;
+    cardsInFlight.current = true;
+    const seq = cardsSeq.current;
+    const cursors = cardCursors(cardsRef.current);
+    const query = Object.keys(cursors).length > 0 ? `?cursors=${encodeURIComponent(JSON.stringify(cursors))}` : "";
+    // AbortController + setTimeout: the timeout-signal helper is absent on
+    // the Safari 16.2 target.
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), CARD_REQUEST_TIMEOUT_MS);
+    fetch(`/api/polyforge/cards${query}`, { signal: controller.signal })
+      .then((response) => response.json() as Promise<PolyforgeCardsResponse>)
+      .catch(() => null)
+      .finally(() => clearTimeout(timer))
+      .then((body) => {
+        if (seq !== cardsSeq.current) return;
+        cardsInFlight.current = false;
+        // A failed, degraded or timed-out tick keeps the last cards
+        // (nextCardSnapshot) and frees the slot for the next tick.
+        const next = nextCardSnapshot(cardsRef.current, body);
+        cardsRef.current = next;
+        setCards(next);
+        setCardsError(body && Array.isArray(body.cards) ? null : (body?.error ?? "polyforge is unreachable"));
+      });
+  }, []);
+
   const refreshWatch = useCallback((wi: string) => {
     const seq = ++watchSeq.current;
     fetch(`/api/polyforge/watch?wi=${encodeURIComponent(wi)}`)
@@ -188,6 +262,7 @@ export function usePolyforge(panelOpen: boolean) {
         setMessagesCapable(body.capable !== false);
         setMessagesReason(body.reason ?? null);
         setConversations(Array.isArray(body.conversations) ? body.conversations : []);
+        setContacts(Array.isArray(body.contacts) ? body.contacts : []);
         // `error` is the non-floor read failure; `reason` belongs to the
         // upgrade state only.
         setMessagesError(body.capable === false ? (body.reason ?? null) : (body.error ?? null));
@@ -220,6 +295,22 @@ export function usePolyforge(panelOpen: boolean) {
   useEffect(() => {
     if (panelOpen) setStatusReady(false);
   }, [panelOpen]);
+
+  // Card stream: only while the dock is open on Work › Jobs — an immediate
+  // read, then one request per tick at the configured interval.
+  useEffect(() => {
+    if (!probed || !pfPresent || !panelOpen || activeTab !== "work" || workTab !== "jobs") return;
+    refreshCards();
+    const interval = setInterval(refreshCards, pollIntervalSec * 1000);
+    return () => {
+      // Same counter rationale as the status effect: advance, never rewind;
+      // the abandoned read can no longer land or hold the in-flight slot.
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+      ++cardsSeq.current;
+      cardsInFlight.current = false;
+      clearInterval(interval);
+    };
+  }, [probed, pfPresent, panelOpen, activeTab, workTab, pollIntervalSec, refreshCards]);
 
   // Cadence: 3s open, 30s closed — only while pf is present.
   useEffect(() => {
@@ -288,6 +379,7 @@ export function usePolyforge(panelOpen: boolean) {
   }, []);
 
   const selectConversation = useCallback((conversationId: string | null) => {
+    setSelectedContact(null);
     setSelectedConversation(conversationId);
     selectedConversationRef.current = conversationId;
     if (!conversationId) {
@@ -306,6 +398,15 @@ export function usePolyforge(panelOpen: boolean) {
     setInitialPageLoaded(null);
     void loadNewestPage(conversationId);
   }, [loadNewestPage]);
+
+  // Opening a silent contact closes any open conversation (its in-flight
+  // pages are dropped by the identity guard) and shows the empty pane: no
+  // history read, no conversation, no ack — the conversation exists only
+  // once the first send lands.
+  const selectContact = useCallback((contact: PolyforgeContact) => {
+    selectConversation(null);
+    setSelectedContact(contact);
+  }, [selectConversation]);
 
   const loadOlder = useCallback(() => {
     const conversationId = selectedConversation;
@@ -442,10 +543,10 @@ export function usePolyforge(panelOpen: boolean) {
     await refreshMessages();
     const sent = body.message ?? null;
     // The send's own answer names the conversation it landed in (task-42): open
-    // it when it is not the one already open — a compose-entry send to a new
-    // peer opens the started conversation even while another one is open
-    // beside it — and refresh the open one when it is. The conversation id
-    // comes from the answer itself, never from a raced list read.
+    // it when it is not the one already open — a silent contact's first send
+    // opens the conversation it started (and closes the contact selection) —
+    // and refresh the open one when it is. The conversation id comes from
+    // the answer itself, never from a raced list read.
     const openedId = sent?.conversation_id ?? null;
     if (openedId && openedId !== selectedConversation) {
       selectConversation(openedId);
@@ -483,10 +584,11 @@ export function usePolyforge(panelOpen: boolean) {
     if (tab === "messages") void refreshMessages();
   }, [refreshMessages]);
 
-  // A work-item anchor opens the existing Jobs detail through the existing
-  // watch read (the shell's selectPolyforgeJob path).
+  // A work-item anchor opens the existing Jobs detail (Work › Jobs) through
+  // the existing watch read (the shell's selectPolyforgeJob path).
   const openAnchor = useCallback((ref: string) => {
-    setActiveTabState("jobs");
+    setActiveTabState("work");
+    setWorkTab("jobs");
     select(ref);
   }, [select]);
 
@@ -497,6 +599,8 @@ export function usePolyforge(panelOpen: boolean) {
     pfPresent,
     opsStatus,
     opsError,
+    cards,
+    cardsError,
     runningCount,
     selectedWi,
     watchStatus,
@@ -504,13 +608,18 @@ export function usePolyforge(panelOpen: boolean) {
     refreshStatus,
     activeTab,
     setActiveTab,
+    workTab,
+    setWorkTab,
     messagesCapable,
     messagesReason,
     messagesError,
     conversations,
+    contacts,
     unreadTotal,
     selectedConversation,
     selectConversation,
+    selectedContact,
+    selectContact,
     messages,
     initialPageLoaded: selectedConversation !== null && initialPageLoaded === selectedConversation,
     blocked,

@@ -6,6 +6,7 @@ import {
   getCompletionNotificationSuppressedRpcSessionIds,
   getRunningRpcSessionIds,
 } from "@/lib/rpc-manager";
+import { getSessionIdsWithUnsettledSubagentRuns } from "@/lib/subagent-runtime";
 
 export const dynamic = "force-dynamic";
 
@@ -26,6 +27,8 @@ async function getRecentSessionWritePayload(): Promise<
 }
 
 // GET /api/agent/running - Lightweight snapshot for visible-tab polling.
+// subagentsActiveSessionIds: sessions whose subagents can still start a run
+// there, so the sidebar announces their completion only after the last one.
 export async function GET() {
   return NextResponse.json(
     {
@@ -34,6 +37,7 @@ export async function GET() {
       awaitingSessionIds: getAwaitingRpcSessionIds(),
       completionNotificationSuppressedSessionIds: getCompletionNotificationSuppressedRpcSessionIds(),
       recentSessionWrites: await getRecentSessionWritePayload(),
+      subagentsActiveSessionIds: getSessionIdsWithUnsettledSubagentRuns(),
     },
     { headers: { "Cache-Control": "no-store" } },
   );

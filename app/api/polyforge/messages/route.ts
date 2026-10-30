@@ -12,11 +12,12 @@ import {
 export const dynamic = "force-dynamic";
 
 /**
- * GET /api/polyforge/messages — the caller's member-only conversations plus
- * the Messages capability answer. Degradation-first: pf
- * absent, below the 2.20.10 floor, an unreadable list or an unreachable daemon
- * all answer 200 with fields, never 5xx. Below the floor no message verb is
- * spawned. The in-route gate is the authenticated-surface check every
+ * GET /api/polyforge/messages — the caller's member-only conversations, the
+ * configured `contacts` (; [] when their own read fails) and the
+ * Messages capability answer. Degradation-first: pf absent,
+ * below the 2.20.12 floor, an unreadable list or an unreachable daemon all
+ * answer 200 with fields, never 5xx. Below the floor no message or contact
+ * verb is spawned. The in-route gate is the authenticated-surface check every
  * polyforge route re-checks.
  *
  * POST /api/polyforge/messages — send one message. JSON-only; every value is
@@ -39,6 +40,7 @@ export async function GET(request: Request) {
       capable: true,
       error: "the messages read failed; polyforge may be unavailable",
       conversations: [],
+      contacts: [],
     });
   }
 }

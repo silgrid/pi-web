@@ -213,7 +213,11 @@ async function openPage({ viewport = { width: 1280, height: 800 }, session = tru
   const context = await browser.newContext({ viewport, locale: "en-US" });
   await context.grantPermissions(["clipboard-read", "clipboard-write"]);
   const page = await context.newPage();
-  page.setDefaultTimeout(10_000);
+  // 10s is the pool default but leaves no headroom while the parallel full bar
+  // shares the host with another Next dev + Chromium: this suite's first
+  // settings open timed out there under load. Action ceiling only; assertions
+  // and their polling unchanged (same reasoning as e2e/run.mjs's settle poll).
+  page.setDefaultTimeout(30_000);
   page.on("pageerror", (error) => errors.push(error.message));
   page.on("console", (event) => { if (event.type() === "error") errors.push(event.text()); });
   page.on("response", (response) => {

@@ -18,6 +18,9 @@ Typecheck: `node_modules/.bin/tsc --noEmit` · Lint: `npm run lint`
 - Never fall back to `next dev --webpack`: the dev graph can fail on `undici` imports such as `node:console`. Development uses Turbopack.
 - `next dev` may append a generated `BEGIN:nextjs-agent-rules` block to `AGENTS.md`. It is tooling output: check `git status` and keep it out of unrelated commits.
 
+### Upgrading pi
+pi's packages depend on each other with `^` ranges, and the published pi-web's dependencies resolve afresh on install (no lockfile ships). Install every `@earendil-works/*` package the tree holds, the SDK's own dependencies included (`pi-codemode`, `pi-mcp`, `pi-telemetry`, …), with `npm install --save-exact`, so npm reuses those exact versions for the SDK's ranges. `lib/pi-packages.test.mjs` fails on any pi package that is not pinned that way; pi-web 0.12.0 pinned four, and installs after pi 1.2.0 paired pi-coding-agent 1.1.0 with pi-codemode 1.2.0.
+
 ---
 
 ## Architecture
@@ -25,6 +28,7 @@ Typecheck: `node_modules/.bin/tsc --noEmit` · Lint: `npm run lint`
 - **Browsing** (read-only, no AgentSession): `GET /api/sessions` lists `~/.pi/agent/sessions/`; `GET /api/sessions/[id]` reads the `.jsonl` through SDK `SessionManager` helpers and `lib/session-reader.ts`, or an open wrapper's in-memory `SessionManager`. `GET /api/agent/running` snapshots the running ids.
 - **Sending**: `POST /api/agent/[id]` → `startRpcSession()` (`lib/rpc-manager.ts`) creates the AgentSession in-process (`createAgentSessionFromServices()`); `session.send(cmd)` → `session.prompt()`.
 - **Events**: `GET /api/agent/[id]/events` streams SSE `data: {...}` from `session.onEvent()`, fed by `session.subscribe()`.
+- **Product scope**: a light web wrapper around pi, not an IDE or a platform of its own. Before adding a feature, check the out-of-scope list in [CONTRIBUTING.md](CONTRIBUTING.md).
 - **Extension compatibility (principle)**: extensions written for the pi CLI must behave the same here. Fix display problems in the web client; never add pi-web-only options or fields to the extension API (`ctx.ui.*` options, `extension_ui_request`). pi's TUI (`node_modules/@earendil-works/pi-tui`) is the reference for what an extension asking for something means.
 
 ---
@@ -35,20 +39,28 @@ Typecheck: `node_modules/.bin/tsc --noEmit` · Lint: `npm run lint`
 app/api/
   sessions/route.ts               GET  list all sessions
   sessions/[id]/route.ts          GET/PATCH/DELETE session
-  sessions/[id]/context/route.ts  GET ?leafId= — context for a specific leaf
+  sessions/[id]/context/route.ts   GET ?leafId=&tail=&before= a page of a leaf's context (tail defaults to 50; before pages upward)
   sessions/[id]/chat-id/route.ts  GET the polyforge chat id of a live session (pi#121; 200-absent, never 5xx)
+  sessions/[id]/search/route.ts   GET in-tab search: active-branch matches in earlier (unloaded) history (pi#80)
+  sessions/filter-match/route.ts  GET  worker-session filter rules evaluated against the full first message
+  agent/[id]/bg-tasks/route.ts    GET a live session's background tasks (pi-background-tasks bridge)
+  agent/[id]/bg-tasks/[taskId]/logs/route.ts GET bounded output tail of one task
+  agent/[id]/bg-tasks/[taskId]/kill/route.ts POST kill one background task
+  fs-manage/route.ts              POST guarded browse-area directory rename/delete (pi#59; typed 200 outcomes)
   sessions/[id]/export/route.ts   GET exported HTML for a session
+  sessions/stats/route.ts          POST { ids } each session's tokens, cost, tool calls, active time (the agent switcher's rows)
   agent/new/route.ts              POST { cwd, message, toolNames?, provider?, modelId? }
   agent/[id]/route.ts             GET state | POST any command
   agent/[id]/events/route.ts      GET SSE stream
+  agent/[id]/lease/route.ts        POST ?holder=<page id> keep the session that page has selected alive (with or without its stream); reply: running, awaitingInput, subagentsActive
   agent/running/route.ts          GET currently-running session ids
+  agent/debug/route.ts             GET ?session= the Debug panel's read-only snapshot: wrappers, streams, subagents, MCP, terminals, file watches
   auth/api-key/[provider]/route.ts POST/DELETE provider API key storage
   auth/login/[provider]/route.ts  GET OAuth/device-code SSE | POST manual code
   auth/logout/[provider]/route.ts POST OAuth logout
   auth/providers/route.ts         GET OAuth and API-key provider lists
   cwd/validate/route.ts           POST validate/select a cwd
   default-cwd/route.ts            POST create ~/pi-cwd/YYYYMMDD (local date)
-  files/[...path]/route.ts        GET file contents for viewer
   home/route.ts                   GET user home directory
   models/route.ts                 GET { models, modelList, defaultModel }
   models/enabled/route.ts         GET/PUT enabledModels switches for the Models panel
@@ -60,20 +72,26 @@ app/api/
   models-config/test/route.ts     POST test a configured model/provider
   plugins/route.ts                GET/POST package plugin management
   skills/route.ts                 GET/PATCH loaded skills and disable-model-invocation
+  skills/content/route.ts          GET one loaded skill's bounded Markdown source, or ?document= a Markdown file in its folder
   skills/install/route.ts         POST install skills through npx skills add
   skills/search/route.ts          GET/POST skills.sh search
   subagents/settings/route.ts     GET/PUT built-in subagent feature setting
   worktrees/route.ts              GET/POST/DELETE git worktrees
   web-auth/route.ts               GET status | POST login | DELETE logout (browser password)
   plugins/check/route.ts          POST check plugin package updates
-  project-trust/route.ts          GET/POST project trust for package installs
   sessions/search/route.ts        GET session search
   sessions/[id]/state/route.ts    GET live wrapper state when the session is running
   sessions/[id]/auto-name/route.ts POST generate a session title
   terminal/route.ts               POST create a terminal session
   terminal/[id]/route.ts          GET stream | POST input/resize | DELETE kill
+  mcp/route.ts                     GET [?cwd=] Settings › MCP overview, files only | POST add/enable/disable/remove/undo/set-enabled/set-exposure/set-in-project/sign-out
+  mcp/test/route.ts                POST { scope, name, cwd? } test one server once (entry read from its file)
+  mcp/sign-in/route.ts             POST { scope, name, cwd? } start or join an OAuth sign-in
+  mcp/sign-in/[flowId]/route.ts    GET flow state (polled) | POST { redirectUrl } | DELETE cancel
+  project-trust/route.ts           GET trust status + project .pi/mcp.json servers (files only) | POST trust, rebuild the cwd's wrappers
   cwd/browse/route.ts             GET browse allowed cwd directories | POST create child directory
   open-in-explorer/route.ts       GET availability | POST open a cwd in the OS file manager (loopback only)
+  files/[...path]/route.ts         GET ?type=list|read|download|meta|preview|watch | POST ?type=upload|upload-check|allow-link
   app-update/route.ts             GET current vs latest published pi-web version
   file-index/route.ts             GET file list for @-mentions
   git/status/route.ts             GET changed files for a cwd
@@ -82,55 +100,109 @@ app/api/
   push/config/route.ts            GET VAPID public key for push subscriptions
   push/subscribe/route.ts         POST register a push subscription
   tools/settings/route.ts         GET/PUT defaultTools switches: PowerShell (Windows) and Code mode (automatic / always)
+  cache-miss-notices/route.ts      GET/PUT pi's global showCacheMissNotices (Settings › General)
   polyforge/detect/route.ts       GET ?force= — Settings Polyforge section machine detection (pi#122; 200 flat JSON, no 5xx)
   polyforge/config/route.ts       GET/POST the configuration panel read/write (; pf-only writes, JSON-only POST)
   polyforge/config/reload/route.ts       POST reload, then an independent ops-status read
   polyforge/config/history/route.ts      GET the bounded panel history; POST rollback as a new CAS write
+  polyforge/cards/route.ts        GET ?cursors= the Jobs tab's whole card stream in one read: goal, step durations, progress increments (; 200, no 5xx)
+  machine-load/route.ts           GET  host CPU %, cores, loadavg 1/5/15, memory used/total for the Session-info popover and the Debug panel (#168; whitelist only, 2 s shared sample, 200 { metrics: null } on failure, no 5xx)
 
 lib/
   agent-client.ts      typed fetch helper for /api/agent commands
+  missing-cwd.ts            client-safe `reason: "cwd-missing"` refusal of a folder that no longer exists: error class, body fields, parsing
+  debug-types.ts            client-safe shapes of the Debug panel: GET /api/agent/debug and the page's own snapshot
+  debug-snapshot.ts         buildDebugSnapshot(): the debug route's synchronous field reads, each source guarded
+  stream-client.ts          an event stream's reported address and "Chrome · macOS" label, for the Debug panel's connected pages and SSE titles only
+  page-stream-registry.ts   open terminal and file-watch streams with their page (`?holder=`) and client, for the Debug panel's connected pages
+  page-debug.ts             client: the page's id (`?holder=` of its streams), EventSources, visibility history, protocol and running-poll record (Debug panel)
+  file-watch-registry.ts    open ?type=watch streams, counted on globalThis for the Debug panel
   default-preferences.ts  write defaultModel/defaultThinkingLevel; detect project-level shadowing
   deferred-provider-models.ts  models of providers an extension registers only at session_start, re-added to listings
   draft-store.ts       local draft persistence helpers
   extension-ui-queue.ts  FIFO queues for extension dialogs and custom panels, keyed by request id
+  session-stats-format.ts   client-safe compact counts, costs and active durations of the stats toolbar and agent switcher
+  machine-load.ts           server: on-demand host sampler, one sample shared per 2 s window, CPU from the delta of two fresh os.cpus() reads (no timer)
+  machine-load-view.ts      client-safe: the route's five-field metrics type, the keep-last-good merge, the pinned formats and four rows
+  turn-duration.ts          getTurnDurationMs() / formatTurnDuration(): a finished turn's length from its anchor to its last response's end, on pi's timestamps
+  transcript-notices.ts     client-safe: showCacheMissNotices notices on chat messages, TUI number formats, a fold's cache-miss sum
+  transcript-notices-server.ts the notices derived from session entries (cache-stats port), live ones for message_end, the setting
   file-access.ts       allowed file roots for /api/files and worktrees
   file-upload-client.ts     browser upload to /api/files ?type=upload, shared by the explorer and chat drops
   linked-directory.ts  directory links that lead outside the allowed roots + the allow-link check
   default-cwd.ts       dated ~/pi-cwd/YYYYMMDD path for "Use default directory"
   file-paths.ts        client/server path encoding helpers
+  file-version.ts           a watched file's size+mtime version: viewers skip reloading an unchanged file on reconnect
+  delimited-table.ts        client-safe CSV/TSV parsing (RFC 4180, delimiter detection, file line per record) and table layout
   display-path.ts      display-only `~` / `./` path shortening for the settings panels
   file-tree-visibility.ts  which entries the file tree lists: git check-ignore, name-list fallback
+  file-tree-expansion.ts    the file tree's open directories per cwd: page-memory LRU of 20 folders
   enabled-models.ts    pure minimal-edit engine for the `enabledModels` pattern list
   enabled-models-runtime.ts  SDK adapter: per-pattern resolution, provider kinds, settings IO
+  model-context.ts          client-safe: managed models' contextWindow overrides in the models.json draft, the Save check
+  model-provider-check.ts   client-safe: Save refuses a models.json provider entry pi rejects on its own (Add provider's empty stub, oauth without a Base URL)
   markdown.ts          shared markdown helpers
+  markdown-blocks.ts        splitMarkdownBlocks(): where a streaming reply may be cut into blocks parsed apart
+  highlight-queue.ts        code fences past a task's highlight budget get their colors in idle slices
   prism-languages.ts   loadPrismLanguages(): every Prism language in a chunk of its own, loaded when a highlighter first needs it
   gfm-autolink-email-loader.cjs  bundler loader: remark-gfm's email regex without a lookbehind literal (#753)
   node-cli.ts          locate bundled npm-cli.js / npx-cli.js so npm/npx spawn without a shell (Windows npm.cmd)
   npx.ts               npx runner used by skill install
   plugin-updates.ts    npm view update checks for /api/plugins/check
+  jsonc.ts                  JSON with comments and trailing commas (models.json is read through it)
+  shell-words.ts            split a pasted command line into words without a shell; refuses | && ; redirects $(…)
+  key-serializer.ts         serializeByKey(): one globalThis promise chain per key
+  stacked-dialog.ts         Escape and focus handling for Settings and dialogs stacked above it
+  project-trust.ts          project trust status and decisions; fresh-folder trust-and-write
   pi-types.ts          local structural types for pi SDK objects
   pi-sdk-internals.ts  file-URL loader for SDK modules the package does not export (MCP connection, config, OAuth)
   mcp-transport.ts     MCP transport factory: stdio servers get the sanitized project-command env, never PI_WEB_PASSWORD
+  mcp-command.ts            client-safe: who owns /mcp (built-in or another extension)
   builtin-extensions.ts  codemode / tool-search / mcp built-ins for normal sessions, PI_WEB_DISABLE_MCP, sandbox self-test
   mcp-read-only-policy.ts  tool_call policy: read-only sessions block MCP tools without readOnlyHint, nested calls too
-  mcp-host.ts          per-wrapper MCP host: registers mcp.json servers before a prompt, waits for them, idles them out
+  mcp-config-key.ts         canonicalJson() and mcpConfigKey(), the per-process HMAC statuses are keyed by
+  mcp-config-values.ts      client-safe: the values pi resolves and the PI_WEB_PASSWORD rule
+  mcp-config-read.ts        Settings › MCP reads of both mcp.json files; nothing resolved or run
+  mcp-config-file.ts        the mcp.json writer: SDK editor's bytes, lock, atomic write, typed refusals
+  mcp-override.ts           project overrides of global servers: the SDK's isOverride() and loader refusals
+  mcp-json-error.ts         JSON.parse error messages that never quote the source
+  mcp-undo.ts               removed mcp.json entries kept 60 s for undo; only a token reaches the browser
+  mcp-status.ts             last known connection state per mcp.json entry (tests and sessions)
+  mcp-test.ts               Settings › MCP Test: one bounded, masked SDK connection (sign-in reuses its steps)
+  mcp-entry-request.ts      route checks before connecting one mcp.json entry (Test, sign-in); guards /api/mcp and /api/project-trust share
+  mcp-sign-in.ts            Settings › MCP OAuth sign-in flows (as pi mcp login), polled by id
+  mcp-sign-out.ts           OAuth store keys (name + URL); guard barring token writes by runs started before a sign-out
+  mcp-secrets.ts            pure secret classification and masking for MCP config values
+  mcp-add.ts                POST /api/mcp add's checks before it writes
+  mcp-import.ts             pure paste importer (+ mcp-import-core/json/cli/links.ts)
+  mcp-server-display.ts     client-safe display helpers for McpServerInfo (hidden-character escapes, labels)
+  mcp-host.ts          per-session MCP host: registers mcp.json servers before prompts, reports status
   mcp-tool-display.ts  `server/tool` label for an mcp__ call from its result's details (never parsed from the name), JSON result indenting
   codemode-view.ts     display helpers for codemode cards: script, nested calls, header-free output, progress
   codemode-settings.ts Code mode automatic / always as `+codemode` in the global defaultTools
   global-settings-file.ts  locked read-modify-write of the global settings.json (shared with SettingsManager's lock)
+  regular-file.ts           readRegularFileText(): non-blocking read of a regular file only, optional size cap
+  polyforge-cards.ts        server: the Jobs-tab cards read straight from the daemon's files (events, job record, capsule, spawn journal, pi/claude transcript whitelist, cursor, bounds)
+  polyforge-cards-pure.ts   client-safe card wire types, bounds, cursor shape, ordering, title/duration text, progress merge and last-good snapshot
+  polyforge-panel-preferences.ts  the two browser-stored card preferences (title length, poll interval): keys, bounds, clamp, guarded read/write, change event
   rpc-manager.ts      AgentSessionWrapper + registry + startRpcSession
   session-reader.ts   SessionManager wrappers + path cache + buildSessionContext adapter
+  session-delete.ts         deleteSessions(): DELETE /api/sessions/[id], session files with their subagents, re-parenting what stays, wrapper shutdown
+  session-links.ts          a session's same-instance link (?session=<id>) and the plain-click rule the sidebar keeps in the page
+  normalize.ts              normalizeToolCalls(): file-format vs our toolCall field names
+  message-keys.ts           client-safe React keys of chat messages: a run's messages keep theirs when the file is read again
+  manual-fetch.ts           client-safe manual "fetch latest" helpers: new-content check and history merge by entry id, the pull-up's arming/threshold, hh:mm
   session-watcher.ts  globalThis fs.watch singleton on the sessions root; external writes bump sessionListVersion
   subagent-settings.ts  read/write ~/.pi/agent/agents/settings.json
   tool-presets.ts     PRESET_NONE/READ_ONLY/DEFAULT/FULL + getPresetFromTools()
   tool-preset-preference.ts  browser-persisted default for fresh sessions
+  tool-fields.ts            a tool call's arguments as flat rows: all of them or no table
   types.ts            shared TypeScript types
-  normalize.ts        normalizeToolCalls() — field name mismatch between file format and our types
   worktree.ts         project/worktree resolution and git worktree operations
 
 components/
   AppShell.tsx        layout + URL state + tab management
-  SessionSidebar.tsx  session tree + FileExplorer
+  SessionSidebar.tsx  the sidebar (internal line; upstream's redesign not adopted,): session rows, pinned directories, archive, filters, multi-root FileExplorer
   ChatWindow.tsx      chat composition + completion sound wrapper
   ChatInput.tsx       input bar + model/thinking/tools/compact controls
   MessageView.tsx     renders one message (user/assistant/toolCall/toolResult)
@@ -138,17 +210,32 @@ components/
   BranchNavigator.tsx in-session branch switcher
   ChatMinimap.tsx     scroll minimap alongside the message list
   MarkdownBody.tsx    markdown renderer
+  SvgBlock.tsx             a ```svg fence: preview only as an <img> data URL, source toggle, zoom, download (MermaidBlock's pieces)
   ModelsConfig.tsx    modal for editing models.json (opened from sidebar bottom)
   EnabledModelsSection.tsx  model switches inside ModelsConfig, backed by enabledModels
+  ModelContextWindow.tsx   a managed model row's context-window field (blank: no override)
   OAuthPastePanel.tsx paste box for a server-side sign-in's redirected address or code
+  ProjectTrustDialog.tsx   trust confirmation listing the project's MCP servers
   AgentsConfig.tsx    built-in subagent toggle + agent profile editor
+  SubagentViewer.tsx       read-only right-panel tab of a subagent's transcript (polls the context route)
+  DebugPanel.tsx           Debug top panel (toolbar, left of the stats): page and server state, its own tick and poll, error boundary; mounts MachineLoadSection at the top
+  MachineLoadSection.tsx   host-labelled machine-load section of the Session-info popover and the Debug panel (mounted only while one of them is open)
+  debug-panel-state.ts     pure helpers of DebugPanel: formatting, server clock, poller, issues, session grouping, poll samples
   PluginsConfig.tsx   modal for installed package plugins
-  PolyforgeConfig.tsx  Settings › Polyforge section: machine detection display + the pi package switch (pi#122; once-per-open, no polling)
+  PolyforgeConfig.tsx  Settings › Polyforge section: machine detection display + the pi package switch (pi#122; once-per-open, no polling) + the two browser-stored Jobs card preferences
   SkillsConfig.tsx    modal for loaded/search/installable skills
+  McpConfig.tsx            Settings › MCP: servers, switches, exposure, remove/undo, Test, sign-in, Code mode, trust
+  mcp-config-helpers.ts    pure helpers and requests for McpConfig
+  McpSignIn.tsx            a server's Sign-in row in Settings › MCP
+  mcp-sign-in-helpers.ts   pure helpers and requests for McpSignIn
+  McpAddServer.tsx         Settings › MCP add pane: paste, preview, values, name, scope
+  mcp-add-helpers.ts       pure helpers and the add request for McpAddServer
   FileExplorer.tsx    file tree inside sidebar
   FileIcons.tsx       file icon helpers
   FileViewer.tsx      file content in a tab
+  DelimitedTable.tsx       a CSV/TSV file's Preview: virtualized table, gutter of file lines
   TabBar.tsx          tab bar (Chat + open file tabs)
+  TranscriptNotices.tsx    a message's cache and cost notice lines, the fold header's cache-miss text
 
 hooks/
   useAgentSession.ts  messages + streaming + SSE + fork/navigate/reconciliation logic
@@ -156,8 +243,14 @@ hooks/
   useAudio.ts         completion sound + browser AudioContext unlock
   useDragDrop.ts      chat drop zone: dropped files and folders, in drop order
   useIsMobile.ts      responsive breakpoint hook
+  usePageHidden.ts         HIDDEN_PAGE_GRACE_MS; true once the page has been hidden that long (file watches pause)
+  useMachineLoad.ts        fixed 2 s poll of /api/machine-load while mounted and the page is visible; keeps the last good values
+  useKeyboardShortcuts.ts  Esc stops the running agent unless a field or nearer handler took it; Ctrl+Alt+N
+  useResizablePanel.ts     drag/keyboard panel size kept per key; persistClamp: false never saves a short window's clamp
   usePrismLanguages.ts  true once the Prism languages are loaded; starts the load for a highlighter
   useTheme.ts         theme state
+  useTerminalTheme.ts      the terminal's own dark/light choice (localStorage), apart from the app theme
+  usePolyforgePanelPreferences.ts  the card stream's title length and poll interval, live on save (storage + preferences event)
 ```
 
 ---
@@ -166,39 +259,23 @@ hooks/
 
 Design decisions and traps live in `docs/agents/`, one note per area. Read every note whose files a change touches before making it. Add new notes to the area's file, not here.
 
-- [sessions.md](docs/agents/sessions.md): AgentSession lifecycle and shutdown, fork vs in-session branching, session file rewrites, toolCall normalization, SSE reconnect and tool events, transcript system / usage / context-edit entries, running-state polling, exported HTML. Files: `lib/rpc-manager.ts`, `lib/session-reader.ts`, `lib/normalize.ts`, `hooks/useAgentSession.ts`, `app/api/agent/**`, `app/api/sessions/**`, `components/BranchNavigator.tsx`, `components/MessageView.tsx`, `components/CodemodeToolView.tsx`.
+- [sessions.md](docs/agents/sessions.md): AgentSession lifecycle and shutdown, fork vs in-session branching, session file rewrites, toolCall normalization, SSE reconnect and tool events, transcript system / usage / context-edit entries, running-state polling, the manual fetch of the newest data, exported HTML. Files: `lib/rpc-manager.ts`, `lib/session-reader.ts`, `lib/normalize.ts`, `hooks/useAgentSession.ts`, `lib/manual-fetch.ts`, `app/api/agent/**`, `app/api/sessions/**`, `components/BranchNavigator.tsx`, `components/MessageView.tsx`, `components/CodemodeToolView.tsx`, `components/ChatWindow.tsx` (the manual fetch, the message list).
 - [tools.md](docs/agents/tools.md): tool presets and Chat only, exact system prompts, tool exposure, the codemode / tool-search / mcp built-ins, the read-only MCP policy, the Code mode and PowerShell `defaultTools` switches. Files: `lib/tool-presets.ts`, `lib/tool-preset-preference.ts`, `lib/chat-only.ts`, `lib/exact-system-prompt.ts`, `lib/builtin-extensions.ts`, `lib/mcp-read-only-policy.ts`, `lib/codemode-settings.ts`, `lib/powershell-settings.ts`, `lib/global-settings-file.ts`, `app/api/agent/new/route.ts`, `app/api/tools/settings/route.ts`, tool selection in `lib/rpc-manager.ts`.
 - [mcp-runtime.md](docs/agents/mcp-runtime.md): the per-session MCP host (when servers register and connect, reported states, trust read on every sync, idle release); `/mcp` in the composer. Files: `lib/mcp-host.ts`, `lib/mcp-transport.ts`, `lib/mcp-status.ts`, `lib/mcp-command.ts`, `lib/mcp-config-key.ts`, MCP wiring in `lib/rpc-manager.ts` and `lib/builtin-extensions.ts`, `/mcp` handling in `hooks/useAgentSession.ts`.
 - [mcp-settings.md](docs/agents/mcp-settings.md): Settings › MCP reads without running anything, masking, the trust dialog's server list, row states, notices, Code mode choice, trust from Settings, Escape stacking, every `mcp.json` write and undo. Files: `app/api/mcp/route.ts`, `app/api/project-trust/route.ts`, `lib/mcp-config-read.ts`, `lib/mcp-config-file.ts`, `lib/mcp-undo.ts`, `lib/mcp-secrets.ts`, `lib/mcp-server-display.ts`, `lib/mcp-json-error.ts`, `lib/project-trust.ts`, `lib/regular-file.ts`, `lib/stacked-dialog.ts`, `lib/settings-navigation.ts`, `components/McpConfig.tsx`, `components/mcp-config-helpers.ts`, `components/ProjectTrustDialog.tsx`, `components/SettingsPanel.tsx`.
 - [mcp-test-sign-in.md](docs/agents/mcp-test-sign-in.md): Settings › MCP Test (route checks, bounded connection, `!command` queue, redaction, status store) and OAuth sign-in / sign-out. Files: `app/api/mcp/test/**`, `app/api/mcp/sign-in/**`, `lib/mcp-test.ts`, `lib/mcp-entry-request.ts`, `lib/mcp-status.ts`, `lib/mcp-sign-in.ts`, `lib/mcp-sign-out.ts`, `components/McpSignIn.tsx`, `components/mcp-sign-in-helpers.ts`, `components/OAuthPastePanel.tsx`.
 - [mcp-add.md](docs/agents/mcp-add.md): Settings › MCP add (paste re-parsed on the server, host-variable confirmation, literal secrets kept global, fresh-folder trust, the add pane) and the paste importer's escaping and grammars. Files: `lib/mcp-add.ts`, `lib/mcp-import*.ts`, `lib/shell-words.ts`, fresh-folder trust in `lib/project-trust.ts`, `components/McpAddServer.tsx`, `components/mcp-add-helpers.ts`, the `add` action of `app/api/mcp/route.ts`.
-- [models.md](docs/agents/models.md): default model and reasoning level, mid-run reasoning changes, remote provider catalogs, `enabledModels` scoping and minimal edits, provider auth listing and credentials. Files: `app/api/models/**`, `app/api/models-config/**`, `app/api/auth/**`, `lib/default-preferences.ts`, `lib/model-scope.ts`, `lib/enabled-models*.ts`, `lib/model-catalog-refresh.ts`, `lib/provider-listing*.ts`, `components/ModelsConfig.tsx`, `components/EnabledModelsSection.tsx`, `components/ModelSelector.tsx`, `components/SelectorRow.tsx`.
+- [models.md](docs/agents/models.md): default model and reasoning level, providers registered at session_start, mid-run reasoning changes, remote provider catalogs, `enabledModels` scoping and minimal edits, provider auth listing and credentials. Files: `app/api/models/**`, `app/api/models-config/**`, `app/api/auth/**`, `lib/default-preferences.ts`, `lib/model-scope.ts`, `lib/enabled-models*.ts`, `lib/model-catalog-refresh.ts`, `lib/deferred-provider-models.ts`, `lib/provider-listing*.ts`, `components/ModelsConfig.tsx`, `components/EnabledModelsSection.tsx`, `components/ModelSelector.tsx`, `components/SelectorRow.tsx`.
 - [files-and-access.md](docs/agents/files-and-access.md): worktrees and project grouping, the file access allow-list (the `/api/files` security boundary), file tree visibility, web password throttling. Files: `app/api/files/**`, `app/api/cwd/**`, `app/api/worktrees/**`, `app/api/file-index/**`, `app/api/web-auth/**`, `proxy.ts`, `lib/path-security.ts`, `lib/file-access.ts`, `lib/linked-directory.ts`, `lib/session-file-references*.ts`, `lib/file-tree-visibility.ts`, `lib/worktree.ts`, `lib/paths.ts`, `lib/auth-throttle.ts`, `components/FileExplorer.tsx`.
 - [settings-ui.md](docs/agents/settings-ui.md): Plugins and Skills routes, sidebar group switches, the shared `SettingsUi` blocks every settings panel and add pane uses. Files: `app/api/plugins/**`, `app/api/skills/**`, `components/SettingsUi.tsx`, `components/settings-ui-helpers.ts`, `components/SkillsConfig.tsx`, `components/PluginsConfig.tsx`, `components/PolyforgeConfig.tsx` (the Settings › Polyforge section, pi#122); also before adding a settings section or add pane.
 - [subagents.md](docs/agents/subagents.md): the built-in subagent setting, profiles and their files, run status, completion notifications. Files: `lib/subagent*.ts`, `app/api/subagents/**`, `components/AgentsConfig.tsx`.
-- [client-platform.md](docs/agents/client-platform.md): mobile software keyboard and viewport height, completion sound. Files: `hooks/useViewportHeight.ts`, `hooks/useAudio.ts`, the keyboard-open CSS.
-- [polyforge-panel.md](docs/agents/polyforge-panel.md): the Polyforge dock panel — read-only `app/api/polyforge/**` routes (degradation-first, no 5xx), pf subprocess contract (`--once --events 40`, probe TTL), response sanitization, polling cadence, the shared dock slot, the Settings section's machine detection (pi#122), the configuration panel (the config read/write/reload/history routes, CAS diff, api_key stdin-only, capability floor, bounded history) and the Memory tab (search-then-view `pf recall`/`pf memory show` reads, the 2.20.9 floor, hit/detail passports, the 256 KiB body cap, no polling). Files: `lib/polyforge-status.ts`, `lib/polyforge-detect.ts`, `lib/polyforge-config*.ts`, `lib/polyforge-memory*.ts`, `lib/package-settings.ts`, `app/api/polyforge/**`, `hooks/usePolyforge.ts`, `components/PolyforgePanel.tsx`, `components/PolyforgeMemory.tsx`, `components/PolyforgeConfig.tsx`, `polyforge.*` wiring in `components/AppShell.tsx` and `lib/i18n/messages/*`.
+- [client-platform.md](docs/agents/client-platform.md): the global shortcuts (Ctrl+Alt+N on macOS's dead-key Option+N and Windows AltGr, Esc stacking), mobile software keyboard and viewport height, the terminal's extra keys, its own dark/light theme and its font size following the chat's, completion sound, the message list's bottom pull-up that starts the manual fetch. Files: `hooks/useKeyboardShortcuts.ts`, `hooks/useViewportHeight.ts`, `hooks/useAudio.ts`, `components/TerminalExtraKeys.tsx`, `lib/terminal-extra-keys.ts`, `lib/terminal-theme.ts`, `hooks/useTerminalTheme.ts`, `terminalFontSize()` in `hooks/useChatAppearance.ts`, the keyboard-open CSS, the touch pull-up in `components/ChatWindow.tsx`.
+- [polyforge-panel.md](docs/agents/polyforge-panel.md): the Polyforge dock panel — read-only `app/api/polyforge/**` routes (degradation-first, no 5xx), pf subprocess contract (`--once --events 40`, probe TTL), response sanitization, polling cadence, the shared dock slot, the Work tab (Work | Memory | Messages top strip, order; Jobs and Tasks are Work's sub-tabs in a ~72px right rail, a two-segment bar at ≤640px; page-memory sub-tab, anchors land on Work › Jobs), the Settings section's machine detection (pi#122), the configuration panel (the config read/write/reload/history routes, CAS diff, api_key stdin-only, capability floor, bounded history) the Memory tab (browses the project's memories by default with load more and a total, a keyword switches to the `pf recall` relevance read, `pf memory show` detail, the 2.20.12 floor, hit/detail passports, the 256 KiB body cap, no polling), the read-only Tasks tab (`pf task list`/`pf task show` GET faces, 正在运行 / 全部 sections, no spawn or cancel, the 2.20.12 floor; a responsive block grid with state, project, two-line summary and durations — side by side from 340px on, —, client-side project/state filters over the one list read — running ones tick on a local 1 s render clock that never reads), the desktop dock pin (persisted, suppresses only the outside-press dismissal) and the Jobs tab card stream (block, compact side-by-side cards one GET read of the daemon's own files per tick, ordering, key information only — slug + goal, status, the emphasized needs-input marker, narration-only progress (transcript whitelist) — with the DAG step graph, step durations and reruns in the job detail, the no-Loading empty state, cursor and bounds, the daemon/capsule layout coupling, the two browser-stored preferences). Files: `lib/polyforge-status.ts`, `lib/polyforge-cards*.ts`, `lib/polyforge-panel-preferences.ts`, `lib/polyforge-detect.ts`, `lib/polyforge-config*.ts`, `lib/polyforge-memory*.ts`, `lib/polyforge-tasks*.ts`, `lib/package-settings.ts`, `app/api/polyforge/**`, `hooks/usePolyforge.ts`, `hooks/usePolyforgePanelPreferences.ts`, `components/PolyforgePanel.tsx`, `components/PolyforgeMemory.tsx`, `components/PolyforgeTasks.tsx`, `components/PolyforgeConfig.tsx`, `polyforge.*` wiring in `components/AppShell.tsx` and `lib/i18n/messages/*`.
+- [machine-load.md](docs/agents/machine-load.md): the Session-info popover's and the Debug panel's machine load (#168) — the `GET /api/machine-load` whitelist and degradation, the on-demand 2 s shared sampler and delta CPU, the host-view caveat, open + visible client polling, last-good / clear-on-close, the pinned formats. Files: `app/api/machine-load/route.ts`, `lib/machine-load.ts`, `lib/machine-load-view.ts`, `hooks/useMachineLoad.ts`, `components/MachineLoadSection.tsx`, its mounts in `components/AppShell.tsx` and `components/DebugPanel.tsx`, `session.machine*` in `lib/i18n/messages/*`.
 
 ---
 
 ## Key Design Decisions & Traps
-
-### MCP host (`lib/mcp-host.ts`) — fork state
-The fork's `lib/mcp-host.ts` is older than upstream's (no `lib/mcp-command.ts`, `lib/mcp-status.ts` or `lib/mcp-config-key.ts` yet); the notes below describe the fork as it is. Upstream's newer design is in [mcp-runtime.md](docs/agents/mcp-runtime.md); where they differ, the code wins.
-
-### MCP host (`lib/mcp-host.ts`)
-- `createPiWebBuiltinExtensions()` returns `{ extensions, mcpHost }`; `startRpcSession()` passes the host to the wrapper. The host's inline extension reads the global and project `mcp.json` itself and hands the servers it wants to the SDK's MCP extension with `pi.registerMcpServer()`, so the extension's own `loadConfig` stays empty (ADR 0006). It stays inactive unless `/mcp` belongs to `builtin:mcp`: with `-builtin:mcp`, or a third-party extension that registers `/mcp`, another implementation would connect the servers through its own, unscrubbed transport.
-- **Nothing connects until a prompt.** Before a prompt that starts a run (`!inner.isStreaming`), the wrapper calls `prepareForPrompt()`: the host diffs `mcp.json` against what it registered, unregisters and re-registers only entries whose canonical JSON changed, then waits up to 10 s for servers still connecting. A server that outlasts one full wait is not waited for again. `before_agent_start` also syncs, without waiting, for prompts that do not come through the wrapper.
-- **Stop during that wait** aborts it, and the prompt is rejected unsent with `MCP_WAIT_STOPPED_MESSAGE`, so the client restores the draft. It cannot live in `before_agent_start`: pi emits it before the run has an abort signal, and `AgentSession.abort()` does nothing until a run is active. The `abort` command waits for the withdrawn prompt to unwind before it checks `isRunning()`.
-- **Connection state comes from the transports.** The extension reports none, so `wrapTransportFactory()` wraps pi-web's transport factory and `watchConnection()` listens on each transport it creates (an extra listener and an own `send` on the instance, never a wrapper object: the SDK checks `instanceof StdioTransport`). Ready means every `tools/list` / `resources/list` / `resources/templates/list` request is answered and a macrotask passed without another page being requested; the extension registers the tools in the microtasks that settle the last list. A transport that closes first, or a factory that throws (such as a `PI_WEB_PASSWORD` reference), is failed.
-- **Never unregister a server before its transport exists.** The extension assigns `server.connection` only after loading the MCP runtime, and its removal closes that connection; unregistering earlier finds nothing to close, and the extension connects the server anyway with no way left to close it. The host waits (at most 5 s) for the transport before unregistering. Once it exists, `close()` is safe even mid-handshake: the connection throws away the client when the handshake finishes.
-- A host that has not run for `PI_WEB_MCP_IDLE_MS` (10 minutes; `0` disables) unregisters its servers, unless `ctx.isIdle()` says a run is still going; the next prompt registers them again. The timer is stopped from `agent_start` to `agent_end` and while a prompt waits in `prepareForPrompt()`, and started again at `agent_end`, when `prepareForPrompt()` returns, and whenever a sync finishes. Never rely on `agent_end` alone: a prompt that registers servers and then starts no run (Stop during the wait, a slash command, a rejected preflight) never emits it, and a sync Stop gave up on still finishes in the queue afterwards. A reload binds a new host instance with nothing registered.
-- MCP tools register as `mcp__<server>__<tool>`, sanitized to `[A-Za-z0-9_-]` and hashed past 64 characters, so the name cannot be split back: `docs.v2/search.pages` and `docs_v2/search_pages` register alike, and either part may hold `__`. A tool card reads `server/tool` only from its result's details (`{ server, tool }`); a running call, the status line and a codemode script's calls keep the registered name, which is also what scripts call.
-- Project `.pi/mcp.json` entries follow the project's trust, as in the pi CLI, inherited trust included: `loadMcpConfig` reads the project file only when told the project is trusted, and the host connects every entry it returns. There is no per-entry approval, because a trusted project's `.pi/extensions` already run inside the same boundary, and earlier (on browsing, not on the first prompt). A project entry replaces a global one of the same name. Without a working codemode sandbox, servers with `codemode` exposure are registered as `deferred`, reachable through `tool_search`.
-- **Trust is read fresh on every sync**, through the host's `mayReadProjectConfig(cwd)` option (by default `mayReadProjectConfigNow()` in `lib/project-trust.ts`), never from `ctx.isProjectTrusted()`. That is the wrapper's `SettingsManager` flag: fixed when the wrapper is built — `true` for a folder that needed no trust then — and refreshed only on reload, so a `.pi/mcp.json` that appeared later (`git pull`, `pi mcp add -l`, the model's `write` tool) connected on the next prompt with no trust decision. The read is true only while a decision, exact or inherited, trusts a folder that requires trust — not `getProjectTrustStatus().trusted`, which is `true` for a folder with no trust-requiring resources: `loadMcpConfig` looks at the folder again when it opens the file, and a file landing between the two looks would be read with no decision. Nothing is lost, since `.pi/mcp.json` alone makes a folder require trust. A decision made anywhere, the CLI included, reaches an open session's MCP servers on its next prompt, while its project extensions keep the trust the wrapper was built with until a reload (`/api/project-trust` rebuilds the cwd's wrappers anyway). The cost, twice per prompt (`before_agent_start` and `prepareForPrompt()`), is the SDK's `hasTrustRequiringProjectResources()` (up to 8 `existsSync` in `.pi/`, then one per ancestor for `.agents/skills`) and, for a folder that requires trust, a `lockSync` and read of `trust.json`. An unparsable `trust.json`, or one still locked after the store's ~200 ms wait (synchronous: it blocks the event loop that long), counts as untrusted — fail closed, so connected project servers are unregistered until a read succeeds — with one warning per distinct error, naming the file. The MCP extension's `loadConfig` uses the same read for `autoEnableCodemode`, but the extension calls it only on `session_start`, so that flag follows a trust change only at the next reload. While the project file may not be read, `serverStates()` reports every name it declares as `not-trusted` (problems are keyed by scope and name, since a global entry may share it); the names are read after `loadMcpConfig`, so a file that just landed is reported at once. They come from a file nobody has trusted, so only a regular file of at most 1 MiB whose real path is inside the project is parsed, and only for its `mcpServers` keys: the resolved path is opened once with `O_NOFOLLOW | O_NONBLOCK` and checked through `fstat`, so a link elsewhere is refused before opening, and a FIFO or a device is opened without blocking and never read. `loadMcpConfig()`'s `errors[]` (an unparsable file, an entry the SDK skipped) are logged once per process each instead of dropped.
-
-### Plugins and skills — fork state
-The fork has no MCP group switch or `ConfigSaveTarget` in `components/SettingsUi.tsx` yet; these two paragraphs describe the fork as it is.
 
 ### Plugins and skills
 - `/api/plugins` uses pi's `SettingsManager` + `DefaultPackageManager` for global/project package install, remove, update, enable, and disable. Disabling writes empty `extensions/skills/prompts/themes` arrays for that package entry.

@@ -1,9 +1,11 @@
 /**
- * Client-safe pure model for the Memory tab: the wire types,
- * the six type-filter values, the display constants (page size, pf-side
- * result limit, collapse threshold), the id/tag validators, the
- * newest-first sort, the page slicer and the truncation test. No Node import
- * lives here, so both the server module and the client panel can use it.
+ * Client-safe pure model for the Memory tab (browse mode
+ *): the wire types, the six type-filter values, the display
+ * constants (page size, pf-side result limit, browse page size, collapse
+ * threshold), the id/tag validators, the newest-first sort, the page slicer,
+ * the browse-page merge, the UTF-8 cap (shared with the Tasks server) and the
+ * truncation test. No Node import lives here, so both the server modules and
+ * the client panels can use it.
  */
 
 /** One recall hit, exactly the field set the sanitizer forwards (no body). */
@@ -26,6 +28,15 @@ export interface PolyforgeMemoryDetail extends PolyforgeMemoryHit {
   content: string;
 }
 
+/** One browse page: `pf --json recall` with no query —
+ *  the page's hits, the project total aihub reports and, while more entries
+ *  remain, the opaque cursor of the next page. */
+export interface PolyforgeMemoryPage {
+  items: PolyforgeMemoryHit[];
+  total: number;
+  next_cursor?: string;
+}
+
 /** The fixed type dropdown (spec: `*` for all, else a `prefix.*` family). */
 export const MEMORY_TYPE_FILTERS = [
   "*",
@@ -43,6 +54,9 @@ export const MEMORY_PAGE_SIZE = 20;
 
 /** pf's own per-search result bound (`--limit`); also the narrowing notice's trigger. */
 export const MEMORY_RESULT_LIMIT = 200;
+
+/** Browse page size: one `pf recall --limit 20` per page. */
+export const MEMORY_BROWSE_LIMIT = 20;
 
 /** A body whose `content_len` exceeds this starts collapsed (Assumption 1). */
 export const MEMORY_COLLAPSE_BYTES = 2000;
@@ -86,6 +100,36 @@ export function memoryPage(hits: PolyforgeMemoryHit[], page: number): PolyforgeM
   if (!Number.isSafeInteger(page) || page < 1) return [];
   const start = (page - 1) * MEMORY_PAGE_SIZE;
   return hits.slice(start, start + MEMORY_PAGE_SIZE);
+}
+
+/** "Load more": the next browse page appended after the rows already shown,
+ *  in its own (updated-desc) order, skipping any id already present — an
+ *  entry updated between two pages never shows twice. Pure. */
+export function mergeMemoryPages(previous: PolyforgeMemoryHit[], page: PolyforgeMemoryHit[]): PolyforgeMemoryHit[] {
+  const seen = new Set(previous.map((hit) => hit.id));
+  const merged = [...previous];
+  for (const hit of page) {
+    if (seen.has(hit.id)) continue;
+    seen.add(hit.id);
+    merged.push(hit);
+  }
+  return merged;
+}
+
+/** Cut a text to at most `cap` UTF-8 bytes on a code-point boundary (the
+ *  memory body and the task report forward caps share this one rule). */
+export function capUtf8Bytes(value: string, cap: number): string {
+  if (memoryUtf8ByteLength(value) <= cap) return value;
+  const encoder = new TextEncoder();
+  let bytes = 0;
+  let end = 0;
+  for (const char of value) {
+    const size = encoder.encode(char).length;
+    if (bytes + size > cap) break;
+    bytes += size;
+    end += char.length;
+  }
+  return value.slice(0, end);
 }
 
 /** The forwarded body is shorter than pf says the memory is (Assumption 4):

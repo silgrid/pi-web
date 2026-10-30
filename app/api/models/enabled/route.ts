@@ -22,7 +22,7 @@ import {
   type EnabledModelsView,
 } from "@/lib/enabled-models-runtime";
 import type { EnabledModelsInput } from "@/lib/enabled-models";
-import { createModelRuntimeWithExtensions } from "@/lib/model-runtime";
+import { getModelRuntimeWithExtensions } from "@/lib/model-runtime";
 import { withDeferredProviderModels } from "@/lib/deferred-provider-models";
 import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
 import { invalidateModelsCache } from "@/lib/models-cache";
@@ -38,7 +38,7 @@ interface RequestContext {
 }
 
 async function loadContext(cwd: string): Promise<RequestContext> {
-  const modelRuntime = withDeferredProviderModels(await createModelRuntimeWithExtensions());
+  const modelRuntime = withDeferredProviderModels(await getModelRuntimeWithExtensions());
   const agentDir = getAgentDir();
   return {
     modelRuntime,
@@ -50,7 +50,7 @@ async function loadContext(cwd: string): Promise<RequestContext> {
 
 async function buildView(context: RequestContext): Promise<EnabledModelsView> {
   const { patterns, scope, path } = readEnabledModelsSettings(context.settingsManager, context.paths);
-  const input = await buildEnabledModelsInput(patterns, context.models);
+  const input = await buildEnabledModelsInput(patterns, context.models, { catalog: context.modelRuntime.getModels() });
   const providerNames = new Map(
     context.modelRuntime.getProviders().map((provider) => [provider.id, provider.name]),
   );
@@ -212,7 +212,10 @@ export async function PUT(req: Request) {
       );
     }
 
-    const input = await buildEnabledModelsInput(patterns, context.models, { withProviderGlobs: true });
+    const input = await buildEnabledModelsInput(patterns, context.models, {
+      withProviderGlobs: true,
+      catalog: context.modelRuntime.getModels(),
+    });
     let edit;
     if (op === "clear") {
       edit = clearEnabledModels(input);

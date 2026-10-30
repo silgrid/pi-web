@@ -1377,9 +1377,11 @@ export function SessionSidebar({ selectedSessionId, highlightSessionId, followHi
         setRunningSessionIds(new Set(data.runningSessionIds ?? []));
         setAwaitingSessionIds(new Set(data.awaitingSessionIds ?? []));
         // Detect that the currently selected session was written by another
-        // pi process (TUI / another pi-web window). The first observation of a
-        // session only baselines its generation; subsequent rises notify the
-        // app so the open chat view reloads from disk.
+        // pi process (TUI / another pi-web window). A session already in the
+        // ring when it is selected is baselined at that generation, so merely
+        // selecting it reads nothing. A session absent from the ring at
+        // selection is baselined at 0, so its first write is a rise and is
+        // notified: without that baseline the first sighting swallowed it.
         const selectedId = selectedSessionIdRef.current;
         const selectedWrite = (data.recentSessionWrites ?? []).find(
           (write) => write.sessionId !== undefined && write.sessionId === selectedId,
@@ -1397,6 +1399,8 @@ export function SessionSidebar({ selectedSessionId, highlightSessionId, followHi
             sessionId: selectedId,
             generation: selectedWrite.generation,
           };
+        } else if (selectedId && selectedWriteGenerationRef.current?.sessionId !== selectedId) {
+          selectedWriteGenerationRef.current = { sessionId: selectedId, generation: 0 };
         }
         if (data.sessionListVersion !== sessionListVersionRef.current) {
           // Reuse the invalidated cache; forcing a scan would change the version again.

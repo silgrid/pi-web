@@ -41,6 +41,19 @@ try {
   browser = await chromium.launch();
   for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) {
     const context = await browser.newContext({ viewport, locale: "en-US" });
+    // pi#82: the sidebar's age filter defaults to 7 days and the fixture
+    // sessions are dated 2026-09-05; run with the filter off, exactly as
+    // e2e/run.mjs already does for its own fixtures.
+    await context.addInitScript(() => {
+      try {
+        window.localStorage.setItem("pi-web:session-age-filter-days", "0");
+        // This suite drives the classic single-chat layout (session switch
+        // keeps one workspace terminal and the right panel in place), as
+        // e2e/run.mjs already does for its classic flows; split view is the
+        // default since d344694 and turns a session click into a new pane.
+        window.localStorage.setItem("pi-web:split-view-enabled", "false");
+      } catch {}
+    });
     const page = await context.newPage();
     page.setDefaultTimeout(30_000);
     const errors = [];
@@ -71,6 +84,40 @@ try {
       if (await button.count()) await button.click();
     };
     const showPanel = () => page.getByRole("button", { name: "Show file panel", exact: true }).click();
+    // After a reload the terminal-tab restore effect seeds both the tabs and
+    // the panel-open state. Wait for that effect (the terminal mounts) before
+    // deciding, then open the panel only if it stayed closed.
+    const ensurePanel = async () => {
+      const toggle = page.getByRole("button", { name: /^(Show|Hide) file panel$/i }).first();
+      await toggle.waitFor();
+      await page.locator(".terminal-panel").first().waitFor({ state: "attached" });
+      if ((await toggle.getAttribute("aria-expanded")) !== "true") await toggle.click();
+      await page.locator('[aria-controls="file-panel"][aria-expanded="true"]').first().waitFor();
+    };
+    // Mobile/tabs layout exposes Sessions | Files tabs; the session rows are
+    // in the Sessions pane, so bring it forward before clicking one. Desktop
+    // stacked layout has no such tabs and this is a no-op.
+    const showSessionsTab = async () => {
+      const tab = page.getByRole("tab", { name: /^Sessions$/i });
+      if (await tab.count() && (await tab.getAttribute("aria-selected")) !== "true") await tab.click();
+    };
+    const showFilesTab = async () => {
+      const tab = page.getByRole("tab", { name: /^Files$/i });
+      if (await tab.count() && (await tab.getAttribute("aria-selected")) !== "true") await tab.click();
+    };
+    // "Open workspace terminal" sits in the explorer toolbar, i.e. the Files
+    // pane in the tabs layout; open the sidebar and that pane first.
+    const openWorkspaceTerminal = async () => {
+      await showSidebar();
+      await showFilesTab();
+      await page.getByRole("button", { name: "Open workspace terminal", exact: true }).click();
+    };
+    // pi#14: explorer sections start collapsed (and fetch nothing until
+    // expanded), so the fixture file is not in the DOM by default.
+    const expandExplorerSection = async (root) => {
+      const section = page.locator(`[data-explorer-section="${root}"]`);
+      if (await section.count() && (await section.getAttribute("aria-expanded")) === "false") await section.click();
+    };
     const hidePanel = async () => {
       const button = page.locator("#file-panel").getByRole("button", { name: "Hide file panel", exact: true, includeHidden: true });
       if (await button.getAttribute("aria-expanded") === "true") await button.click();
@@ -78,8 +125,7 @@ try {
     try {
       await page.goto(`${base}/?session=terminal-a1`);
       await page.getByText("Terminal session one message", { exact: true }).waitFor();
-      await showSidebar();
-      await page.getByRole("button", { name: "Open workspace terminal", exact: true }).click();
+      await openWorkspaceTerminal();
       await ready();
       await run("export PR695_TOKEN=alive; printf '\\nTOKEN:%s:%s\\n' \"$PR695_TOKEN\" \"$$\"");
       await waitOutput("TOKEN:alive:[0-9]+");
@@ -115,6 +161,7 @@ try {
 
       await hidePanel();
       await showSidebar();
+      await expandExplorerSection(workspace);
       await page.getByText("note.txt", { exact: true }).click();
       await page.getByText("File viewer fixture", { exact: true }).waitFor();
       assert.equal(await page.locator(".terminal-panel").count(), 1);
@@ -123,14 +170,35 @@ try {
       await ready();
       await hidePanel();
       await showSidebar();
+      await showSessionsTab();
       await page.getByText("Terminal session two", { exact: true }).click();
       await showPanel();
       await run("printf '\\nSESSION:%s:%s\\n' \"$PR695_TOKEN\" \"$$\"");
       await waitOutput(`SESSION:alive:${pid}`);
 
+      // The terminal's own theme swaps xterm's palette in place and survives a reload.
+      const terminalBackground = () => page.locator(".terminal-panel:visible .xterm-viewport").evaluate((el) => getComputedStyle(el).backgroundColor);
+      const appTheme = await page.evaluate(() => document.documentElement.dataset.theme);
+      await page.getByRole("button", { name: "Switch terminal to light theme", exact: true }).click();
+      await page.locator('.terminal-panel:visible[data-terminal-theme="light"]').waitFor();
+      assert.equal(await terminalBackground(), "rgb(251, 251, 252)");
+      assert.equal(await page.evaluate(() => document.documentElement.dataset.theme), appTheme);
+      await run("printf '\\nTHEME:%s:%s\\n' \"$PR695_TOKEN\" \"$$\"");
+      await waitOutput(`THEME:alive:${pid}`);
+
       await page.reload();
+      await ensurePanel();
+      // The restored slide may land on the empty panel state; the terminal tab
+      // itself is restored, so select it (the assertion below is still that
+      // the same pty is reconnected, not recreated).
+      await page.getByRole("tab", { name: "Terminal: workspace-a", exact: true }).click();
       await ready();
       await expectFontWeight(600);
+      await page.locator('.terminal-panel:visible[data-terminal-theme="light"]').waitFor();
+      assert.equal(await terminalBackground(), "rgb(251, 251, 252)");
+      await page.getByRole("button", { name: "Switch terminal to dark theme", exact: true }).click();
+      assert.equal(await terminalBackground(), "rgb(17, 19, 24)");
+      assert.equal(await page.evaluate(() => localStorage.getItem("pi-web:terminal-theme")), "dark");
       await run("printf '\\nREFRESH:%s:%s\\n' \"$PR695_TOKEN\" \"$$\"");
       await waitOutput(`REFRESH:alive:${pid}`);
       assert.equal(created.size, 1, "refresh must reconnect, not create");
@@ -246,24 +314,30 @@ try {
         await route.fulfill({ response });
       });
       await hidePanel();
-      await showSidebar();
-      await page.getByRole("button", { name: "Open workspace terminal", exact: true }).click();
+      await openWorkspaceTerminal();
       await page.getByRole("button", { name: "Terminate terminal workspace-a", exact: true }).click();
       releaseCreation();
       await page.locator(".terminal-panel").waitFor({ state: "detached" });
       await page.unroute("**/api/terminal");
       for (const terminalId of created) assert.equal((await fetch(`${base}/api/terminal/${terminalId}`)).status, 404);
 
-      await showSidebar();
-      await page.getByRole("button", { name: "Open workspace terminal", exact: true }).click();
+      await openWorkspaceTerminal();
       await ready();
       await run("export PR695_WORKSPACE=retained");
       await hidePanel();
       await showSidebar();
-      await page.getByRole("button").and(page.getByTitle(workspace, { exact: true })).first().click();
-      await page.getByRole("button").and(page.getByTitle(otherWorkspace, { exact: true })).click();
+      // The redesigned sidebar has no workspace-switch button, and the
+      // session list is filtered to the selected project. Enter the other
+      // workspace through its session deep link (the same workspace the
+      // removed switcher targeted); the sidebar must then show that
+      // workspace's session, which is what the old assertion proved too.
+      await page.goto(`${base}/?session=terminal-b1`, { waitUntil: "domcontentloaded" });
+      // Wait for the app to hydrate before operating the sidebar toggle.
+      await page.getByText("Other workspace session message", { exact: true }).waitFor();
+      await showSidebar();
+      await showSessionsTab();
       await page.getByText("Other workspace session", { exact: true }).waitFor();
-      await page.getByRole("button", { name: "Open workspace terminal", exact: true }).click();
+      await openWorkspaceTerminal();
       await ready();
       const workspaceTabs = await page.evaluate(() => JSON.parse(sessionStorage.getItem("pi-web:terminal-tabs")).tabs);
       assert.deepEqual(workspaceTabs.map((tab) => tab.cwd).sort(), [workspace, otherWorkspace].sort());
@@ -276,7 +350,10 @@ try {
       for (const name of ["workspace-a", "workspace-b"]) {
         await page.getByRole("button", { name: `Terminate terminal ${name}`, exact: true }).click();
       }
-      await page.locator(".terminal-panel").waitFor({ state: "detached" });
+      // Both workspace terminals are mounted as separate panels, and they
+      // close asynchronously: wait until every panel is gone instead of a
+      // strict single-element locator.
+      await page.waitForFunction(() => document.querySelectorAll(".terminal-panel").length === 0);
       for (const terminalId of created) assert.equal((await fetch(`${base}/api/terminal/${terminalId}`)).status, 404);
       assert.deepEqual(errors, []);
       console.log(`PASS ${viewport.width}: real shell, files, sessions, refresh, reconnect, restart, exit, close during creation, workspace isolation`);

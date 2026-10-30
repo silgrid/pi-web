@@ -59,13 +59,38 @@ test("the only fetch URLs are the two memory routes", () => {
   assert.match(source, /encodeURIComponent\(id\)/, "the memory id is encoded");
 });
 
-test("the guidance state needs no keyword and an empty submit fetches nothing", () => {
-  assert.match(source, /const q = keyword\.trim\(\);/);
-  assert.match(source, /if \(!q \|\| !scope\?\.mapped \|\| !cwd \|\| searching\) return;/, "empty keyword, unmapped cwd and a busy search all no-op");
-  assert.match(source, /polyforge\.memory\.guidance/, "the pre-search state is the keyword guidance");
+test("the tab browses by default: the first page is read once the scope is ready, never for an unmapped cwd", () => {
+  assert.doesNotMatch(source, /polyforge\.memory\.guidance/, "the keyword guidance state is gone (browse is the default)");
+  assert.match(source, /if \(!cwd \|\| !scope\?\.mapped \|\| !scope\.capable \|\| !project\) return;/,
+    "no list read without a mapped, capable scope and a selected project");
+  assert.match(source, /readList\(activeQuery, null\);/, "the current mode's first page is read by the effect");
+  assert.match(source, /\[cwd, scope, project, type, tags, activeQuery, submits\]/,
+    "project, type and tags changes and every submit re-issue the current mode's read");
+  assert.match(source, /if \(tagFilter && !isMemoryTagList\(tagFilter\)\) return;/, "a half-typed tag list reads nothing");
+});
+
+test("load more appends the next keyset page through the pure merge and keeps the list mounted", () => {
+  assert.match(source, /params\.set\("after", after\)/, "the cursor travels to the browse face");
+  assert.match(source, /mergeMemoryPages\(previous\.rows, items\)/, "the next page is appended with id de-duplication");
+  assert.match(source, /onClick=\{\(\) => readList\("", browse\.nextCursor\)\}/, "load more continues the walk");
+  assert.match(source, /browse\?\.nextCursor &&/, "load more is offered only while a next cursor exists");
+  assert.match(source, /polyforge\.memory\.total", \{ total: browse\.total \}/, "the project total is visible");
+  assert.doesNotMatch(source, /scrollTop = 0;\s*\n\s*fetch\(`\/api\/polyforge\/memory\?\$\{params\}`/, "a list read never resets the scroll");
+});
+
+test("a submitted keyword switches to the 200-row relevance read; an empty one returns to browse", () => {
+  assert.match(source, /setActiveQuery\(keyword\.trim\(\)\);/, "submit decides the mode from the keyword");
+  assert.match(source, /if \(query\) \{\s*params\.set\("q", query\);/, "a keyword read carries q (and never a cursor)");
   assert.match(source, /sortMemoryHitsNewestFirst/, "the display order is the pure newest-first sort");
-  assert.match(source, /memoryPage\(hits, page\)/, "paging is the pure 20-row slicer");
+  assert.match(source, /memoryPage\(hits, page\)/, "keyword paging is the pure 20-row slicer");
   assert.match(source, /hits\.length >= MEMORY_RESULT_LIMIT/, "the narrowing notice triggers at the 200 bound");
+  assert.match(source, /seq !== listSeqRef\.current/, "only the newest list read lands");
+});
+
+test("browse failures and an empty project render translated states", () => {
+  for (const key of ["polyforge.memory.loadError", "polyforge.memory.browseEmpty", "polyforge.memory.loadMore", "polyforge.memory.total"]) {
+    assert.ok(source.includes(key), `${key} is rendered`);
+  }
 });
 
 test("the detail's user-facing strings all come from polyforge.memory.* keys", () => {

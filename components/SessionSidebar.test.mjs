@@ -347,13 +347,19 @@ test("a rising external-write generation on the selected session notifies the ap
   // The poll payload is consumed only for the selected session's write entry.
   assert.match(source, /recentSessionWrites\?: \{ sessionId\?: string; path: string; generation: number \}\[\]/);
   assert.match(source, /write\.sessionId !== undefined && write\.sessionId === selectedId/);
-  // First observation of a session only baselines its generation; only a
-  // strictly rising generation for the same selected session notifies.
+  // A session already in the ring when selected is baselined at that
+  // generation; only a strictly rising generation for the same selected
+  // session notifies. A session absent from the ring at selection is baselined
+  // at 0, so its first write notifies instead of being swallowed (#153).
   assert.match(
     source,
     /if \(\s*previous\s*&& previous\.sessionId === selectedId\s*&& selectedWrite\.generation > previous\.generation\s*\) \{[\s\S]*?onExternalSessionChangeRef\.current\?\.\(selectedId\);/,
   );
   assert.match(source, /selectedWriteGenerationRef\.current = \{[\s\S]*?sessionId: selectedId,\s*generation: selectedWrite\.generation,/);
+  assert.match(
+    source,
+    /\} else if \(selectedId && selectedWriteGenerationRef\.current\?\.sessionId !== selectedId\) \{\s*selectedWriteGenerationRef\.current = \{ sessionId: selectedId, generation: 0 \};/,
+  );
 });
 
 test("does not expose disk-backed actions for transient sessions", () => {

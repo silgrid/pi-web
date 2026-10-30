@@ -418,7 +418,10 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
       t("chat.quoteIntro"),
       t("chat.quoteQuestion"),
     ));
-    window.getSelection()?.removeAllRanges();
+    // No `removeAllRanges()` here: inserting focuses the composer, and that
+    // focus already collapses the page's selection. Calling it afterwards also
+    // clears the composer's own selection and drops its caret to offset 0
+    // (#1319), so the quote would be typed in front of instead of after.
     closeQuotedSelection();
   }, [chatInputRef, quotedSelection, closeQuotedSelection, t]);
 
@@ -1342,7 +1345,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
         document.body,
       )}
 
-      <div className="relative shrink-0">
+      <div className="relative flex min-h-0 flex-col">
         {!isEmptyNew && (
           <div
             style={{
@@ -1563,10 +1566,13 @@ function ExtensionDialog({
       if (disposed) return;
       const blocks = body.querySelectorAll<HTMLElement>("pre, .markdown-table-wrap");
       if (blocks.length === 0) return;
-      const needed = fitExtensionDialogWidth(
-        dialog.offsetWidth,
-        Array.from(blocks, (block) => block.scrollWidth - block.clientWidth),
-      );
+      // Code fences wrap their long lines; measured unwrapped, they still widen
+      // the dialog as far as the screen allows and wrap only past that. The
+      // class is an attribute change, which the observer below does not watch.
+      body.classList.add("extension-dialog-measuring");
+      const overflows = Array.from(blocks, (block) => block.scrollWidth - block.clientWidth);
+      body.classList.remove("extension-dialog-measuring");
+      const needed = fitExtensionDialogWidth(dialog.offsetWidth, overflows);
       // Only ever grow: shrinking again would make the dialog jump while it is read.
       if (needed !== null) setFitWidth((prev) => (prev !== null && prev >= needed ? prev : needed));
     };

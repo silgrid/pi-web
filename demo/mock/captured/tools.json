@@ -304,7 +304,7 @@
      "items": {
       "type": "string"
      },
-     "description": "UTF-8 text files under the session cwd to include with the task.",
+     "description": "UTF-8 text files under the session cwd to include with the task. Together they may fill about a tenth of the subagent model's context window, at most 512 KB. Pass fewer or smaller files, or name the paths in prompt if the subagent can read them.",
      "maxItems": 8
     },
     "description": {
@@ -317,7 +317,7 @@
     },
     "model": {
      "type": "string",
-     "description": "Optional provider/modelId override."
+     "description": "Optional provider/modelId override. Append \":<level>\" (off, minimal, low, medium, high, xhigh, max) to also set the thinking level for this run, e.g. \"provider/model:high\"."
     },
     "isolation": {
      "type": "string",
@@ -340,7 +340,7 @@
  },
  {
   "name": "get_subagent_result",
-  "description": "Check an inspectable subagent session and retrieve its latest result.",
+  "description": "Retrieve a subagent session's latest result, such as a report no longer in the conversation. A background run's report arrives on its own when it completes.",
   "parameters": {
    "type": "object",
    "required": [
