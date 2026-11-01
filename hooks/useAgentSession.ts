@@ -35,6 +35,7 @@ import {
   canReleaseHiddenEventStream,
   SESSION_LEASE_TIMEOUT_MS,
   sessionLeaseShowsActivity,
+  staleCheckIntervalMs,
   type SessionLeaseReply,
 } from "@/lib/agent-event-connection";
 import { HIDDEN_PAGE_GRACE_MS } from "@/hooks/usePageHidden";
@@ -274,6 +275,10 @@ const EVENT_STREAM_RECONNECT_DELAY_MS = 1_000;
 const SESSION_LEASE_RENEW_INTERVAL_MS = 30_000;
 // A ready stream silent for two and a half heartbeats is dead (AgentEventConnection reconnects).
 const EVENT_STREAM_STALE_MS = AGENT_EVENT_HEARTBEAT_MS * 2.5;
+// How long a manual fetch's tail lives (`lateTailExpired`), 100 s: the stale
+// bound plus one watchdog check, by when a foreground tab's watchdog has
+// replaced a stream silent for EVENT_STREAM_STALE_MS.
+export const MANUAL_FETCH_TAIL_MS = EVENT_STREAM_STALE_MS + staleCheckIntervalMs(EVENT_STREAM_STALE_MS);
 type SessionLeaseOutcome = SessionLeaseReply | "unanswered" | null;
 // This page's id, the `?holder=` of its event streams: lib/page-debug.ts.
 export { peekPageId };
@@ -416,9 +421,28 @@ type SlashCommandsResponse = {
  * the run's own `agent_start`, and the `connected` of the stream open then
  * (`openedAt`), may still be buffered ahead of them in a half-dead stream: the
  * first `agent_start` keeps the tail (the next discards it), and so does a
- * `connected` of that same stream.
+ * `connected` of that same stream. `recordedAt`: when a manual fetch recorded
+ * the tail; it lives `MANUAL_FETCH_TAIL_MS` (`lateTailExpired`).
  */
-type LateSnapshotMessages = { sid: string; runId: number; messages: AgentMessage[]; beforeRun?: { openedAt: number | null } };
+type LateSnapshotMessages = { sid: string; runId: number; messages: AgentMessage[]; beforeRun?: { openedAt: number | null }; recordedAt?: number };
+
+/**
+ * A manual fetch's tail outlives no `MANUAL_FETCH_TAIL_MS`:
+ * the fetch keeps a stream heard within one heartbeat, and the watchdog
+ * replaces a ready stream silent for `EVENT_STREAM_STALE_MS` only at its next
+ * check, up to one `staleCheckIntervalMs` later. In a foreground tab the kept
+ * stream therefore either delivers the buffered run (SSE order puts it ahead
+ * of any later heartbeat) or is replaced, and the new stream's `connected`
+ * drops the tail, within that bound. A background tab whose timers the browser
+ * throttles may check later still: a buffered run that half-dead stream
+ * flushes after the bound renders twice (the #175 duplicate). Past the bound
+ * the tail is dropped, so a later same-text message is rendered instead of
+ * being swallowed as "already loaded". A mid-run read's tail carries no
+ * `recordedAt`: the run's settle drops it.
+ */
+function lateTailExpired(late: LateSnapshotMessages | null): boolean {
+  return late?.recordedAt !== undefined && Date.now() - late.recordedAt > MANUAL_FETCH_TAIL_MS;
+}
 
 /**
  * The messages a mid-run read newly showed whose `message_end` the stream can
@@ -481,6 +505,17 @@ function keepStreamedMessages(
 }
 
 /**
+ * Whether the stream may never report this message with a `message_end` of its
+ * own during a run: a compaction divider, an extension boundary draft
+ * (`custom_message`) and a bash execution entry reach the file beside the run
+ * without one. A custom message the stream appended itself does
+ * report one, so a head that is the delivered message still consumes below.
+ */
+function mayLackMessageEnd(message: AgentMessage): boolean {
+  return message.role === "custom" || message.role === "bashExecution";
+}
+
+/**
  * Consumes `message` from the head of the read's undelivered tail when it is
  * the same message, so a buffered stream event cannot render it twice. The
  * stream delivers in file order, so only its head is due. Returns true when the
@@ -493,9 +528,24 @@ function takeLateSnapshotMessage(
   message: AgentMessage,
 ): boolean {
   const pending = ref.current;
+  if (pending && lateTailExpired(pending)) {
+    ref.current = null;
+    return false;
+  }
   if (!pending || pending.sid !== sid || pending.runId !== runId) return false;
+  // The stream delivers in file order, so a message it reports is at the tail's
+  // head once everything before it has been consumed. A head the stream may
+  // never report must not hold back that message: pass over it
+  // when it is not the delivered message. A custom message whose own
+  // `message_end` arrives first still matches at the head and is consumed.
+  while (pending.messages[0] && mayLackMessageEnd(pending.messages[0]) && !sameMessage(message, pending.messages[0])) {
+    pending.messages.shift();
+  }
   const loaded = pending.messages[0];
-  if (!loaded || !sameMessage(message, loaded)) return false;
+  if (!loaded || !sameMessage(message, loaded)) {
+    if (pending.messages.length === 0) ref.current = null;
+    return false;
+  }
   pending.messages.shift();
   if (pending.messages.length === 0) ref.current = null;
   return true;
@@ -680,6 +730,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // The read whose answer the view holds: a response that started before it is
   // older than what is on screen and is dropped.
   const lastAppliedReadSeqRef = useRef(0);
+  // The read that last raised the loading screen: a read found stale clears
+  // the loading only when it is still its own.
+  const loadingReadSeqRef = useRef(0);
   const markPromptLanded = useCallback(() => {
     landedPromptRunIdRef.current = promptRunIdRef.current;
     if (unconfirmedSendRef.current?.runId === promptRunIdRef.current) unconfirmedSendRef.current = null;
@@ -933,7 +986,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // issued: any that arrive later are newer than the answer.
     const contentEventsAtRead = runContentEventsRef.current;
     try {
-      if (showLoading) setLoading(true);
+      if (showLoading) {
+        loadingReadSeqRef.current = readSeq;
+        setLoading(true);
+      }
       const params = new URLSearchParams({ deferThinking: "1", deferMedia: "1", tree: "summary" });
       if (options?.force) params.set("force", "1");
       const res = await fetch(`/api/sessions/${encodeURIComponent(sid)}?${params}`, { signal: options?.signal });
@@ -967,6 +1023,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // is a separate, later /state request whose fields are ordered by the
       // usage request id and the extension touch sequence, so it still runs
       // and applies (#177 the review finding).
+      if (staleRead && showLoading) {
+        // The newer read has already applied the view: the loading screen this
+        // read raised ends now, not after its /state round trip. A newer read's
+        // own loading is never cleared here.
+        messagesLoaded = true;
+        if (loadingReadSeqRef.current === readSeq) setLoading(false);
+      }
       if (!staleRead) {
         lastAppliedReadSeqRef.current = readSeq;
         if ((lastReadContextRef.current?.seq ?? 0) < readSeq) {
@@ -1082,7 +1145,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             // fetch that reconnected left that stream: the new one replays none.
             const late = options.suppressReconnect ? [] : lateSnapshotTail(previous, next, null);
             lateSnapshotMessagesRef.current = late.length > 0
-              ? { sid, runId: promptRunIdRef.current, messages: late, beforeRun: { openedAt: eventConnectionRef.current?.snapshot().openedAt ?? null } }
+              ? { sid, runId: promptRunIdRef.current, messages: late, beforeRun: { openedAt: eventConnectionRef.current?.snapshot().openedAt ?? null }, recordedAt: Date.now() }
               : null;
           }
           setMessageKeyAliases((aliases) => carryMessageKeys({ ...previous, aliases }, next));
@@ -2025,7 +2088,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // reads give up MANUAL_FETCH_TIMEOUT_MS after the trigger; the reconnect is
   // not awaited. The fetch ends in exactly one notice: updated (with the local
   // hh:mm), already current, or failed (the view and composer stay as they
-  // were). A trigger until then joins it.
+  // were). A trigger until then joins it. Its triggers are ChatWindow's own:
+  // the floating button's ↻ form at the list's tail and the touch pull-up
+  // (; the toolbar has no ↻), so each pane fetches for itself.
   const manualFetchAvailable = !isNew && Boolean(session?.id);
   const manualFetch = useCallback((): Promise<void> => {
     const sid = sessionIdRef.current;
@@ -2072,7 +2137,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             const late = reconnected ? null : lateSnapshotMessagesRef.current;
             await finishPromptWithoutStream(sid, runId, { readSeqBefore });
             if (late && late.sid === sid && late.runId === promptRunIdRef.current && !lateSnapshotMessagesRef.current) {
-              lateSnapshotMessagesRef.current = { ...late, beforeRun: { openedAt: eventConnectionRef.current?.snapshot().openedAt ?? null } };
+              lateSnapshotMessagesRef.current = { ...late, beforeRun: { openedAt: eventConnectionRef.current?.snapshot().openedAt ?? null }, recordedAt: Date.now() };
             }
           }
         }
@@ -2127,11 +2192,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         dispatch({ type: "end" });
         // A new stream replays no completed message: a read's late-event tail
         // belongs to the previous connection. A manual fetch's tail stays for the
-        // buffered `connected` of the stream that was open when it read (#175).
+        // buffered `connected` of the stream that was open when it read (#175),
+        // within its bound (MANUAL_FETCH_TAIL_MS,).
         {
           const late = lateSnapshotMessagesRef.current;
           const openedAt = late?.beforeRun?.openedAt ?? null;
-          if (openedAt === null || openedAt !== eventConnectionRef.current?.snapshot().openedAt) lateSnapshotMessagesRef.current = null;
+          if (openedAt === null || openedAt !== eventConnectionRef.current?.snapshot().openedAt || lateTailExpired(late)) {
+            lateSnapshotMessagesRef.current = null;
+          }
         }
         if (Array.isArray(event.pendingExtensionUiIds)) {
           // The server replays what it still holds right after this event.
@@ -2160,9 +2228,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         cancelEventStreamGrace();
         // A new run discards a read's late tail, except the first start after a
         // manual fetch read the run while the view saw none (#175): that start
-        // is the run's own, buffered in a half-dead stream ahead of its messages.
+        // is the run's own, buffered in a half-dead stream ahead of its messages
+        // — only within the tail's bound (MANUAL_FETCH_TAIL_MS,).
         const late = lateSnapshotMessagesRef.current;
-        lateSnapshotMessagesRef.current = late?.beforeRun ? { ...late, beforeRun: undefined } : null;
+        lateSnapshotMessagesRef.current = late?.beforeRun && !lateTailExpired(late) ? { ...late, beforeRun: undefined } : null;
         sdkAgentActiveRef.current = true;
         agentRunningRef.current = true;
         externalWriteContentEventsRef.current = runContentEventsRef.current;

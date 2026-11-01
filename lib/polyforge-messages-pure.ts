@@ -1,8 +1,9 @@
 /**
  * Client-safe pure model and helpers for the Messages tab:
  * response types, the page merges, the one acknowledgment decision, the
- * anchor split and the flat direct contact list. No Node import lives here, so both the server module and the
- * client hook/panel can use it.
+ * anchor split, the flat direct contact list and the project
+ * groups. No Node import lives here, so both the server
+ * module and the client hook/panel can use it.
  */
 
 export interface PolyforgeConversation {
@@ -26,6 +27,20 @@ export interface PolyforgeContact {
   id: string;
   display_name: string;
 }
+
+/** One `cli.toml`-mapped project's group: the project name
+ *  and its human contacts (id + display name only — the contact set's own
+ *  projection; roles, machines and the caller never enter). `error` is that
+ *  project's own failed members read; the other groups are unaffected. */
+export interface PolyforgeProjectGroup {
+  project: string;
+  contacts: PolyforgeContact[];
+  error?: string;
+}
+
+/** One project's members read, as the server joins it: the member user ids
+ *  (roles already dropped), or the read's own failure text. */
+export type PolyforgeProjectMembersRead = { ids: string[] } | { error: string };
 
 export interface PolyforgeMessage {
   id: string;
@@ -174,6 +189,15 @@ export function groupConversations(
   return { direct, groups };
 }
 
+/** The contact order every list uses: display name ascending, blank names
+ *  last, the id only as a deterministic tie-break (never rendered). Pure. */
+export function compareContactsByName(a: PolyforgeContact, b: PolyforgeContact): number {
+  const left = a.display_name.trim();
+  const right = b.display_name.trim();
+  if (!left !== !right) return left ? -1 : 1;
+  return left.localeCompare(right) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+}
+
 /** One row of the flat direct (单聊) area: an existing direct conversation,
  *  or a silent contact — a configured contact with no direct conversation. */
 export type PolyforgeDirectRow =
@@ -199,14 +223,72 @@ export function directRows(
     seen.add(contact.id);
     silent.push(contact);
   }
-  silent.sort((a, b) => {
-    const left = a.display_name.trim();
-    const right = b.display_name.trim();
-    if (!left !== !right) return left ? -1 : 1;
-    return left.localeCompare(right) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
-  });
+  silent.sort(compareContactsByName);
   return [
     ...direct.map((conversation) => ({ kind: "conversation" as const, conversation })),
     ...silent.map((contact) => ({ kind: "contact" as const, contact })),
   ];
+}
+
+/** The direct conversation whose peer is this contact: the
+ *  one a silent contact's peer created with a first message, else null. A
+ *  group conversation never matches. Pure. */
+export function conversationForContact(
+  conversations: PolyforgeConversation[],
+  contactId: string,
+): PolyforgeConversation | null {
+  return conversations.find((conversation) => conversation.kind === "direct" && conversation.peer === contactId) ?? null;
+}
+
+/** A mapping's project names as groups use them: trimmed, deduplicated,
+ *  ascending by name. Pure. */
+export function normalizeProjectNames(names: string[]): string[] {
+  const unique = new Set<string>();
+  for (const name of names) {
+    const trimmed = name.trim();
+    if (trimmed) unique.add(trimmed);
+  }
+  return [...unique].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+}
+
+/** The project groups: one per mapped project in name order;
+ *  each project's member ids joined by id to the contact set — an id absent
+ *  from it (a machine, the caller, a non-human) adds no row, an id repeated
+ *  adds one — sorted like every contact list. A failed members read keeps
+ *  its group with no contacts and its own error. Pure. */
+export function buildProjectGroups(
+  projects: string[],
+  memberReads: Record<string, PolyforgeProjectMembersRead | undefined>,
+  contacts: PolyforgeContact[],
+): PolyforgeProjectGroup[] {
+  const byId = new Map<string, PolyforgeContact>();
+  for (const contact of contacts) if (!byId.has(contact.id)) byId.set(contact.id, contact);
+  return normalizeProjectNames(projects).map((project) => {
+    const read = memberReads[project];
+    if (!read || "error" in read) {
+      return { project, contacts: [], error: read?.error || "the project members read failed" };
+    }
+    const seen = new Set<string>();
+    const rows: PolyforgeContact[] = [];
+    for (const id of read.ids) {
+      const contact = byId.get(id);
+      if (!contact || seen.has(id)) continue;
+      seen.add(id);
+      rows.push({ id: contact.id, display_name: contact.display_name });
+    }
+    rows.sort(compareContactsByName);
+    return { project, contacts: rows };
+  });
+}
+
+/** The silent contacts the flat direct area still lists once project groups
+ *  render: a contact shown in any group lives there, not
+ *  twice; with no groups every contact stays. Pure. */
+export function contactsOutsideGroups(
+  contacts: PolyforgeContact[],
+  groups: PolyforgeProjectGroup[],
+): PolyforgeContact[] {
+  const grouped = new Set<string>();
+  for (const group of groups) for (const contact of group.contacts) grouped.add(contact.id);
+  return contacts.filter((contact) => !grouped.has(contact.id));
 }

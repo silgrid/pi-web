@@ -23,6 +23,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
 import { startNextServer } from "./next-server.mjs";
+import { COLD_MS, NAV_MS } from "./timeouts.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 assert.ok(!existsSync(join(root, process.env.PI_WEB_DIST_DIR || ".next", "dev/lock")), "Run in a checkout without an active dev server");
@@ -205,7 +206,7 @@ async function openPage({ viewport = { width: 1280, height: 800 }, locale = "en"
   page.setDefaultTimeout(10_000);
   page.on("pageerror", (error) => errors.push(error.message));
   page.on("console", (event) => { if (event.type() === "error") errors.push(event.text()); });
-  const timeout = warm ? 240_000 : 90_000;
+  const timeout = warm ? COLD_MS : NAV_MS;
   await page.goto(`${base}/?session=${SESSION}`, { waitUntil: "domcontentloaded", timeout });
   await page.getByText("E2E pf panels host session").first().waitFor({ state: "attached", timeout });
   return page;

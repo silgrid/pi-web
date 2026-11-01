@@ -12,30 +12,45 @@
 # caller does not set is read from the operator's
 # ~/.config/piweb/deploy.env (0600). Explicit caller values always win.
 #
-# Dependencies: bash, tmux, npm and curl (curl runs the post-swap service
-# probe and the TLS edge probe; without it the service probe fails naming
-# curl and the edge probe is skipped with one line naming curl).
+# Dependencies: bash, tmux, npm, node and curl (curl runs the post-swap
+# service probe and the TLS edge probe; without it the service probe fails
+# naming curl and the edge probe is skipped with one line naming curl; node
+# writes the probe's JSON body and reads the installed package metadata).
 #
 # The deploy fails closed: a bind address that is not loopback is refused
 # before any install or tmux side effect unless both PIWEB_PORT and
 # PI_WEB_PASSWORD are set, so an incomplete shape can never fall back to
 # pi-web's default port or start without web auth. After the swap, a complete
 # shape (port + password) is probed on the configured port: GET /login must
-# answer 200 and an anonymous /api request must answer 401, within a bounded
-# wait. A failed probe exits 3 so .polyforge/deploy.sh can report the
-# post-swap failure truthfully instead of claiming not_changed.
+# answer 200, an anonymous /api request must answer 401, and an authenticated
+# GET / (the session cookie from POST /api/web-auth; the password travels on
+# stdin and never on curl's argv or in a log) must answer a non-5xx, all
+# within a bounded wait. A failed probe exits 3 so .polyforge/deploy.sh can
+# report the post-swap failure truthfully instead of claiming not_changed.
 # Then the deploy checks that the served pi-web is the installed one: the
-# package `command -v pi-web` resolves to, its version against the version
-# npm just installed under its global root, and the package of the script the
-# running 'piweb' loop process executes must all agree (up to 3 attempts in a
-# 30s deadline, after the loop's first process is up). Any disagreement, or a
-# point that cannot be read ("unknown"), prints exactly one
-# "warn: serving <old>, installed <new>" line and never changes the exit code.
+# loop command itself puts the global install's bin directory first on its
+# PATH, so neither the deploy caller's PATH nor a later hostile
+# `tmux respawn-window` decides which package runs; and the package of the
+# running 'piweb' loop process must equal the package npm just installed under
+# its global root (`npm root -g`), directory AND version, checked up to 3
+# times in a 30s deadline after the loop's first process is up. A mismatch
+# (a wrong prefix, even at the same version) prints the served and installed
+# packages and exits 3, which the lane reports as state=changed. When npm
+# cannot report its global root, the older version-only advisory is kept
+# (`warn: serving <old>, installed <new>`).
+# The same loop command pins the pf the service will use: a non-empty `PF_BIN`
+# from the deploying shell, else the tmux server's global `PF_BIN`, else `pf`
+# found on the loop's pinned PATH. The deploy prints that pf's absolute path
+# and `pf --version` (or a clear 'none found' line), and the loop itself sets
+# `PF_BIN`, so a later hostile `tmux respawn-window` cannot drop it. Operators
+# need not inspect /proc to see which pf the service runs.
 # Then the TLS edge of the first PI_WEB_ALLOWED_HOSTS entry is probed once
 # (https GET /, 5s timeout; any HTTP answer counts). The edge is an
 # independent service, so a failure only prints
 # "warn: TLS edge unreachable (<host>)" and never changes the exit code; an
-# empty list skips the edge probe with one line.
+# empty list skips the edge probe with one line naming the missing
+# PI_WEB_ALLOWED_HOSTS (the probed edge's only source): "warn: TLS edge probe
+# skipped: PI_WEB_ALLOWED_HOSTS is not set (no edge host to probe)".
 #
 # Exposure modes (opt-in via PIWEB_EXPOSE; leaving it unset keeps the legacy
 # self-managed deployment — same bind, same allowed-hosts passthrough, no
@@ -434,12 +449,17 @@ if npm ls -g @agegr/pi-web >/dev/null 2>&1; then
   npm uninstall -g @agegr/pi-web
 fi
 
-# Scratch dir for the PIWEB_INSTALL_REPO channel download; empty (and the
-# trap a no-op) on the default public-npm path.
+# Scratch dirs for the PIWEB_INSTALL_REPO channel download and the service
+# probe's password-bearing files; both are empty (and the trap a no-op) on the
+# paths that do not use them.
 CHANNEL_DIR=""
-cleanup_channel_dir() {
+PROBE_DIR=""
+cleanup_scratch() {
   [ -n "${CHANNEL_DIR}" ] && rm -rf "${CHANNEL_DIR}"
+  [ -n "${PROBE_DIR}" ] && rm -rf "${PROBE_DIR}"
+  return 0
 }
+trap cleanup_scratch EXIT
 
 # PIWEB_INSTALL_REPO opts into the internal GitHub-Releases install channel
 # (strict opt-in: with it unset the public-npm path below is byte-identical
@@ -450,7 +470,6 @@ cleanup_channel_dir() {
 # channel tracks whatever release GitHub reports.
 if [ -n "${PIWEB_INSTALL_REPO:-}" ]; then
   CHANNEL_DIR="$(mktemp -d)"
-  trap cleanup_channel_dir EXIT
   if [ -n "${PIWEB_INSTALL_VERSION:-}" ]; then
     echo "==> Installing ${PKG} from GitHub Release ${PIWEB_INSTALL_VERSION} of ${PIWEB_INSTALL_REPO}"
     CHANNEL_TAG="$(gh release view -R "${PIWEB_INSTALL_REPO}" "${PIWEB_INSTALL_VERSION}" --json tagName --jq .tagName)"
@@ -486,12 +505,80 @@ fi
 # script killed the whole session and rebuilt the tunnel on every run, so
 # every deploy minted a fresh trycloudflare.com URL.)
 
+# The restarter's PATH must not decide which pi-web the loop runs
+#. npm's global root is <prefix>/lib/node_modules, so the bin
+# directory holding the just-installed `pi-web` link is <prefix>/bin; empty
+# when npm cannot report a root.
+installed_piweb_bin_dir() {
+  local root
+  root="$(npm root -g 2>/dev/null || true)"
+  [ -n "${root}" ] || return 1
+  printf '%s/bin' "$(dirname "$(dirname "${root}")")"
+}
+
+# Absolute path of an executable named by <value> (a path or a bare command),
+# or nothing when it is not executable. Used only for the pf line's display;
+# the loop pins the configured value itself.
+pf_absolute_path() {
+  local value="$1"
+  case "${value}" in
+    */*) ;;
+    *)
+      value="$(command -v "${value}" 2>/dev/null || true)"
+      [ -n "${value}" ] || return 1
+      ;;
+  esac
+  [ -x "${value}" ] || return 1
+  case "${value}" in
+    /*) printf '%s' "${value}" ;;
+    *) printf '%s/%s' "$(cd "$(dirname "${value}")" && pwd -P)" "$(basename "${value}")" ;;
+  esac
+}
+
+# The pf the loop will run, resolved once after the install (
+# AC6). Precedence: the deploy caller's non-empty PF_BIN, else the tmux
+# server's global PF_BIN (where an operator usually keeps it), else `pf` on
+# the loop's pinned PATH. A configured value is kept even when the file is
+# missing: PF_BIN is authoritative, so the service then reports Polyforge as
+# not installed with its readable reason instead of silently using another pf.
+resolve_pf_bin() {
+  local configured="" found="" installed_bin=""
+  configured="${PF_BIN:-}"
+  if [ -z "${configured}" ] && command -v tmux >/dev/null 2>&1; then
+    configured="$(tmux show-environment -g PF_BIN 2>/dev/null | sed -n 's/^PF_BIN=//p' | head -n 1 || true)"
+  fi
+  if [ -z "${configured}" ]; then
+    installed_bin="$(installed_piweb_bin_dir || true)"
+    if [ -n "${installed_bin}" ]; then
+      found="$(PATH="${installed_bin}:${PATH}" command -v pf 2>/dev/null || true)"
+    else
+      found="$(command -v pf 2>/dev/null || true)"
+    fi
+    [ -n "${found}" ] || return 0
+    configured="${found}"
+  fi
+  printf '%s' "${configured}"
+}
+
 # The restart-loop command is (re)built at the point of use so it always
 # embeds the final EFFECTIVE_ALLOWED_HOSTS (a quick-tunnel hostname is only
 # known after cloudflared starts).
 build_loop_cmd() {
   # shellcheck disable=SC2016  # the single quotes are deliberate: the tmux
   # command string must expand the variables inside the loop's shell, not here
+  local installed_bin="" path_prefix="" pf_prefix=""
+  installed_bin="$(installed_piweb_bin_dir || true)"
+  if [ -n "${installed_bin}" ]; then
+    # Prepend the installed prefix's bin dir inside the loop itself: a new
+    # window or a hostile-shell respawn then still resolves the installed
+    # pi-web, not whatever the restarter's PATH prefers.
+    path_prefix="PATH='${installed_bin}':\"\${PATH}\" "
+  fi
+  if [ -n "${PF_BIN_EFFECTIVE:-}" ]; then
+    # Pin the resolved pf too, so the printed line names exactly what the
+    # service gets and a hostile respawn cannot drop it ( AC6).
+    pf_prefix="PF_BIN='${PF_BIN_EFFECTIVE}' "
+  fi
   # Unset provider env credentials that leak from the container shell
   # (pi#109): OPENAI_API_KEY would activate pi's builtin `openai` provider
   # and dump its full 44-model backlog (gpt-4/gpt-4o/o1/o3/...) into the
@@ -499,7 +586,7 @@ build_loop_cmd() {
   # models.json providers.
   LOOP_CMD="
   while true; do
-    PI_WEB_IDLE_TIMEOUT_MS=0 ${PI_WEB_PASSWORD:+PI_WEB_PASSWORD='${PI_WEB_PASSWORD}'} ${EFFECTIVE_ALLOWED_HOSTS:+PI_WEB_ALLOWED_HOSTS='${EFFECTIVE_ALLOWED_HOSTS}'} env -u OPENAI_API_KEY -u OPENAI_BASE_URL pi-web -H ${HOST} ${PORT_ARGS}
+    ${path_prefix}${pf_prefix}PI_WEB_IDLE_TIMEOUT_MS=0 ${PI_WEB_PASSWORD:+PI_WEB_PASSWORD='${PI_WEB_PASSWORD}'} ${EFFECTIVE_ALLOWED_HOSTS:+PI_WEB_ALLOWED_HOSTS='${EFFECTIVE_ALLOWED_HOSTS}'} env -u OPENAI_API_KEY -u OPENAI_BASE_URL pi-web -H ${HOST} ${PORT_ARGS}
     echo '[piweb] pi-web exited; restarting in 5s' >&2
     sleep 5
   done
@@ -627,6 +714,25 @@ tailscale_serve_current() {
   tailscale serve status 2>/dev/null | grep -qE "(127\.0\.0\.1|localhost):${LOCAL_PORT}([^0-9]|$)"
 }
 
+# Resolve and print the pf the loop will run ( AC6). Done once,
+# after the install, before any window is built; build_loop_cmd then pins the
+# same value. Both a configured-but-missing PF_BIN and no pf at all print a
+# clear 'none found' line instead of a misleading path.
+PF_BIN_EFFECTIVE="$(resolve_pf_bin)"
+PF_BIN_PATH=""
+PF_BIN_VERSION=""
+if [ -n "${PF_BIN_EFFECTIVE}" ]; then
+  PF_BIN_PATH="$(pf_absolute_path "${PF_BIN_EFFECTIVE}" || true)"
+  if [ -n "${PF_BIN_PATH}" ]; then
+    PF_BIN_VERSION="$("${PF_BIN_PATH}" --version 2>/dev/null | head -n 1 || true)"
+    echo "==> pf: ${PF_BIN_PATH} (${PF_BIN_VERSION:-version unavailable})"
+  else
+    echo "==> pf: none found (PF_BIN='${PF_BIN_EFFECTIVE}' is not an executable; the service will report Polyforge as not installed)"
+  fi
+else
+  echo "==> pf: none found (no PF_BIN and no pf on the loop PATH; the service will report Polyforge as not installed)"
+fi
+
 case "${EXPOSE}" in
   "" | lan | tailscale)
     # Legacy / LAN path: identical to the original script except that a
@@ -715,20 +821,53 @@ esac
 # Service probe. A complete shape (configured port + password) has an endpoint
 # the deploy can actually verify; probe it after the swap, before the deploy
 # may claim success. The loop window starts asynchronously, so wait on the real
-# condition with a deadline instead of assuming the bind is immediate.
+# condition with a deadline instead of assuming the bind is immediate. The
+# password reaches curl only through a 0600 body file written from node's
+# stdin: never an argv token and never a log line.
 # ---------------------------------------------------------------------------
+write_web_auth_body() {
+  local file="$1"
+  printf '%s' "${PI_WEB_PASSWORD}" | node -e '
+let raw = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => { raw += chunk; });
+process.stdin.on("end", () => { process.stdout.write(JSON.stringify({ password: raw })); });
+' >"${file}"
+}
+
 probe_configured_service() {
   local host="$1" port="$2"
-  local deadline=$((SECONDS + 20)) login="" anon=""
+  local deadline=$((SECONDS + 20)) login="" anon="" auth="" page=""
+  local body jar
+  PROBE_DIR="$(mktemp -d)"
+  body="${PROBE_DIR}/web-auth-body.json"
+  jar="${PROBE_DIR}/cookies.txt"
+  if ! write_web_auth_body "${body}"; then
+    echo "ERROR: could not prepare the authenticated service probe (node failed to write its 0600 body file)." >&2
+    return 1
+  fi
+  chmod 600 "${body}"
   while [ "${SECONDS}" -lt "${deadline}" ]; do
     login="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 2 "http://${host}:${port}/login" 2>/dev/null || true)"
     anon="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 2 "http://${host}:${port}/api/sessions" 2>/dev/null || true)"
     if [ "${login}" = "200" ] && [ "${anon}" = "401" ]; then
-      return 0
+      auth="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 2 \
+        -H 'Content-Type: application/json' --data-binary "@${body}" -c "${jar}" \
+        "http://${host}:${port}/api/web-auth" 2>/dev/null || true)"
+      page=""
+      if [ "${auth}" = "200" ]; then
+        page="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 2 -b "${jar}" \
+          "http://${host}:${port}/" 2>/dev/null || true)"
+        case "${page}" in
+          [1-4][0-9][0-9])
+            return 0
+            ;;
+        esac
+      fi
     fi
     sleep 1
   done
-  echo "ERROR: pi-web on ${host}:${port} did not answer GET /login with 200 and the anonymous API with 401 within 20s (last: /login ${login:-unreachable}, /api/sessions ${anon:-unreachable})." >&2
+  echo "ERROR: pi-web on ${host}:${port} did not answer GET /login with 200, the anonymous API with 401, and an authenticated GET / with a non-5xx within 20s (last: /login ${login:-unreachable}, /api/sessions ${anon:-unreachable}, POST /api/web-auth ${auth:-unreachable}, authenticated / ${page:-unreachable})." >&2
   return 1
 }
 
@@ -750,16 +889,17 @@ if [ -n "${PIWEB_PORT:-}" ] && [ -n "${PI_WEB_PASSWORD:-}" ]; then
     echo "==> pi-web was installed and its tmux window was swapped, but the configured service is not healthy." >&2
     exit 3
   fi
-  echo "==> Service probe OK: http://${PROBE_HOST}:${LOCAL_PORT}/login 200, anonymous /api/sessions 401"
+  echo "==> Service probe OK: http://${PROBE_HOST}:${LOCAL_PORT}/login 200, anonymous /api/sessions 401, authenticated / non-5xx"
 fi
 
 # ---------------------------------------------------------------------------
-# Served == installed self-check (warn-only). npm may install into a prefix
-# whose bin dir is not on the service PATH, leaving the loop serving an older
-# pi-web while the deploy reports success. Three points must agree: the
-# package `command -v pi-web` resolves to, its version against the version
-# npm just installed, and the package of the script the running loop process
-# executes. Paths and versions only are printed, never a deploy.env value.
+# Served == installed self-check. npm may install into a prefix whose bin dir
+# is not on the service PATH, leaving the loop serving an older (or same-
+# version, old-prefix) pi-web while the deploy reports success. The loop
+# command pins the installed prefix's bin dir itself, and the package of the
+# script the running loop process executes must equal the package npm just
+# installed under its global root (`npm root -g`) — directory AND version.
+# Paths and versions only are printed, never a deploy.env value.
 # ---------------------------------------------------------------------------
 
 # Print "<version>|<package dir>" of the PKG package that owns <path> (symlinks
@@ -784,15 +924,21 @@ for (;;) {
 }' "$1" "${PKG}" 2>/dev/null || true
 }
 
-# The version the install just wrote under npm's global root; falls back to
-# `npm ls -g`, then "unknown".
-installed_piweb_version() {
-  local root version=""
+# "<version>|<package dir>" npm just wrote under its global root; empty when
+# the root or the package cannot be read (a degraded host, or a fixture whose
+# npm does not model `root -g`).
+installed_piweb_package() {
+  local root
   root="$(npm root -g 2>/dev/null || true)"
-  if [ -n "${root}" ]; then
-    version="$(piweb_package_of "${root}/${PKG}/package.json")"
-    version="${version%%|*}"
-  fi
+  [ -n "${root}" ] || return 0
+  piweb_package_of "${root}/${PKG}/package.json"
+}
+
+# The installed version alone; falls back to `npm ls -g`, then "unknown".
+installed_piweb_version() {
+  local installed version=""
+  installed="$(installed_piweb_package)"
+  version="${installed%%|*}"
   if [ -z "${version}" ]; then
     version="$(npm ls -g "${PKG}" --depth=0 2>/dev/null | grep -oE "${PKG}@[0-9][^ ]*" | head -n 1 | sed "s|^${PKG}@||" || true)"
   fi
@@ -828,11 +974,16 @@ EOF
 
 # Bounded: wait (polling every second) for the loop's first live process, then
 # compare up to 3 times, all inside one 30 s deadline; the last attempt rules.
+# A known install and a different running package is a hard failure: the
+# deploy has already swapped the service, so the caller reports state=changed
+# (exit 3), never state=deployed. Without a readable npm root the older
+# version-only advisory is kept.
 check_served_installed() {
-  local installed served="" proc="" proc_pkg="" attempts=0 deadline=$((SECONDS + 30)) cmd_path
-  installed="$(installed_piweb_version)"
-  cmd_path="$(command -v pi-web 2>/dev/null || true)"
-  [ -z "${cmd_path}" ] || served="$(piweb_package_of "${cmd_path}")"
+  local installed_pkg="" installed_version="" serving="" served_dir=""
+  local proc="" proc_pkg="" attempts=0 deadline=$((SECONDS + 30))
+  installed_pkg="$(installed_piweb_package)"
+  installed_version="${installed_pkg%%|*}"
+  [ -n "${installed_version}" ] || installed_version="$(installed_piweb_version)"
   while [ "${attempts}" -lt 3 ] && [ "${SECONDS}" -lt "${deadline}" ]; do
     proc="$(running_piweb_script)"
     if [ -n "${proc}" ]; then
@@ -841,22 +992,28 @@ check_served_installed() {
       case "${proc}" in
         "path "*) proc_pkg="$(piweb_package_of "${proc#path }")" ;;
       esac
-      if [ -n "${served}" ] && [ "${proc_pkg}" = "${served}" ] && [ "${served%%|*}" = "${installed}" ]; then
-        echo "==> Served == installed: pi-web ${installed} (${served#*|})"
+      if [ -n "${installed_pkg}" ] && [ "${proc_pkg}" = "${installed_pkg}" ]; then
+        echo "==> Served == installed: pi-web ${installed_version} (${installed_pkg#*|})"
         return 0
       fi
       [ "${attempts}" -ge 3 ] && break
     fi
     sleep 1
   done
-  # The running process's package is what is served; when it cannot be read,
-  # fall back to the package PATH resolves to.
-  local serving="${proc_pkg%%|*}"
-  [ -n "${serving}" ] || serving="${served%%|*}"
-  echo "warn: serving ${serving:-unknown}, installed ${installed}"
+  serving="${proc_pkg%%|*}"
+  served_dir="${proc_pkg#*|}"
+  if [ -n "${installed_pkg}" ]; then
+    [ -n "${serving}" ] || serving="unknown"
+    [ -n "${served_dir}" ] || served_dir="unknown"
+    echo "ERROR: served pi-web ${serving} (${served_dir}) is not the installed ${installed_version} (${installed_pkg#*|}); the loop is not running the package npm just installed." >&2
+    return 1
+  fi
+  echo "warn: serving ${serving:-unknown}, installed ${installed_version}"
 }
 
-check_served_installed
+if ! check_served_installed; then
+  exit 3
+fi
 
 # TLS edge probe: warn-only (the edge is not this script's service), single
 # attempt, no retry. Only the operator's own first allowed host is probed;
@@ -865,7 +1022,7 @@ EDGE_HOST="${PI_WEB_ALLOWED_HOSTS:-}"
 EDGE_HOST="${EDGE_HOST%%,*}"
 EDGE_HOST="$(printf '%s' "${EDGE_HOST}" | tr -d " \t\"'")"
 if [ -z "${EDGE_HOST}" ]; then
-  echo "==> PI_WEB_ALLOWED_HOSTS is empty; skipping the TLS edge probe."
+  echo "warn: TLS edge probe skipped: PI_WEB_ALLOWED_HOSTS is not set (no edge host to probe)"
 elif ! command -v curl >/dev/null 2>&1; then
   echo "warn: TLS edge probe skipped: curl is not installed (${EDGE_HOST})"
 else

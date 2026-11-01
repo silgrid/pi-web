@@ -44,6 +44,8 @@ test("the list route answers only the sanitized rows, timing facts included, nev
   assert.match(list, /const tasks = await listPolyforgeTasks\(\);\s*return NextResponse\.json\(\{ \.\.\.capability, tasks \}\);/, "the rows come from the one passport");
   const libSource = await read("../../../lib/polyforge-tasks.ts");
   const passport = libSource.slice(libSource.indexOf("export function sanitizeTaskRow("), libSource.indexOf("export function sanitizeTaskListAnswer("));
-  for (const field of ["started_at", "ended_at", "wall_consumed_ns"]) assert.match(passport, new RegExp(`sanitized\\.${field} =`), `the row passport forwards ${field}`);
-  assert.doesNotMatch(passport, /report|created_at|origin|delivered|tokens_consumed/, "no other raw field is read by the row passport");
+  // / owner-intended 2026-10-30 contract extension, not a relaxation:
+  // report_tail and reporter join the forwarded set; the full report stays unread.
+  for (const field of ["started_at", "ended_at", "wall_consumed_ns", "report_tail", "reporter"]) assert.match(passport, new RegExp(`sanitized\\.${field} =`), `the row passport forwards ${field}`);
+  assert.doesNotMatch(passport.replace(/\breport_tail\b|\breporter\b/g, ""), /report|created_at|origin|delivered|tokens_consumed/, "no other raw field is read by the row passport");
 });

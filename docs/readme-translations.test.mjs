@@ -23,4 +23,12 @@ for (const name of TRANSLATIONS) {
   test(`${name} uses the local screenshot`, () => {
     assert.match(read(name), /\]\(\.\/screenshot2\.png\)/);
   });
+
+  // the sidebar worktree switcher is retired, so a translation
+  // neither advertises it nor links its retired docs/worktrees*.md page.
+  test(`${name} carries no retired worktree-switcher claim`, () => {
+    const text = read(name);
+    assert.doesNotMatch(text, /\*\*Git worktree\*\*/, "no worktree-switcher bullet");
+    assert.doesNotMatch(text, /\]\(\.\/worktrees[^)]*\.md\)/, "no link to the retired worktrees page");
+  });
 }

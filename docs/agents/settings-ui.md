@@ -25,8 +25,83 @@ shared blocks; its machine-level detection comes from
 `GET /api/polyforge/detect` (the route contract and the detection rules are in
 [polyforge-panel.md](polyforge-panel.md)).
 
+**Order and disclosure.** Top to bottom: the page title, the
+machine-status card, the configuration surface (machine-scope note, the three
+source cards — cli.toml, `[daemon]`, and the merged 工作区 / Workspace card
+Reload with its read/error/reason text), the workflow card
+ ([polyforge-panel.md](polyforge-panel.md#workflow-card)),
+the package-switch card, the Jobs card stream card, then the read-outs — recent
+panel writes, the install/upgrade command — and the footer last (the read-only
+declared-candidates read-out is gone: the workflow card carries those step
+facts). Nothing is
+removed or conditionally hidden; parts are folded:
+
+- **Detection** keeps its card title and shows one visible summary line —
+  `pf {version} · {line} · daemon {daemon}` (`polyforge.settings.configSummary`)
+  — which is the toggle for the six detail rows below. An abnormal state is
+  named in that line as text: pf absent reads 「未安装」 (`notInstalled`, which
+  replaces the old standalone paragraph), a version below the minimum appends
+  the 「版本过低」 text, an unreachable daemon reads as such. `detectError` and
+  Re-detect stay outside the fold; the detection cadence is unchanged.
+- **Configuration cards** show only the seven common writable keys by default
+  (`max_concurrent_jobs`, `step_timeout`, `stall_window`, `api_key`,
+  `summarize.models`, `summarize.language`, `summarize.interval_sec` — the
+  `WRITABLE` set, decided by key, never by whether the cwd is mapped), in pf's
+  order. Every other item of a card — known read-only keys and unknown/future
+  keys alike — sits in that card's counted 「只读项 (n)」 disclosure
+  (`configReadOnlyCount`), rendered through the same row markup and the same
+  page-level columns. The 工作区 card carries three sources,
+  each row with a visible source-file tag (`cli.toml` / `.polyforge.yaml`):
+  its common rows are the three `summarize.*` keys (written to the workspace
+  yaml); the `[workspace."<path>"]` mapping rows (cli.toml) and the read-only
+  `memory_policy` rows (the default entry, then each mapped project's own
+  lists, under 「记忆策略（只读）」 with the append note) fold behind its row
+  count (`configRowCount`). Each row keeps its own write path. In every card
+  the legend and the column header sit above the fold, so collapsing a card
+  hides rows only. With an unmapped cwd the
+  three `summarize.*` rows stay in the common position, read-only, with the
+  visible reason. Expanding yields exactly one row per item with its write
+  control unchanged.
+- **Read-only rows** share one muted treatment wherever they are: the value,
+  the workspace path, chips and the unset placeholder all take
+  `--text-muted` under `.polyforge-config-row.is-readonly`, with no write
+  control.
+- **Read-outs** are closed by default: the history
+  title carries its entry count (`configHistoryCount`), the install title no count.
+  Each opens to today's content (rollback buttons). The install body is forced open, with no extra disclosure, until
+  detection proves pf present and new enough (pending, absent or below the
+  minimum); the forced state is never stored. The copy control sits on the
+  install title line, so it is reachable without expanding.
+- **Inline feedback.** A save, its client-side validation error, or a
+  rollback renders its result under its own row/entry (keyed by `item.key` /
+  `entry.id`), an error with `role="alert"`; copy feedback renders in the
+  install block. The footer keeps page-level status only: detection, the
+  package switch and Reload. The write request shapes are unchanged.
+- **Locks.** A region holding an unsaved draft or a row error (today only the
+  history block can, by a failed rollback: the folds hold no writable key)
+  renders open whatever is stored, its toggle shows a visible marker
+  (`configDraftMarker` / `configErrorMarker`) and a toggle attempt writes
+  nothing. The marker is runtime state, never stored.
+- **Storage.** Each region's open/closed state lives in this browser's
+  localStorage under one key, `pi-web:polyforge-config-disclosure`
+  (`lib/polyforge-disclosure.ts`, read by `hooks/usePolyforgeDisclosure.ts`
+  through `useSyncExternalStore` with the all-closed map as the server
+  snapshot): a JSON object of booleans for the seven regions `detect`,
+  `cliToml`, `daemon`, `workspace`, `history`, `install` and `workflow`
+  (the workflow card's write controls; the retired `summarize`
+  and `candidates` regions are gone and a stored value naming them is
+  ignored), all closed by default. An absent, blocked, unreadable, corrupt or
+  wrong-typed value reads as the defaults, a partial object merges them, an
+  unknown region is ignored, and a refused write never throws. A toggle
+  storage refuses (blocked, quota) still takes effect: it lives in memory for
+  the page's lifetime and is announced like a stored one, so every region stays
+  reachable without storage; the next stored write makes storage the truth
+  again. Nothing is sent to or read from the server, pf config or
+  settings.json.
+
 A "Jobs card stream" card carries exactly two numeric
-controls for the dock's Jobs tab: title length (default 30, 10–200) and poll
+controls for the dock's Jobs tab: title length (default 60, 10–200;
+raised it from 30 so a goal fills the card's two-line clamp) and poll
 interval in seconds (default 3, 1–60), each a `ConfigDetailGridRow` with its
 input, a Save `ConfigButton` right after it and a visible hint. The values live
 in this browser's localStorage only (`pi-web:polyforge-title-length`,
@@ -37,11 +112,13 @@ detected; the inputs show the stored value clamped (absent/corrupt/non-positive
 stores and dispatches `pi-web:polyforge-preferences` so an open panel applies
 it without a reload.
 
-The configuration panel below the detection block is its own surface: the
+The configuration panel below the detection card is its own surface: the
 machine-scope note is always visible, and the keys of `pf --json config list`
 render in source cards, each with a title and a visible one-line
-hint, in a fixed order — cli.toml flat keys, `[daemon]`, workspace mapping,
-summarize, then the declared candidates. The grouping is presentation only and
+hint, in a fixed order — cli.toml flat keys, `[daemon]`, then the 工作区 card
+(the workspace mapping, the summarize keys and the read-only
+memory policy together; `configCards()` folds the helpers' summarize group into
+it). The grouping is presentation only and
 lives in the import-free `components/polyforge-config-helpers.ts`: pf marks no
 table membership, so the daemon card uses a copy of pf's five `[daemon]` key
 names (a key pf adds later shows in the cli.toml card until the list is
@@ -51,9 +128,9 @@ The detection block and the package switch are cards too, and the detection
 rows use the same key-column width as the configuration cards.
 
 Every card declares only its effective columns:
-key | applies | file value for cli.toml and summarize, key | applies | file
-value | daemon value for `[daemon]`, and workspace path | applies | projects
-for the workspace card. The key and applies tracks are page-level fixed widths
+key | applies | file value for cli.toml and the 工作区 card (a mapping row's
+value is its projects), key | applies | file value | daemon value for
+`[daemon]`. The key and applies tracks are page-level fixed widths
 (`--polyforge-col-key`, `--polyforge-col-class` on `.settings-polyforge`) and
 the rows are CSS subgrids, so the value column starts at the same x in every
 card whether or not that card has a daemon column; no card renders an empty
@@ -75,17 +152,15 @@ file value beside the daemon's loaded value with a visible stale reason (and,
 when `pf --json ops status` fails, the column says the daemon is not running),
 and the workspace summarize values come from the cwd-resolved workspace (their
 rows stay visible but read-only, with the visible reason, when the cwd is
-unmapped). Under 640px the same cells stack in one column, the header hides
-and nothing overflows horizontally. Below the pf capability floor,
+unmapped). Under 640px each row is two columns: the key on
+the left with its class badge flush right on the same line (the badge is never
+squeezed; a long key wraps instead), then the file value and the daemon value
+each across the whole row below; the header hides and nothing overflows
+horizontally. Wider layouts keep the shared columns. Below the pf capability floor,
 or an old list shape, the write controls are unavailable with visible reason
-text while detection keeps working. Candidate steps are read-only and render
-in the candidates card as one collapsible group per project (native
-`<details open>`; summary = project + step count, project-less steps in one
-"all projects" group last), each step a line with its models as chips on the
-line below. `groupStepsByProject()` sorts projects and steps by name (pf builds
-them from Go maps, so its order is unstable) but never reorders a step's
-models, which are pf's order. An undeclared step is labelled bundle default
-and no composed list is shown. The
+text while detection keeps working. The step candidates are no longer a
+read-out here: the workflow card shows them per project with
+their effective chains. The
 write controls are schema-derived (numeric/duration bounds from pf, enforced
 again client-side before the write so 0/9 cannot be submitted; free-text
 language, ordered models, an api_key password field that clears after save).
@@ -111,8 +186,10 @@ claim.
   panel, no error surface — plus the copyable install.sh install/upgrade
   command (`polyforge.settings.installCommand`, a fixed i18n string with
   placeholders only, identical in every locale; a copy button puts it on the
-  clipboard, nothing ever executes it). The command is shown in every state.
-- **Rows.** Version (verbatim, with the non-blocking 「版本过低」 hint below
+  clipboard, nothing ever executes it). The command is reachable in every
+  state: folded while pf is detected healthy, open without a disclosure
+  otherwise.
+- **Rows** (folded behind the summary line,). Version (verbatim, with the non-blocking 「版本过低」 hint below
   v2.18.1), line (内部线/公开线/未知), the pi skill package state
   (已安装/未安装, 已启用/未启用 — global settings only), the two read-only
   Claude Code items (skill symlink present/absent, SessionStart hook

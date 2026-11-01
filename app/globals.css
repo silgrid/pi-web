@@ -1861,6 +1861,10 @@ pre, code {
   pointer-events: auto;
 }
 
+/* The chat's floating button (ChatWindow,): ↓ (scroll to the latest)
+   while the reader is scrolled up, the manual fetch's ↻ at the tail of a saved
+   session; hidden (no is-visible) only with neither form. One 32px control
+   either way. */
 .chat-scroll-to-bottom {
   display: inline-flex;
   align-items: center;
@@ -1901,7 +1905,8 @@ pre, code {
 }
 
 .chat-scroll-to-bottom.is-visible:hover,
-.chat-scroll-to-bottom.is-visible:focus-visible {
+.chat-scroll-to-bottom.is-visible:focus-visible,
+.chat-scroll-to-bottom.is-visible[aria-busy="true"] {
   opacity: 1;
   background: var(--bg-hover);
   color: var(--text);
@@ -2276,9 +2281,11 @@ span.token.table {
 /* Polyforge dock resize handle (pi#117): the dock is an overlay anchored
    right, so the handle straddles its left edge instead of sitting in the
    flex flow — but it stays a DOM child of the dock so the pi#113 outside-
-   pointerdown dismissal counts it as part of the dock. Same idle-separator
-   language as .panel-resize-handle (the dock's own border). */
-.pf-dock-resize-handle {
+   pointerdown dismissal counts it as part of the dock. The Messages list's
+   divider reuses the same look. Same idle-separator
+   language as .panel-resize-handle (the panel's own border). */
+.pf-dock-resize-handle,
+.pf-messages-resize-handle {
   position: absolute;
   top: 0;
   bottom: 0;
@@ -2289,7 +2296,8 @@ span.token.table {
   touch-action: none;
   outline: none;
 }
-.pf-dock-resize-handle::after {
+.pf-dock-resize-handle::after,
+.pf-messages-resize-handle::after {
   content: "";
   position: absolute;
   top: 0;
@@ -2302,7 +2310,10 @@ span.token.table {
 }
 .pf-dock-resize-handle:hover::after,
 .pf-dock-resize-handle:focus-visible::after,
-.pf-dock-resize-handle.is-resizing::after {
+.pf-dock-resize-handle.is-resizing::after,
+.pf-messages-resize-handle:hover::after,
+.pf-messages-resize-handle:focus-visible::after,
+.pf-messages-resize-handle.is-resizing::after {
   background: color-mix(in srgb, var(--text-muted) 70%, var(--border));
 }
 /* Mobile sheet resize handle (pi#120): the bottom sheets (Polyforge,
@@ -2755,10 +2766,10 @@ span.token.table {
 /* While the software keyboard is up (set by useViewportHeight), only a few
    hundred pixels remain above it. Hand them to the conversation: collapse the
    model/controls row and the extension status shelf, and drop the home
-   indicator inset the keyboard already covers. They come back when the keyboard closes. Phone landscape is wider
-   than the mobile breakpoint but leaves the least room of all, so short
-   touch screens opt in too; tablets keep their controls because the keyboard
-   leaves them enough height. */
+   indicator inset the keyboard already covers. They come back when the
+   keyboard closes. Phone landscape is wider than the mobile breakpoint but
+   leaves the least room of all, so short touch screens opt in too; tablets
+   keep their controls because the keyboard leaves them enough height. */
 @media (max-width: 640px), (pointer: coarse) and (max-height: 500px) {
   html[data-keyboard-open] .extension-status-shelf {
     display: none !important;

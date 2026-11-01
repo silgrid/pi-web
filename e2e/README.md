@@ -36,6 +36,16 @@ Coverage:
   refresh, sync between tabs and reset independently without changing width or
   font size. Headings and Markdown emphasis retain their weights.
 - Unknown sessions and paths outside the fixture project are rejected.
+- Settings › Models context windows (`model-context.mjs`, desktop and mobile,
+  stubbed config/auth/model routes): a managed model's field shows the
+  resolved window as its placeholder on the row's own line, edits wait for
+  the shared Save, a saved override reopens, invalid text is refused without
+  a write, a failed save keeps the draft, and clearing it restores the file
+  with other providers' settings intact.
+- The model picker (`model-selector.mjs`), with a synthetic catalog: on a phone, a simulated keyboard
+  (visual viewport shrink, pan, a late height with no event) keeps the same
+  filter focused and the list in the visible viewport. Native phone keyboards
+  still need real-device verification.
 - A local extension checks dialog keyboard navigation, Esc cancellation,
   collapse/expand draft preservation, countdown display, and server-side expiry.
 - The sidebar archive pass (wi_tN1cVXKf1VIr / wi_uyIF45t806CP) drives the
@@ -78,6 +88,29 @@ Failures save a screenshot, Playwright trace, and server log under
   The first run after a clean checkout compiles cold and is slower and more
   sensitive to the suites' page-load timeouts; lower `E2E_JOBS` if a loaded
   machine times out.
+- Page-load ceilings live in one place, `e2e/timeouts.mjs`; a suite imports
+  them instead of spelling its own number. Both bound a single await
+  (`page.goto`/`page.reload` or the first-text wait after it) and stay bounded
+  waits:
+  - `COLD_MS` (env `E2E_COLD_MS`, default `480000`, 8 min): the warm-up load
+    that compiles the route cold.
+  - `NAV_MS` (env `E2E_NAV_MS`, default `180000`, 3 min): every other page
+    load and first-text wait (the former 90 s and 60 s ceilings).
+
+  Override in milliseconds, e.g.
+  `E2E_COLD_MS=540000 E2E_NAV_MS=240000 npm run test:e2e:all`. A blank or unset
+  variable keeps the default; `0`, a negative or a non-numeric value is
+  refused: the suite fails at start with an error naming the variable instead
+  of running with a different ceiling. Keep `E2E_COLD_MS` below
+  `E2E_SUITE_TIMEOUT_MS`, which still kills a hung suite. On a busy machine
+  raise the ceilings before lowering `E2E_JOBS`; on a shared host already under
+  someone else's load, lower `E2E_JOBS` first, since a longer ceiling does not
+  reduce the load.
+- A suite that asserts a wall-clock responsiveness bound opts in with the
+  `e2e/all: isolated` marker in its source (`session-stall-recovery.mjs`, whose
+  10s bound is the acceptance). The runner starts those suites
+  only after both lanes have drained, one at a time, so another `next dev` +
+  Chromium cannot push the bound over while the suite passes alone.
 - Output is buffered and printed in sorted suite order with a summary; a
   failing suite does not stop the others. `E2E_SUITE_TIMEOUT_MS` (default
   10 min) kills a hung suite and reports it as a FAIL.

@@ -62,14 +62,18 @@ test("a list-read failure stays capable so no false upgrade state replaces an op
   assert.match(list, /capable: true,\s*error: "the messages read failed/, "the route's catch does not invent a floor state");
 });
 
-test("the list route's answer carries contacts on every branch", () => {
+test("the list route's answer carries contacts and groups on every branch", () => {
   assert.match(list, /configured `contacts`/, "the GET face documents the contacts field");
-  assert.match(list, /conversations: \[\],\s*contacts: \[\],/, "the route's catch answers an empty contact set too");
+  assert.match(list, /project `groups`/, "the GET face documents the groups field");
+  assert.match(list, /conversations: \[\],\s*contacts: \[\],\s*groups: \[\],/, "the route's catch answers empty contacts and groups too");
   const start = lib.indexOf("export async function readPolyforgeMessages(");
   const end = lib.indexOf("export async function readPolyforgeMessagesPage", start);
   const read = lib.slice(start, end);
-  assert.match(read, /return \{ \.\.\.capability, conversations: \[\], contacts: \[\] \};/, "below the floor no contact read starts");
+  assert.match(read, /return \{ \.\.\.capability, conversations: \[\], contacts: \[\], groups: \[\] \};/, "below the floor no contact or grouping read starts");
+  assert.ok(read.indexOf("readPolyforgeMessagesCapability()") < read.indexOf("readProjectGroups("), "the grouping read starts only after the floor gate");
   assert.equal((read.match(/contacts: await contactsRead/g) ?? []).length, 2, "both the list-failure and success answers carry the contact read");
+  assert.equal((read.match(/groups: await groupsRead/g) ?? []).length, 2, "both the list-failure and success answers carry the groups");
   assert.match(lib, /runPfJson\(\["--json", "msg", "contacts"\], CONTACT_READ_TIMEOUT_MS\)/, "one bounded `pf --json msg contacts` spawn");
+  assert.match(lib, /runPfJson\(\["--json", "projects", "get", project\], CONTACT_READ_TIMEOUT_MS\)/, "each project read shares the 2 s contact bound");
   assert.match(lib, /const CONTACT_READ_TIMEOUT_MS = 2000;/, "the contact read is bounded well below the 15 s read timeout");
 });

@@ -17,6 +17,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
 import { startNextServer } from "./next-server.mjs";
+import { NAV_MS } from "./timeouts.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 assert.ok(!existsSync(join(root, process.env.PI_WEB_DIST_DIR || ".next", "dev/lock")), "Run in a checkout without an active dev server");
@@ -63,6 +64,11 @@ const JOBS = [
   { work_item_id: WI112, slug: SLUG112, status: "running", spawn_n: 2, step_age_sec: 42, last_work_ago_sec: 9,
     candidate: "codex:e2e-watch", session_fingerprint: "fp-secret-session-112", origin: { kind: "chat", owner: "u_e2e" } },
 ];
+// owner 有意变更 the selected job's progress read looks the wi up in the daemon's own job
+// record; a throwaway data root lists every fixture job (no capsule → 200 `available:false`), as a real
+// daemon lists every job it runs, instead of the host's real data root answering 400 for jobs it never ran.
+const dataRoot = join(work, "pf-data"); mkdirSync(dataRoot);
+writeFileSync(join(dataRoot, "runtime-state.json"), JSON.stringify({ version: 1, jobs: JOBS.map((j) => ({ work_item_id: j.work_item_id })) }));
 const ops = (jobs, running = 2) => ({ machine_id: "m-e2e", workspaces: ["/srv/e2e-secret-workspace"], workflows_dir: "/srv/e2e-secret-workspace/wf",
   env_names: ["POLYFORGE_V1_API_KEY", "E2E_ENV_NAME_SENTINEL"], jobs, queue: { pending: 0, running, max_concurrent: 4 } });
 const at = (n) => `2026-10-18T10:${String(n - 1).padStart(2, "0")}:00Z`;
@@ -207,7 +213,7 @@ async function startServer(name, path) {
     name,
     logFile,
     env: { ...process.env, PATH: path, PI_CODING_AGENT_DIR: agentDir, PI_WEB_PASSWORD: "", NEXT_TELEMETRY_DISABLED: "1",
-      PI_WEB_ALLOWED_ROOT_PREFIXES: work, POLYFORGE_V1_API_KEY: STALE_KEY },
+      PI_WEB_ALLOWED_ROOT_PREFIXES: work, POLYFORGE_V1_API_KEY: STALE_KEY, POLYFORGE_DATA_DIR: dataRoot },
   });
   base = started.base;
   stop = started.stop;
@@ -236,12 +242,13 @@ async function openPage({ viewport = { width: 1280, height: 800 }, locale } = {}
   page.on("request", (r) => { if (new URL(r.url()).pathname === "/api/polyforge/status") statusRequests.push(Date.now()); });
   // Navigation headroom only: the host is shared and other capsules' e2e
   // servers routinely push a cold page load past the page's 10s action
-  // timeout. The navigation shares the readiness wait's 60s bound: a cold
-  // `next dev` compile under host load outlasts the 10s action default.
+  // timeout. The navigation and the readiness wait use NAV_MS from
+  // e2e/timeouts.mjs: a cold `next dev` compile under host load outlasts the
+  // 10s action default.
   // Assertions below still use the 10s default.
-  await page.goto(`${base}/?session=${SESSION}`, { waitUntil: "domcontentloaded", timeout: 60_000 });
+  await page.goto(`${base}/?session=${SESSION}`, { waitUntil: "domcontentloaded", timeout: NAV_MS });
   // Locale-independent readiness: the host session's first message is mounted.
-  await page.getByText("E2E polyforge host session").first().waitFor({ state: "attached", timeout: 60_000 });
+  await page.getByText("E2E polyforge host session").first().waitFor({ state: "attached", timeout: NAV_MS });
   return page;
 }
 const pfButton = (page) => page.getByRole("button", { name: /^(?!.*close).*polyforge/i }).first();
@@ -578,7 +585,12 @@ try {
     assert.ok(!r.text.includes("E2E-PENDING-QUESTION-TEXT"), "watch route leaks the pending question");
     const panel = await openPanel(page);
     await panel.getByText("pi#109", { exact: true }).first().click();
-    await panel.getByText(/blocked/i).first().waitFor();
+    // owner 有意变更 the workflow status moved from the old header's visible text into the
+    // title row's hover title (the row shows the job status); the blocked status is read there.
+    const titleRow = panel.locator('[data-pf-detail-title][title*="Blocked" i]').first();
+    await titleRow.waitFor();
+    assert.match(await titleRow.getAttribute("title") ?? "", /blocked/i, "the detail shows the blocked workflow status");
+    assert.ok(!(await titleRow.getAttribute("title") ?? "").includes("E2E-PENDING-QUESTION-TEXT"), "the hover shows the pending question");
     assert.ok(!(await panel.innerText()).includes("E2E-PENDING-QUESTION-TEXT"), "panel shows the pending question");
   });
 
@@ -854,8 +866,8 @@ try {
     assert.ok((await pfPanel(page).first().locator('[title*="exec_init"]').count()) >= 1, "the toggle did not switch back to verbose mode");
     // Persisted globally in localStorage: a reload restores verbose without
     // re-toggling.
-    await page.reload({ waitUntil: "domcontentloaded", timeout: 60_000 });
-    await page.getByText("E2E polyforge host session").first().waitFor({ state: "attached", timeout: 60_000 });
+    await page.reload({ waitUntil: "domcontentloaded", timeout: NAV_MS });
+    await page.getByText("E2E polyforge host session").first().waitFor({ state: "attached", timeout: NAV_MS });
     const panel2 = await ensureDetail112(page);
     assert.ok((await panel2.locator('[title*="exec_init"]').count()) >= 1, "the verbose preference did not survive a reload");
   });

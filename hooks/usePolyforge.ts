@@ -4,11 +4,13 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { PolyforgeOpsStatus, PolyforgeWatchStatus } from "@/lib/polyforge-status";
 import {
   ackDecision,
+  conversationForContact,
   mergeNewestPage,
   mergeOlderPage,
   type PolyforgeContact,
   type PolyforgeConversation,
   type PolyforgeMessage,
+  type PolyforgeProjectGroup,
 } from "@/lib/polyforge-messages-pure";
 import {
   cardCursors,
@@ -24,8 +26,9 @@ import { usePolyforgePanelPreferences } from "./usePolyforgePanelPreferences";
  *
  * - One status fetch at mount decides presence (`pfPresent`); a pf-less
  *   install never polls again — the only HTTP it ever sees is that status
- *   probe plus exactly one messages read at mount (both 2xx), so unrelated
- *   e2e flows log no console errors.
+ *   probe plus exactly one messages read at mount (both 2xx, no pf spawn;
+ *   the users read runs only while the open dock shows Messages), so
+ *   unrelated e2e flows log no console errors.
  * - With pf present: the status route is polled every 3s while the panel is
  *   open and every 30s while closed (badge).
  * - While open with a selection: the watch route is polled every 3s. A null
@@ -36,7 +39,17 @@ import { usePolyforgePanelPreferences } from "./usePolyforgePanelPreferences";
  *   open its newer messages are fetched on the same 3s tick (one `--after`
  *   read, never a second backward page). Auto-acknowledgment goes through
  *   the one pure `ackDecision` helper. The configured contacts
- * ride the same list read — no timer of their own.
+ * and the project groups ride the same
+ *   list read — no timer of their own; the groups only on reads made while
+ *   the open dock shows Messages (`?groups=0` otherwise, no `projects get`).
+ * - Project membership: one users read (`/api/polyforge/users`,
+ *   the admin probe and the picker's humans) each time the open dock shows
+ *   Messages — never at page load or on another tab (no new request or pf verb
+ *   outside Messages); not gated on the presence probe, since the route
+ *   degrades and spawns nothing when pf is absent. No timer.
+ *   `admin` is null until it answers. A membership change POSTs once and, on success, awaits
+ *   a fresh list read before resolving (no optimistic change); a refusal
+ *   throws pf's text.
  * - A silent contact (no conversation yet) is its own selection: it opens
  *   an empty pane, loads no history, creates nothing and acks nothing; its
  *   first send opens the conversation the send's answer names.
@@ -64,6 +77,7 @@ type MessagesResponse = {
   reason?: string;
   conversations?: PolyforgeConversation[];
   contacts?: PolyforgeContact[];
+  groups?: PolyforgeProjectGroup[];
   error?: string;
 };
 type PageResponse = {
@@ -73,6 +87,8 @@ type PageResponse = {
   has_older?: boolean;
   error?: string;
 };
+type UsersResponse = { admin?: boolean; users?: PolyforgeContact[]; error?: string };
+type MembershipResponse = { ok?: boolean; error?: string };
 type SendResponse = { ok?: boolean; message?: PolyforgeMessage; error?: string };
 type AnalyzeResponse = { ok?: boolean; conclusion?: string; model?: string; error?: string };
 
@@ -91,9 +107,16 @@ export function nextWatchSnapshot(
  *  3s/30s cadence. */
 export type PolyforgeTab = "memory" | "messages" | "work";
 
-/** Work's sub-tabs. Page memory only: kept across a dock close/reopen (this
- *  hook outlives the dock), reset by a reload, never written to storage. */
-export type PolyforgeWorkTab = "jobs" | "tasks";
+/** Work's sub-tabs ( adds 工单列表, `items`). Page memory only:
+ *  kept across a dock close/reopen (this hook outlives the dock), reset by a
+ *  reload, never written to storage. */
+export type PolyforgeWorkTab = "jobs" | "tasks" | "items";
+
+export interface MembershipChangeInput {
+  action: "add" | "remove";
+  project: string;
+  userId: string;
+}
 
 export interface SendMessageInput {
   to: string;
@@ -117,10 +140,19 @@ export function usePolyforge(panelOpen: boolean) {
   // Messages state.
   const [activeTab, setActiveTabState] = useState<PolyforgeTab>("work");
   const [workTab, setWorkTab] = useState<PolyforgeWorkTab>("jobs");
+  // the 工单列表 badge — the running count of the last list
+  // read (null until the first one). Page memory only: the items surface
+  // reports it, the badge keeps it after that surface unmounts; no read here.
+  const [workItemsRunning, setWorkItemsRunning] = useState<number | null>(null);
   const [messagesCapable, setMessagesCapable] = useState(true);
   const [messagesReason, setMessagesReason] = useState<string | null>(null);
   const [conversations, setConversations] = useState<PolyforgeConversation[]>([]);
   const [contacts, setContacts] = useState<PolyforgeContact[]>([]);
+  const [groups, setGroups] = useState<PolyforgeProjectGroup[]>([]);
+  // the admin probe (null until the users read answers) and
+  // the picker's human users (id + display name only).
+  const [membershipAdmin, setMembershipAdmin] = useState<boolean | null>(null);
+  const [users, setUsers] = useState<PolyforgeContact[]>([]);
   const [messagesError, setMessagesError] = useState<string | null>(null);
   const [selectedConversation, setSelectedConversation] = useState<string | null>(null);
   // The open silent contact, held as the clicked row's snapshot so a poll
@@ -150,6 +182,11 @@ export function usePolyforge(panelOpen: boolean) {
   const statusSeq = useRef(0);
   const watchSeq = useRef(0);
   const messagesSeq = useRef(0);
+  // Whether the open dock shows Messages, for the list read's callers (the
+  // timer included): only such reads carry the project groups.
+  const messagesVisibleRef = useRef(false);
+  const usersSeq = useRef(0);
+  const usersLandedSeq = useRef(0);
   // The seq of the newest messages response that has LANDED (see
   // refreshMessages: acceptance is by landing order, not start order).
   const messagesLandedSeq = useRef(0);
@@ -254,7 +291,11 @@ export function usePolyforge(panelOpen: boolean) {
   // so a late stale poll can never overwrite a newer read.
   const refreshMessages = useCallback(() => {
     const seq = ++messagesSeq.current;
-    return fetch("/api/polyforge/messages")
+    // Off the Messages tab the list read skips the project groups: no other
+    // tab spawns `pf projects get`; the landed groups stay until the next
+    // read made while Messages is shown.
+    const withGroups = messagesVisibleRef.current;
+    return fetch(withGroups ? "/api/polyforge/messages" : "/api/polyforge/messages?groups=0")
       .then(async (response) => {
         const body = await response.json() as MessagesResponse;
         if (seq <= messagesLandedSeq.current) return null;
@@ -263,6 +304,7 @@ export function usePolyforge(panelOpen: boolean) {
         setMessagesReason(body.reason ?? null);
         setConversations(Array.isArray(body.conversations) ? body.conversations : []);
         setContacts(Array.isArray(body.contacts) ? body.contacts : []);
+        if (withGroups) setGroups(Array.isArray(body.groups) ? body.groups : []);
         // `error` is the non-floor read failure; `reason` belongs to the
         // upgrade state only.
         setMessagesError(body.capable === false ? (body.reason ?? null) : (body.error ?? null));
@@ -273,6 +315,28 @@ export function usePolyforge(panelOpen: boolean) {
         messagesLandedSeq.current = seq;
         setMessagesError("messages are unreachable");
         return null;
+      });
+  }, []);
+
+  // The admin probe and the picker's users. Accepted by
+  // landing order like the list read: a newer read never blanks the landed
+  // answer while in flight, and a late older one never overwrites it. A
+  // failed read is the read-only answer.
+  const refreshUsers = useCallback(() => {
+    const seq = ++usersSeq.current;
+    return fetch("/api/polyforge/users")
+      .then(async (response) => {
+        const body = await response.json() as UsersResponse;
+        if (seq <= usersLandedSeq.current) return;
+        usersLandedSeq.current = seq;
+        setMembershipAdmin(body.admin === true);
+        setUsers(body.admin === true && Array.isArray(body.users) ? body.users : []);
+      })
+      .catch(() => {
+        if (seq <= usersLandedSeq.current) return;
+        usersLandedSeq.current = seq;
+        setMembershipAdmin(false);
+        setUsers([]);
       });
   }, []);
 
@@ -330,14 +394,26 @@ export function usePolyforge(panelOpen: boolean) {
   // Once the probe has answered "absent" the effect reads nothing more (its
   // re-runs on the probe landing and on dock toggles stay silent), so a
   // pf-less install issues exactly the one mount read; the interval needs
-  // presence: a pf-less install must not poll forever.
+  // presence: a pf-less install must not poll forever. Showing or leaving
+  // Messages also reads at once (the groups ride only reads made while it is
+  // shown) and restarts the same interval.
+  const messagesVisible = panelOpen && activeTab === "messages";
   useEffect(() => {
+    messagesVisibleRef.current = messagesVisible;
     if (probed && !pfPresent) return;
     refreshMessages();
     if (!probed || !pfPresent) return;
     const interval = setInterval(refreshMessages, panelOpen ? OPEN_STATUS_POLL_MS : CLOSED_STATUS_POLL_MS);
     return () => clearInterval(interval);
-  }, [probed, pfPresent, panelOpen, refreshMessages]);
+  }, [probed, pfPresent, panelOpen, messagesVisible, refreshMessages]);
+
+  // The users read: only while the open dock shows Messages — once each time
+  // Messages becomes visible (before the presence probe answers, like the
+  // first list read; nothing more once pf is known absent). No timer.
+  useEffect(() => {
+    if (!messagesVisible || (probed && !pfPresent)) return;
+    void refreshUsers();
+  }, [probed, pfPresent, messagesVisible, refreshUsers]);
 
   // Watch the selection while the panel is open: immediately and every 3s.
   useEffect(() => {
@@ -407,6 +483,18 @@ export function usePolyforge(panelOpen: boolean) {
     selectConversation(null);
     setSelectedContact(contact);
   }, [selectConversation]);
+
+  // An open silent contact follows the peer's first message:
+  // once the list read (the existing 3 s / 30 s poll) carries a direct
+  // conversation with that contact, the empty pane opens it — the same
+  // single page writer a row click uses, no new timer or request. The empty
+  // pane had no history to lose; a refused or failed list read changes
+  // nothing (it keeps the last conversations).
+  useEffect(() => {
+    if (!selectedContact) return;
+    const conversation = conversationForContact(conversations, selectedContact.id);
+    if (conversation) selectConversation(conversation.id);
+  }, [selectedContact, conversations, selectConversation]);
 
   const loadOlder = useCallback(() => {
     const conversationId = selectedConversation;
@@ -558,6 +646,23 @@ export function usePolyforge(panelOpen: boolean) {
     return sent;
   }, [refreshMessages, refreshOpen, selectedConversation, selectConversation]);
 
+  // One membership change: the write route spawns exactly
+  // one pf verb; success awaits a fresh list read so the group shows the
+  // change before this resolves. A refusal throws pf's text and changes
+  // nothing shown.
+  const changeMembership = useCallback(async (input: MembershipChangeInput) => {
+    const response = await fetch("/api/polyforge/projects/members", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ action: input.action, project: input.project, user_id: input.userId }),
+    });
+    const body = await response.json() as MembershipResponse;
+    if (!response.ok || body.error || body.ok !== true) {
+      throw new Error(body.error ?? "the membership change was refused");
+    }
+    await refreshMessages();
+  }, [refreshMessages]);
+
   const analyzeMessage = useCallback(async (messageId: string) => {
     const response = await fetch("/api/polyforge/messages/analyze", {
       method: "POST",
@@ -610,11 +715,17 @@ export function usePolyforge(panelOpen: boolean) {
     setActiveTab,
     workTab,
     setWorkTab,
+    workItemsRunning,
+    setWorkItemsRunning,
     messagesCapable,
     messagesReason,
     messagesError,
     conversations,
     contacts,
+    groups,
+    membershipAdmin,
+    users,
+    changeMembership,
     unreadTotal,
     selectedConversation,
     selectConversation,

@@ -6,11 +6,11 @@ import { machineLoadRows } from "@/lib/machine-load-view";
 /**
  * The machine-load section: CPU, cores, load average and
  * memory as the HOST kernel sees them (the badge says so; no cgroup/container
- * quota is implied). Two mounts: AppShell's Session-info popover and the Debug
- * panel (DebugPanelView,). Each is rendered only while its panel
- * is open, and `activeTopPanel` holds one panel, so the two never coexist; the
- * 2 s poll and the values live exactly as long as whichever is open. It
- * performs no I/O itself (useMachineLoad does).
+ * quota is implied). One mount: the Debug panel (DebugPanelView,),
+ * as the last full-width row of its `.debug-cols` grid (; the
+ * Session-info popover no longer carries it). It is rendered only while that
+ * panel is open, so the 2 s poll and the values live exactly as long as the
+ * open panel. It performs no I/O itself (useMachineLoad does).
  */
 export function MachineLoadSection({ translate }: { translate: (key: string) => string }) {
   const metrics = useMachineLoad();

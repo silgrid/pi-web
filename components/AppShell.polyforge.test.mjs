@@ -7,11 +7,15 @@ const panelSource = await readFile(new URL("./PolyforgePanel.tsx", import.meta.u
 const hookSource = await readFile(new URL("../hooks/usePolyforge.ts", import.meta.url), "utf8");
 
 test("the Polyforge button is gated on pf presence alone, independent of chat visibility", () => {
-  assert.match(source, /const showChatActions = mobile \|\| showChat;/);
-  assert.match(source, /if \(!showChatActions && !pfPresent\) return null;/);
-  assert.match(source, /\{pfPresent && \(/, "the button renders iff pf is found");
+  // the button lives in its own renderer now, shared by the
+  // resident narrow-phone slot and the wide/desktop inline row.
+  assert.match(source, /const renderPolyforgeButton = \(mobile: boolean\) => \{\s*if \(!pfPresent\) return null;/,
+    "the button renders iff pf is found");
   assert.match(source, /aria-label=\{translate\("polyforge\.open"\)\}/);
+  assert.match(source, /\{includePolyforge && renderPolyforgeButton\(mobile\)\}/);
   // The chat actions (bg-tasks, history, …) keep their original gate.
+  assert.match(source, /const showChatActions = mobile \|\| showChat;/);
+  assert.match(source, /if \(!showChatActions && !\(includePolyforge && pfPresent\)\) return null;/);
   assert.match(source, /\{showChatActions && \(<>/);
 });
 
@@ -219,6 +223,12 @@ test("the shell passes the messages surface and tab state into both dock branche
 test("both dock branches forward Work's sub-tab state", () => {
   assert.match(source, /workTab: pfWorkTab,\s*setWorkTab: setPfWorkTab,/, "the shell reads the sub-tab from the one hook");
   assert.equal((source.match(/workTab=\{pfWorkTab\}\s*onWorkTab=\{setPfWorkTab\}/g) ?? []).length, 2, "mobile sheet and desktop dock share the sub-tab");
+});
+
+test("both dock branches forward the 工单列表 badge count and its reporter", () => {
+  assert.match(source, /workItemsRunning: pfWorkItemsRunning,\s*setWorkItemsRunning: setPfWorkItemsRunning,/, "the shell reads the badge state from the one hook");
+  assert.equal((source.match(/workItemsRunning=\{pfWorkItemsRunning\}\s*onWorkItemsRunningChange=\{setPfWorkItemsRunning\}/g) ?? []).length, 2,
+    "mobile sheet and desktop dock share the badge count");
 });
 
 test("both dock branches pass the memory cwd to the panel", () => {

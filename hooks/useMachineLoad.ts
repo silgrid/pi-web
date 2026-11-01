@@ -15,10 +15,10 @@ export const MACHINE_LOAD_REQUEST_TIMEOUT_MS = MACHINE_LOAD_POLL_MS;
 const MACHINE_LOAD_URL = "/api/machine-load";
 
 /**
- * Machine load for MachineLoadSection, which the Session-info popover
- * (AppShell) and the Debug panel (DebugPanelView,) mount only
- * while open; `activeTopPanel` holds one panel, so the two are mutually
- * exclusive. Closing whichever is open drops the timer and the values.
+ * Machine load for MachineLoadSection, which only the Debug panel
+ * (DebugPanelView,; the Session-info popover no longer mounts it,
+ *) renders, and only while open. Closing the panel drops the
+ * timer and the values.
  *
  * - Polls only while `document.visibilityState === "visible"`: on mount and on
  *   becoming visible it fetches once immediately, then every 2 s; on hide it

@@ -34,6 +34,8 @@ interface UseResizablePanelOptions {
    * False keeps the size the user chose (the stored one, or the last a drag, a
    * key or a reset committed) apart from the one shown: a window too small for
    * it shows less without saving that, and the panel grows back with the window.
+   * Until such a choice exists, the panel keeps following `getDefaultWidth` as
+   * the window (or the caller's container) resizes.
    */
   persistClamp?: boolean;
   storageKey: string;
@@ -84,6 +86,8 @@ export function useResizablePanel(options: UseResizablePanelOptions) {
   const restoredRef = useRef(false);
   // With persistClamp off: the user's size, which only their own commits change.
   const preferredRef = useRef(defaultWidth);
+  // ...unless they have not chosen one yet: then fitWidth recomputes the default.
+  const preferredCommittedRef = useRef(false);
   const [width, setWidth] = useState(defaultWidth);
   const [isResizing, setIsResizing] = useState(false);
   const [mounted, setMounted] = useState(false);
@@ -114,6 +118,7 @@ export function useResizablePanel(options: UseResizablePanelOptions) {
       // Only a drag, a key or a reset forces a write: the user's own choice,
       // kept within the panel's fixed limits rather than this window's.
       if (forcePersist) {
+        preferredCommittedRef.current = true;
         preferredRef.current = clampPanelWidth(candidate, minWidth, maxWidth);
         writeStoredWidth(storageKey, preferredRef.current);
       }
@@ -126,8 +131,20 @@ export function useResizablePanel(options: UseResizablePanelOptions) {
   // Fits the panel to the window again: as it is now, or the user's size
   // (a drag under way keeps the size under the pointer).
   const fitWidth = useCallback(() => {
-    commitWidth(persistClamp || dragRef.current ? widthRef.current : preferredRef.current);
-  }, [commitWidth, persistClamp, widthRef]);
+    if (persistClamp || dragRef.current) {
+      commitWidth(widthRef.current);
+      return;
+    }
+    // A stored size or a user commit keeps its value; without either, the
+    // default follows the space the panel has now.
+    if (!preferredCommittedRef.current && readStoredWidth(storageKey) === null) {
+      const nextDefault = getDefaultWidth?.() ?? defaultWidth;
+      preferredRef.current = clampPanelWidth(nextDefault, minWidth, maxWidth);
+      commitWidth(nextDefault);
+      return;
+    }
+    commitWidth(preferredRef.current);
+  }, [commitWidth, defaultWidth, getDefaultWidth, maxWidth, minWidth, persistClamp, storageKey, widthRef]);
 
   const restoreBodyState = useCallback((drag: DragState) => {
     document.body.style.cursor = drag.previousCursor;
@@ -249,6 +266,7 @@ export function useResizablePanel(options: UseResizablePanelOptions) {
     const storedWidth = readStoredWidth(storageKey);
     const candidate = storedWidth ?? getDefaultWidth?.() ?? defaultWidth;
     if (!persistClamp) {
+      preferredCommittedRef.current = storedWidth !== null;
       preferredRef.current = clampPanelWidth(candidate, minWidth, maxWidth);
       commitWidth(preferredRef.current, { persist: false });
       return;

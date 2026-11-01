@@ -18,6 +18,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
 import { startNextServer } from "./next-server.mjs";
+import { NAV_MS } from "./timeouts.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 assert.ok(!existsSync(join(root, process.env.PI_WEB_DIST_DIR || ".next", "dev/lock")), "Run in a checkout without an active dev server");
@@ -32,7 +33,11 @@ const STATUS = "/api/polyforge/status";
 const BARRIER = "/__e2e_request_barrier";
 const TITLE_KEY = "pi-web:polyforge-title-length";
 const POLL_KEY = "pi-web:polyforge-poll-interval";
-const GOAL = `E2E-GOAL-START-${"G".repeat(40)}-GOALTAIL`;
+// the goal fixture is 84 code points, well past the new
+// 60-code-point default, so "the default truncation hides the tail" keeps
+// holding with room to spare (the allowlist maps the goal from the capsule
+// fixture, so S3/S15/S16 read the same text).
+const GOAL = `E2E-GOAL-START-${"G".repeat(60)}-GOALTAIL`;
 const EPOCH = "2026-10-30T01:00:00.000Z";
 mkdirSync(join(agentDir, "sessions", "e2e"), { recursive: true });
 mkdirSync(project);
@@ -45,12 +50,12 @@ writeFileSync(join(agentDir, "sessions", "e2e", `${SESSION}.jsonl`), [
 // ---- jobs and daemon records ----
 const job = (wi, slug, status, spawn, step, idle, candidate) => ({ work_item_id: wi, slug, status, spawn_n: spawn,
   step_age_sec: step, last_work_ago_sec: idle, candidate, session_fingerprint: "fp-cards", origin: { kind: "chat", owner: "u_e2e" } });
-const A = job("wi_E2EcardsA01", "", "running", 3, 125, 4, "pi:e2e/card-model");
-const B = job("wi_E2EcardsB01", "", "needs_input", 1, 61, 9, "claude:e2e/card-model");
-const T = job("wi_E2EcardsB02", "", "paused", 2, 900, 880, "codex:e2e/card-model");
-const C = job("wi_E2EcardsC01", "", "queued", 0, 0, 12, "pi:e2e/c-model");
-const D = job("wi_E2EcardsD01", "", "queued", 0, 0, 30, "pi:e2e/no-item");
-const E = job("wi_E2EcardsE01", "", "running", 1, 5, 1, "pi:e2e/new");
+const A = job("wi_E2EcardsA01", "task#9101", "running", 3, 125, 4, "pi:e2e/card-model");
+const B = job("wi_E2EcardsB01", "task#9102", "needs_input", 1, 61, 9, "claude:e2e/card-model");
+const T = job("wi_E2EcardsB02", "task#9105", "paused", 2, 900, 880, "codex:e2e/card-model");
+const C = job("wi_E2EcardsC01", "task#9103", "queued", 0, 0, 12, "pi:e2e/c-model");
+const D = job("wi_E2EcardsD01", "task#9104", "queued", 0, 0, 30, "pi:e2e/no-item");
+const E = job("wi_E2EcardsE01", "task#9106", "running", 1, 5, 1, "pi:e2e/new");
 const capsule = (wi) => join(work, "capsules", wi);
 const pi = (id, content) => ({ type: "message", id, parentId: null, timestamp: EPOCH, message: { role: "assistant", content } });
 const claude = (content) => ({ type: "assistant", timestamp: EPOCH, message: { role: "assistant", content } });
@@ -223,15 +228,16 @@ async function openPage({ storage = {}, session = true, viewport = { width: 1280
   page.on("response", (response) => {
     if (new URL(response.url()).pathname === CARDS) response.text().then((text) => page.__cardResponses.push({ at: Date.now(), status: response.status(), text })).catch(() => {});
   });
-  await page.goto(session ? `${base}/?session=${SESSION}` : `${base}/`, { waitUntil: "domcontentloaded", timeout: 90_000 });
-  await page.getByText("E2E pf cards host session").first().waitFor({ state: "attached", timeout: 90_000 });
+  await page.goto(session ? `${base}/?session=${SESSION}` : `${base}/`, { waitUntil: "domcontentloaded", timeout: NAV_MS });
+  await page.getByText("E2E pf cards host session").first().waitFor({ state: "attached", timeout: NAV_MS });
   return page;
 }
 const withPage = async (opts, fn) => { const page = await openPage(opts); try { return await fn(page); } finally { await page.context().close(); } };
 const dock = (page) => page.locator("#polyforge-dock").or(page.getByRole("dialog", { name: /polyforge/i })).first();
 const pfButton = (page) => page.getByRole("button", { name: /^(?!.*close).*polyforge/i }).first();
 const openDock = async (page) => {
-  // At ≤480px the app folds the Polyforge button behind the toolbar's More toggle.
+  // The helper tolerates a folded Polyforge button, though made it
+  // resident right of the toolbar's More toggle at ≤480px.
   const more = page.locator('[data-mobile-toolbar-more="true"]');
   if ((await pfButton(page).count()) === 0 && (await more.count()) > 0 && (await more.getAttribute("aria-expanded")) !== "true") await more.click();
   await pfButton(page).click(); await dock(page).waitFor({ timeout: 20_000 }); return dock(page);
@@ -329,7 +335,8 @@ try {
     await openDock(page); const node = card(page, A.work_item_id); await node.waitFor({ timeout: 30_000 });
     const text = await node.innerText();
     assert.ok(text.includes("E2E-GOAL-START"), "the goal head renders on line 1");
-    assert.ok(!text.includes("GOALTAIL"), `the default 30-character truncation hides the tail: ${text}`);
+    assert.ok(Array.from(GOAL).length > 60, `the fixture is longer than the default 60 code points (${Array.from(GOAL).length})`);
+    assert.ok(!text.includes("GOALTAIL"), `the default 60-code-point truncation hides the tail: ${text}`);
     assert.match(text, /…/, "a truncated goal ends with an ellipsis");
     const titles = [await node.getAttribute("title"), ...await node.locator("[title]").evaluateAll((nodes) => nodes.map((n) => n.getAttribute("title")))];
     assert.ok(titles.includes(GOAL), "the full goal is available on hover (title attribute)");
@@ -360,7 +367,7 @@ try {
     await waitFor(() => page.__cardRequests.length >= ticks + 2, "two poll ticks");
     assert.deepEqual(await cardOrder(page), before, "a poll never reorders the cards");
     await page.reload({ waitUntil: "domcontentloaded" });
-    await page.getByText("E2E pf cards host session").first().waitFor({ state: "attached", timeout: 90_000 });
+    await page.getByText("E2E pf cards host session").first().waitFor({ state: "attached", timeout: NAV_MS });
     await openDock(page); await card(page, A.work_item_id).waitFor({ timeout: 30_000 });
     assert.deepEqual(await cardOrder(page), before, "a full reload shows the same order with no duplicate");
   }));
@@ -378,24 +385,49 @@ try {
     await dock(page).getByRole("button", { name: /back to job list|deselect/i }).waitFor({ timeout: 10_000 });
     const items = dock(page).getByRole("listitem");
     await waitFor(async () => (await items.count()) >= A_STEP_IDS.length, "the detail's step graph renders every declared step");
-    const nodes = (await items.allInnerTexts()).map((value) => value.replace(/\s+/g, " ").trim());
+    // owner 有意变更: the node shows only the step
+    // name and its dot; the status moved from visible text to title/aria-label,
+    // so the status assertions below read the accessible name (same patterns).
+    const nodes = (await items.evaluateAll((els) => els.map((el) => el.getAttribute("aria-label") ?? ""))).map((value) => value.replace(/\s+/g, " ").trim());
+    const titles = await items.evaluateAll((els) => els.map((el) => el.getAttribute("title") ?? ""));
+    // owner 有意变更 the node title also carries the step's start time when it has one.
+    titles.forEach((value, i) => {
+      const title = value.replace(/\s+/g, " ").trim();
+      assert.ok(title === nodes[i] || (title.startsWith(`${nodes[i]} · `) && /\d{2}:\d{2}/.test(title.slice(nodes[i].length))), `each node's title carries the same name + status as its aria-label, then at most the start time (${title})`);
+    });
+    const visible = (await items.allInnerTexts()).map((value) => value.replace(/\s+/g, " ").trim());
     let last = -1;
     for (const id of A_STEP_IDS) { const i = nodes.findIndex((value) => value.startsWith(id)); assert.ok(i > last, `the detail lists ${id} in workflow order`); last = i; }
+    for (const id of A_STEP_IDS) assert.ok(visible.includes(id), `the ${id} node shows its name and no visible status text (got ${JSON.stringify(visible)})`);
     const nodeText = (id) => nodes.find((value) => value.startsWith(id)) ?? "";
-    // + #173: a skipped step reads skipped as visible text, never unknown/unstarted.
-    assert.match(nodeText("step-skip"), /skipped|已跳过/i, `a skipped step shows the skipped label (got ${JSON.stringify(nodeText("step-skip"))})`);
+    // + #173 (+ #213: via title/aria-label): a skipped step names skipped, never unknown/unstarted.
+    assert.match(nodeText("step-skip"), /skipped|已跳过/i, `a skipped step names the skipped label (got ${JSON.stringify(nodeText("step-skip"))})`);
+    // owner 有意变更: skipped is a hollow gray ring, pending a filled gray dot.
+    const dotOf = (id) => items.filter({ hasText: id }).first().locator('span[aria-hidden="true"]').first().evaluate((el) => {
+      const style = getComputedStyle(el);
+      return { background: style.backgroundColor, border: parseFloat(style.borderTopWidth) || 0 };
+    });
+    const clear = (color) => color === "transparent" || /rgba\(\s*\d+\s*,\s*\d+\s*,\s*\d+\s*,\s*0\s*\)/.test(color);
+    const skipDot = await dotOf("step-skip"); const pendingDot = await dotOf("step-review");
+    assert.ok(clear(skipDot.background) && skipDot.border >= 1, `the skipped dot is a hollow ring (${JSON.stringify(skipDot)})`);
+    assert.ok(!clear(pendingDot.background), `the pending dot stays filled (${JSON.stringify(pendingDot)})`);
     assert.doesNotMatch(nodeText("step-skip"), /未知|unknown|—|pending/i, "a skipped step is neither unknown nor unstarted");
     assert.match(nodeText("step-review"), /pending/i, "a not-started step reads as such");
     assert.match(nodeText("step-code"), /in progress/i, "the current step is recognizable");
-    const timingLine = (value, id) => value.split("\n").map((line) => line.trim()).find((line) => line.startsWith(id) && /\+\d/.test(line)) ?? "";
-    await waitFor(async () => timingLine(await dock(page).innerText(), "step-code"), "the running step's timing row");
-    const detail = await dock(page).innerText();
-    assert.match(timingLine(detail, "step-plan"), /×2/, "a rerun step carries the rerun marker on its detail row");
-    assert.doesNotMatch(timingLine(detail, "step-grill"), /×/, "a single-run step carries no rerun marker");
-    assert.ok(!detail.split("\n").some((line) => line.trim().startsWith("step-nostart") && /\+\d/.test(line)), "a step with no readable start shows no fabricated duration");
-    assert.doesNotMatch(detail, /NaN/, "no NaN duration");
-    const first = timingLine(detail, "step-code");
-    await waitFor(async () => { const line = timingLine(await dock(page).innerText(), "step-code"); return line && line !== first; },
+    // owner 有意变更 the timing row moved from the detail rows to the line under its DAG node
+    // ([data-pf-step-timing]); the same guarantees are read there.
+    const timingLine = async (id) => {
+      const line = dock(page).locator(`[data-pf-step-timing="${id}"]`).first();
+      return (await line.count()) ? (await line.innerText()).trim() : "";
+    };
+    await waitFor(async () => /\+\d/.test(await timingLine("step-code")) && await timingLine("step-code"), "the running step's timing line");
+    assert.match(await timingLine("step-plan"), /×2/, "a rerun step carries the rerun marker on its timing line");
+    assert.match(await timingLine("step-grill"), /\+\d/, "a done step carries its duration");
+    assert.doesNotMatch(await timingLine("step-grill"), /×/, "a single-run step carries no rerun marker");
+    assert.doesNotMatch(await timingLine("step-nostart"), /\+\d/, "a step with no readable start shows no fabricated duration");
+    assert.doesNotMatch(await dock(page).innerText(), /NaN/, "no NaN duration");
+    const first = await timingLine("step-code");
+    await waitFor(async () => { const line = await timingLine("step-code"); return line && line !== first; },
       "the running step's duration grows with the detail's refresh", 12_000);
   }));
 
@@ -403,41 +435,57 @@ try {
     setOps([T, C, B, A]); writeTranscripts();
     await openDock(page); const aCard = card(page, A.work_item_id); const bCard = card(page, B.work_item_id);
     await aCard.waitFor({ timeout: 30_000 }); await bCard.waitFor({ timeout: 30_000 });
-    await waitFor(async () => (await aCard.innerText()).includes("A-PROGRESS-240"), "pi progress");
-    await waitFor(async () => (await bCard.innerText()).includes("CLAUDE-VISIBLE-ASSISTANT"), "claude progress");
+    // owner 有意变更 (reverses the 32px narration):
+    // the card renders no narration any more, so the route's newest-page,
+    // increment and whitelist semantics are asserted on its responses, and
+    // the card DOM asserts that no narration reaches it.
+    await waitFor(() => page.__cardResponses.find((response) => response.text.includes("A-PROGRESS-240")), "pi progress in the route response");
+    await waitFor(() => page.__cardResponses.find((response) => response.text.includes("CLAUDE-VISIBLE-ASSISTANT")), "claude progress in the route response");
     appendA([piText("A-PROGRESS-BETA")]);
-    await waitFor(async () => (await aCard.innerText()).includes("A-PROGRESS-BETA"), "the appended entry reaches the card");
     const beta = await waitFor(() => page.__cardResponses.find((response) => response.text.includes("A-PROGRESS-BETA")), "the increment response");
     assert.ok(!beta.text.includes("A-PROGRESS-240"), "the increment response does not re-send earlier entries");
+    const dom = `${await aCard.innerText()}\n${await bCard.innerText()}`;
+    assert.doesNotMatch(dom, /A-PROGRESS(?:-\d{3}|-BETA)|CLAUDE-VISIBLE-ASSISTANT/, "the card shows no narration");
   }));
 
   await check("S9", () => withPage({}, async (page) => {
     setOps([T, C, B, A]); writeTranscripts();
     await openDock(page); const bCard = card(page, B.work_item_id); await bCard.waitFor({ timeout: 30_000 });
-    // (owner-approved intentional change ②): the card shows
-    // assistant narration only — neither a tool name nor a command/argument
-    // reaches the DOM or the response; masking still holds for narration.
+    // (owner-approved intentional change ②): the card read face
+    // carries assistant narration only — neither a tool name nor a
+    // command/argument reaches it — and masking still holds.
+    // owner 有意变更 (reverses the 32px narration):
+    // those semantics now read on the route response; the card DOM shows none.
     appendA([piText("A-NARRATION token=PI-SECRET-TOKEN masked")]);
-    await waitFor(async () => (await card(page, A.work_item_id).innerText()).includes("A-NARRATION"), "the credential-bearing narration reaches the card");
+    const narration = await waitFor(() => page.__cardResponses.find((response) => response.text.includes("A-NARRATION")), "the credential-bearing narration in the route response");
+    assert.match(narration.text, /token=\*\*\*/, "the credential in narration is masked");
+    assert.doesNotMatch(narration.text, /bash|printf|"kind":"tool"/, "the response carries no tool entry, name or command");
+    for (const secret of ["CLAUDE-SECRET-TOOL-RESULT", "CLAUDE-SECRET-THINKING", "CLAUDE-SECRET-PROMPT", "CLAUDE-SECRET-TOKEN",
+      "PI-SECRET-TOOL-RESULT", "PI-SECRET-THINKING", "PI-SECRET-USER-PROMPT", "PI-SECRET-TOKEN"]) assert.ok(!narration.text.includes(secret), `the response leaks ${secret}`);
+    // The whitelisted assistant text arrives on the card's first page, which is
+    // what carries the Claude fixture; the increment above carries A only.
+    const whitelisted = await waitFor(() => page.__cardResponses.find((response) => response.text.includes("CLAUDE-VISIBLE-ASSISTANT")), "the whitelisted assistant text");
+    assert.ok(whitelisted.text.includes("CLAUDE-SECOND-VISIBLE"), "both visible assistant texts flow");
     const dom = `${await bCard.innerText()}\n${await card(page, A.work_item_id).innerText()}`;
-    assert.ok(dom.includes("CLAUDE-VISIBLE-ASSISTANT"), "assistant text is shown");
-    assert.doesNotMatch(dom, /bash|printf/, "neither the tool name nor its command is shown");
-    assert.match(dom, /token=\*\*\*/, "the credential in narration is masked");
+    assert.doesNotMatch(dom, /A-PROGRESS|A-NARRATION|CLAUDE-VISIBLE-ASSISTANT|token=|bash|printf/, "no narration or tool text reaches the card");
     for (const secret of ["CLAUDE-SECRET-TOOL-RESULT", "CLAUDE-SECRET-THINKING", "CLAUDE-SECRET-PROMPT", "CLAUDE-SECRET-TOKEN",
       "PI-SECRET-TOOL-RESULT", "PI-SECRET-THINKING", "PI-SECRET-USER-PROMPT", "PI-SECRET-TOKEN"]) assert.ok(!dom.includes(secret), `the DOM leaks ${secret}`);
-    const response = await fetch(`${base}${CARDS}`, { signal: AbortSignal.timeout(30_000) });
-    const text = await response.text(); assert.equal(response.status, 200);
-    for (const secret of ["CLAUDE-SECRET-TOOL-RESULT", "CLAUDE-SECRET-THINKING", "CLAUDE-SECRET-PROMPT", "CLAUDE-SECRET-TOKEN",
-      "PI-SECRET-TOOL-RESULT", "PI-SECRET-THINKING", "PI-SECRET-USER-PROMPT", "PI-SECRET-TOKEN"]) assert.ok(!text.includes(secret), `the route leaks ${secret}`);
-    assert.ok(text.includes("CLAUDE-VISIBLE-ASSISTANT") && text.includes("token=***"), "the same fixture still shows the whitelisted content");
-    assert.ok(!/bash|printf|"kind":"tool"/.test(text), "the route carries no tool entry, name or command");
   }));
 
   await check("S10", () => withPage({}, async (page) => {
     setOps([T, C, B, A]); writeTranscripts();
     await openDock(page); const node = card(page, C.work_item_id); await node.waitFor({ timeout: 30_000 });
-    await waitFor(async () => /unavailable|不可用/i.test(await node.innerText()), "the localized unavailable state");
-    assert.ok((await node.innerText()).includes(C.slug), "the rest of the card still renders");
+    // owner 有意变更 (reverses the 32px narration):
+    // an unreadable transcript now degrades only the route's progress payload;
+    // the card keeps slug + status and shows no progress state.
+    await waitFor(async () => {
+      const response = await fetch(`${base}${CARDS}`, { signal: AbortSignal.timeout(30_000) });
+      const body = await response.json();
+      return body.cards?.find((item) => item.job?.wi === C.work_item_id)?.progress?.available === false;
+    }, "the degraded route payload (progress unavailable)");
+    const text = await node.innerText();
+    assert.ok(text.includes(C.slug), "the rest of the card still renders");
+    assert.doesNotMatch(text, /unavailable|不可用|A-PROGRESS/, "the card shows no progress state");
     const ticks = page.__cardRequests.length;
     await waitFor(() => page.__cardRequests.length >= ticks + 2, "two degraded polls");
     assert.deepEqual(errors.splice(0), [], "no console error on the degraded path");
@@ -486,9 +534,18 @@ try {
   await check("S13", () => withPage({ storage: { [POLL_KEY]: "1" } }, async (page) => {
     setOps([T, C, B, A]); writeTranscripts();
     await openDock(page); const node = card(page, A.work_item_id); await node.waitFor({ timeout: 30_000 });
-    await waitFor(async () => (await node.innerText()).includes("A-PROGRESS-240"), "the newest page");
-    let text = await node.innerText();
-    assert.ok(!text.includes("A-PROGRESS-220"), "the first load starts at the newest ~20 entries");
+    // owner 有意变更 (reverses the 32px narration):
+    // the card has no narration area, so the 32px self-scrolling region pin is
+    // delete. The newest-page and increment semantics move to the route
+    // responses, and the client's 200-entry merge cap stays covered by
+    // lib/polyforge-cards-pure.test.mjs ("progress merge: ... the newest 200
+    // are kept").
+    const cardsOf = (response) => JSON.parse(response.text).cards ?? [];
+    const progressOf = (response, wi) => cardsOf(response).find((item) => item.job?.wi === wi)?.progress ?? { entries: [] };
+    const first = await waitFor(() => page.__cardResponses.find((response) => progressOf(response, A.work_item_id).entries.some((entry) => entry.text === "A-PROGRESS-240")), "the newest page in the route response");
+    const firstEntries = progressOf(first, A.work_item_id).entries;
+    assert.ok(firstEntries.length > 0 && firstEntries.length <= 20, `the first load carries the newest ~20 entries (${firstEntries.length})`);
+    assert.ok(!firstEntries.some((entry) => entry.text === "A-PROGRESS-220"), "the first load starts at the newest ~20 entries");
     const region = await node.evaluate((el) => {
       for (const child of [el, ...el.querySelectorAll("*")]) {
         const style = getComputedStyle(child);
@@ -496,20 +553,19 @@ try {
       }
       return null;
     });
-    assert.ok(region, "the progress area scrolls on its own"); assert.ok(region.height <= 96, `the progress area is about three lines (${region.height}px)`);
+    assert.equal(region, null, "the card has no narration scroll region any more");
     appendA(Array.from({ length: 220 }, (_, i) => piText(`A-PROGRESS-${String(241 + i).padStart(3, "0")}`)));
-    await waitFor(async () => (await node.innerText()).includes("A-PROGRESS-460"), "the newest increment", 25_000);
-    // a bounded wait for the retention predicate, not a fixed window.
-    await waitFor(async () => {
-      const current = await node.innerText();
-      const seen = current.match(/A-PROGRESS-\d{3}/g) ?? [];
-      return seen.length > 0 && seen.length <= 200 && !current.includes("A-PROGRESS-221");
-    }, "the retained window settles at ≤200 entries with the oldest evicted", 25_000);
-    text = await node.innerText();
-    const markers = text.match(/A-PROGRESS-\d{3}/g) ?? [];
-    assert.ok(markers.length > 0 && markers.length <= 200, `at most 200 entries are retained (${markers.length})`);
-    assert.equal(new Set(markers).size, markers.length, "no duplicate entry");
-    assert.ok(!text.includes("A-PROGRESS-221"), "the oldest entries are evicted");
+    const increments = await waitFor(() => {
+      const found = page.__cardResponses.filter((response) => progressOf(response, A.work_item_id).entries.some((entry) => entry.text === "A-PROGRESS-460"));
+      return found.length ? found : undefined;
+    }, "the newest increment in a route response", 30_000);
+    const increment = progressOf(increments.at(-1), A.work_item_id).entries;
+    assert.ok(increment.length > 0 && increment.length <= 20, `a poll carries at most the 20 new entries (${increment.length})`);
+    assert.ok(!increment.some((entry) => entry.text === "A-PROGRESS-240"), "an increment does not re-send the previous page");
+    for (const response of page.__cardResponses) {
+      const all = cardsOf(response).flatMap((item) => item.progress?.entries ?? []);
+      assert.ok(all.length <= 200, `a response carries at most 200 entries (${all.length})`);
+    }
   }));
 
   await check("S14", () => withPage({ storage: { [POLL_KEY]: "1" } }, async (page) => {
@@ -532,7 +588,8 @@ try {
     const title = controls.find((c) => c.min === "10" && c.max === "200");
     const poll = controls.find((c) => c.min === "1" && c.max === "60");
     assert.ok(title && poll, `the bounds 10–200 and 1–60 are declared: ${JSON.stringify(controls)}`);
-    assert.deepEqual([title.value, poll.value], ["30", "3"], "corrupt stored values fall back to the defaults");
+    // the title-length default is 60 (was 30).
+    assert.deepEqual([title.value, poll.value], ["60", "3"], "corrupt stored values fall back to the defaults");
     await page.evaluate(({ t, p }) => { localStorage.setItem(t, "999"); localStorage.setItem(p, "999"); }, { t: TITLE_KEY, p: POLL_KEY });
     await page.keyboard.press("Escape"); dialog = await openSettings(page);
     await dialog.getByRole("button", { name: "Polyforge", exact: true }).click();
@@ -558,7 +615,7 @@ try {
     if (!(await dock(page).isVisible().catch(() => false))) await openDock(page);
     await waitFor(async () => (await card(page, A.work_item_id).innerText()).includes("GOALTAIL"), "the new length applies without a page reload", 8_000);
     await page.reload({ waitUntil: "domcontentloaded" });
-    await page.getByText("E2E pf cards host session").first().waitFor({ state: "attached", timeout: 90_000 });
+    await page.getByText("E2E pf cards host session").first().waitFor({ state: "attached", timeout: NAV_MS });
     await openDock(page); await card(page, A.work_item_id).waitFor({ timeout: 30_000 });
     assert.ok((await card(page, A.work_item_id).innerText()).includes("GOALTAIL"), "the stored value is used after a reload");
   }));
@@ -593,9 +650,15 @@ try {
   // the 460px dock, the 375px sheet and the 340px dock the slug element is
   // not clipped (scrollWidth <= clientWidth + 1, and no ancestor up to the
   // card cuts its box) and the goal span (its `title` is the full goal) shows
-  // a visible box inside the card.
-  for (const [opts, label] of [[{ storage: { "pi-web:polyforge-dock-width": "460" } }, "460px dock"],
-    [{ viewport: { width: 375, height: 800 } }, "375px sheet"], [{ storage: { "pi-web:polyforge-dock-width": "340" } }, "340px dock"]]) {
+  // a visible box inside the card. owner 有意变更:
+  // the Jobs stream is ONE row of fixed 150px cards that scrolls horizontally
+  // (the grid `repeat(auto-fill, minmax(150px, 1fr))` is gone), so every width
+  // shows the same one-row / 150px-card / scrollable shape; the card geometry
+  // stays pinned (no narration, 43px + the measured slug row),
+  // with the card-A height bound stated against the measured slug row because
+  // a 150px card wraps a 14-character slug.
+  for (const [opts, label, measureHeight] of [[{ storage: { "pi-web:polyforge-dock-width": "460" } }, "460px dock", true],
+    [{ viewport: { width: 375, height: 800 } }, "375px sheet", false], [{ storage: { "pi-web:polyforge-dock-width": "340" } }, "340px dock", true]]) {
     await check(`S18 ${label}`, () => withPage(opts, async (page) => {
       writeTranscripts(); await setOpsSettled([T, C, B, A]);
       await openDock(page); const node = card(page, A.work_item_id); await node.waitFor({ timeout: 30_000 });
@@ -618,6 +681,7 @@ try {
         const goalNode = [...el.querySelectorAll("[title]")].find((child) => child.getAttribute("title") === goal);
         return {
           slug: slugNode ? { scrollWidth: slugNode.scrollWidth, clientWidth: slugNode.clientWidth, ...visible(slugNode) } : null,
+          slugRow: slugNode?.parentElement ? slugNode.parentElement.getBoundingClientRect().height : null,
           goal: goalNode ? visible(goalNode) : null,
         };
       }, { slug: A.slug, goal: GOAL });
@@ -627,6 +691,94 @@ try {
         `${label}: no ancestor cuts the slug (${JSON.stringify(geometry.slug)})`);
       assert.ok(geometry.goal, `${label}: the goal span renders`);
       assert.ok(geometry.goal.width > 0 && geometry.goal.height > 0, `${label}: the goal shows a visible box inside the card (${JSON.stringify(geometry.goal)})`);
+      // the denser card, falsifiable on the old geometry (measured
+      // at a63cedea: card A 112px, goal span 36px, needs_input badge 20.5px).
+      // The goal span keeps its two 16px lines (+1px tolerance) — 32px now.
+      assert.ok(geometry.goal.height <= 33, `${label}: the goal span is ${geometry.goal.height}px, over the 2×16px clamp (+1px) (${JSON.stringify(geometry.goal)})`);
+      // A needs_input card's badge no longer inflates its slug row: 14px line
+      // + 1px border = 16px (old badge: 11px × 1.5 + 2px padding + 2px border ≈ 20.5px).
+      // The slug row itself is max(badge, the slug's own 16px lines); a 150px
+      // card leaves the slug 85px beside the status label, so B's 14-character
+      // slug wraps to two 16px lines at every width — 32px, inside the memo's
+      // ≤33px allowance for the 150px card (one-column 340 dock included).
+      const needsB = await card(page, B.work_item_id).evaluate((el, slug) => {
+        const box = (target) => (target ? target.getBoundingClientRect().height : null);
+        const slugNode = [...el.querySelectorAll("*")].find((child) => child.children.length === 0 && (child.textContent ?? "").trim() === slug);
+        return { row: box(slugNode?.parentElement ?? null), badge: box(el.querySelector("[data-pf-needs-input]")) };
+      }, B.slug);
+      assert.ok(needsB.row !== null, `${label}: the needs_input card's slug row renders`);
+      assert.ok(needsB.badge !== null && needsB.badge <= 17, `${label}: the needs_input badge is ${needsB.badge}px, over the 17px bound`);
+      // Measured at 150px cards: badge 16px, slug row 32px. a
+      // running label with a 4-digit minute age narrows the slug beside it, so
+      // card A's slug may wrap to a 3rd 16px line; the row stays a whole number
+      // of 16px lines and the height bound below follows the measured row.
+      assert.ok(needsB.row <= 33, `${label}: the needs_input slug row is ${needsB.row}px, over 33px (16px badge; one wrapped 2-line slug at a 150px card)`);
+      assert.ok(geometry.slugRow >= 16 && geometry.slugRow % 16 === 0,
+        `${label}: card A's slug row is a whole number of 16px lines (${geometry.slugRow})`);
+      // a running card's dim status label carries the job's age
+      // in whole minutes, computed from the card's earliest job_started (A has
+      // a job_started at at(0)); ±1 absorbs a minute rollover during the run.
+      // A non-running card (B, needs_input) has no suffix.
+      const expectedMinutes = Math.floor((Date.now() - Date.parse(at(0))) / 60_000);
+      const runningText = await node.innerText();
+      const minutes = Number((runningText.match(/\bRunning\s+(\d+)m\b/i) ?? [])[1]);
+      assert.ok(Number.isFinite(minutes) && Math.abs(minutes - expectedMinutes) <= 1,
+        `${label}: the running label shows ${expectedMinutes}m from the fixture's job_started (got ${JSON.stringify(runningText.slice(0, 60))})`);
+      const nonRunningText = await card(page, B.work_item_id).innerText();
+      assert.doesNotMatch(nonRunningText, /\b\d+m\b/, `${label}: a non-running card has no minutes suffix (${JSON.stringify(nonRunningText.slice(0, 60))})`);
+      if (measureHeight) {
+        // The docks (460px and 340px) measure card A's whole height. owner 有意变更
+        //（fix228-card-height， reverses the 32px
+        // narration）: no narration area, card-only padding 4px and no slug/goal
+        // gap, so — 2 border + 8 padding + slug row + 32 goal = 42 + slug row
+        // (58px for a one-line slug, 74px for the wrapped two-line row) — the
+        // bound is 43 + the measured slug row. The old 100px/117px card fails
+        // it, and so does one that only removed the narration (64px/80px).
+        const cardHeight = await node.evaluate((el) => el.offsetHeight);
+        const bound = 43 + geometry.slugRow;
+        assert.ok(cardHeight <= bound, `${label}: card A is ${cardHeight}px, over the ${bound}px card geometry (43px + its ${geometry.slugRow}px slug row)`);
+      }
+      // one row of fixed 150px cards that scrolls left and right
+      // (old: N tracks of `repeat(auto-fill, minmax(150px, 1fr))` per width).
+      const row = await node.evaluate((el) => {
+        const container = el.parentElement;
+        const box = el.getBoundingClientRect();
+        return { width: box.width, basis: getComputedStyle(el).flexBasis, gap: getComputedStyle(container).gap,
+          clientWidth: container.clientWidth, scrollWidth: container.scrollWidth,
+          overflowX: getComputedStyle(container).overflowX, scrollbarWidth: getComputedStyle(container).scrollbarWidth };
+      });
+      assert.ok(Math.abs(row.width - 150) <= 0.5, `${label}: a job card is a fixed 150px wide (${row.width})`);
+      assert.equal(row.basis, "150px", `${label}: the card width is the 150px flex basis, not a stretched track (${row.basis})`);
+      assert.equal(row.gap, "8px", `${label}: the card gap is the unchanged 8px (${row.gap})`);
+      assert.equal(row.overflowX, "auto", `${label}: the card row scrolls horizontally (${row.overflowX})`);
+      assert.equal(row.scrollbarWidth, "thin", `${label}: the row's scrollbar stays visible but thin (${row.scrollbarWidth})`);
+      assert.ok(row.scrollWidth > row.clientWidth, `${label}: the row overflows and can be scrolled (${row.scrollWidth}/${row.clientWidth})`);
+      const shape = await dock(page).locator("[data-pf-card-wi]").evaluateAll((nodes) => ({
+        rows: new Set(nodes.map((el) => Math.round(el.getBoundingClientRect().y))).size,
+        widths: nodes.map((el) => el.getBoundingClientRect().width),
+        order: nodes.map((el) => el.getAttribute("data-pf-card-wi")),
+      }));
+      assert.equal(shape.rows, 1, `${label}: every job card sits on one row (${JSON.stringify(shape)})`);
+      assert.ok(shape.widths.every((width) => Math.abs(width - 150) <= 0.5), `${label}: every card is 150px wide (${JSON.stringify(shape.widths)})`);
+      assert.equal(new Set(shape.order).size, shape.order.length, `${label}: the cards keep one DOM node each (${JSON.stringify(shape.order)})`);
+      // Scrolled to the row's end the last card is fully visible (its box inside
+      // the row's viewport, nothing clipped) and the row has really moved.
+      const end = await node.evaluate((el) => {
+        const container = el.parentElement;
+        container.scrollLeft = container.scrollWidth;
+        const cards = [...container.querySelectorAll("[data-pf-card-wi]")];
+        const last = cards.at(-1).getBoundingClientRect(); const clip = container.getBoundingClientRect();
+        return { scrollLeft: container.scrollLeft, lastLeft: last.left, lastRight: last.right, clipLeft: clip.left, clipRight: clip.right };
+      });
+      assert.ok(end.scrollLeft > 0, `${label}: the card row scrolls to the end (${end.scrollLeft})`);
+      assert.ok(end.lastRight <= end.clipRight + 1 && end.lastLeft >= end.clipLeft - 1,
+        `${label}: scrolled to the end the last card is fully visible (${JSON.stringify(end)})`);
+      // the 3 s card poll never resets the row's scroll position
+      // (the cards keep their keys, so nothing re-mounts).
+      const polls = page.__cardRequests.length;
+      await waitFor(() => page.__cardRequests.length >= polls + 2, "two card polls after the scroll", 20_000);
+      const after = await node.evaluate((el) => el.parentElement.scrollLeft);
+      assert.ok(Math.abs(after - end.scrollLeft) <= 1, `${label}: a card poll keeps the scroll position (${after}/${end.scrollLeft})`);
     }));
   }
 } catch (error) {
