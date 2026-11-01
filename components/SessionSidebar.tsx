@@ -1012,6 +1012,11 @@ export function SessionSidebar({ selectedSessionId, highlightSessionId, followHi
   const [archivedSessionIds, setArchivedSessionIds] = useState<ReadonlySet<string>>(
     () => new Set(loadArchivedSessionIds(sessionArchiveStorage())),
   );
+  // claude rows keep their archive state in pi-web's index: the set mirrors
+  // it, so it holds the browser's archived pi rows plus the index's archived claude rows.
+  useEffect(() => {
+    setArchivedSessionIds((prev) => withClaudeArchiveState(prev, allSessions));
+  }, [allSessions]);
   const previousRunningSessionIdsRef = useRef<Set<string>>(new Set());
   const currentSuppressedCompletionSessionIdsRef = useRef<Set<string>>(new Set());
   const previousSuppressedCompletionSessionIdsRef = useRef<Set<string>>(new Set());
@@ -1258,17 +1263,32 @@ export function SessionSidebar({ selectedSessionId, highlightSessionId, followHi
   // selection change, no delete path. Every rendered-list exclusion and the
   // archive view are pure functions of this set, so unarchiving restores the
   // prior behavior exactly (the row re-enters every list it left).
+  const allSessionsRef = useRef(allSessions);
+  allSessionsRef.current = allSessions;
+  // A claude row's archive state is written to pi-web's index instead; the row follows at once.
+  const setClaudeArchived = useCallback((id: string, archived: boolean) => {
+    setAllSessions((prev) => prev.map((session) => session.id === id ? { ...session, archived: archived || undefined } : session));
+    void patchClaudeArchived(id, archived).catch((error) => console.error("Failed to archive the claude session:", error));
+  }, []);
   const archiveSession = useCallback((id: string) => {
+    if (allSessionsRef.current.some((session) => session.id === id && session.harness === "claude")) {
+      setClaudeArchived(id, true);
+      return;
+    }
     setArchivedSessionIds((prev) => {
       if (prev.has(id)) return prev;
       const next = new Set(prev);
       next.add(id);
       return next;
     });
-  }, []);
+  }, [setClaudeArchived]);
   const unarchiveSession = useCallback((id: string) => {
+    if (allSessionsRef.current.some((session) => session.id === id && session.harness === "claude")) {
+      setClaudeArchived(id, false);
+      return;
+    }
     setArchivedSessionIds((prev) => pruneArchivedSessionIds(prev, [id]));
-  }, []);
+  }, [setClaudeArchived]);
 
   // Persist the archive set so it survives a browser refresh (same shape and
   // empty-key-removal rule as the unread markers above).
@@ -3006,6 +3026,61 @@ export function SessionSidebar({ selectedSessionId, highlightSessionId, followHi
  * accent-blue spinner and cyan unread dot, so all three row states stay
  * distinguishable at a glance.
  */
+/**
+ * The visible harness marker of a claude session's row: "claude · <alias>".
+ * pi rows show none.
+ */
+export function HarnessMarker({ session }: { session: Pick<SessionInfo, "harness" | "claude"> }) {
+  if (session.harness !== "claude") return null;
+  const alias = session.claude?.modelAlias;
+  return (
+    <span
+      data-harness="claude"
+      style={{
+        flexShrink: 0,
+        fontSize: 10,
+        lineHeight: 1.4,
+        padding: "0 5px",
+        color: "var(--accent)",
+        background: "var(--bg-hover)",
+        border: "1px solid var(--border)",
+        borderRadius: 4,
+        whiteSpace: "nowrap",
+      }}
+    >
+      {alias ? `claude · ${alias}` : "claude"}
+    </span>
+  );
+}
+
+/**
+ * The archive set with every claude row's state from pi-web's index: an
+ * archived claude row is in it, any other claude row is not; pi rows keep the browser's
+ * state. The same set back when nothing changed.
+ */
+export function withClaudeArchiveState(current: ReadonlySet<string>, sessions: readonly SessionInfo[]): ReadonlySet<string> {
+  let next: Set<string> | null = null;
+  for (const session of sessions) {
+    if (session.harness !== "claude") continue;
+    const archived = session.archived === true;
+    if (archived === current.has(session.id)) continue;
+    next ??= new Set(current);
+    if (archived) next.add(session.id);
+    else next.delete(session.id);
+  }
+  return next ?? current;
+}
+
+/** Writes a claude row's archive state to pi-web's index. */
+async function patchClaudeArchived(id: string, archived: boolean): Promise<void> {
+  const response = await fetch(`/api/sessions/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ archived }),
+  });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+}
+
 function AwaitingInputIndicator() {
   const { t } = useI18n();
   return (
@@ -3131,6 +3206,7 @@ function ArchiveSessionRow({
           >
             {title}
           </a>
+          <HarnessMarker session={session} />
         </div>
         <div style={{ marginTop: 2, display: "flex", alignItems: "center", gap: 8, color: "var(--text-dim)", fontSize: 11, minWidth: 0 }}>
           {/* Unread indication: passive unread does NOT unarchive — the dot
@@ -3518,6 +3594,7 @@ function SessionItem({
                   {title}
                 </a>
               )}
+              <HarnessMarker session={session} />
               {isFiltered && (
                 <span
                   title={t("sidebar.filteredMarker")}

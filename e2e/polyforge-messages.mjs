@@ -1,3 +1,4 @@
+// carries: components/Polyforge*, components/polyforge-*, hooks/usePolyforge*, lib/polyforge*, app/api/polyforge/*
 // — pi-web Messages panel redo (Slack-like), dual-user stub-pf e2e.
 //
 // Originally authored for against artifacts/spec.md; this revision

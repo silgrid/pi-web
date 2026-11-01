@@ -1,3 +1,4 @@
+// carries: components/Polyforge*, components/polyforge-*, hooks/usePolyforge*, lib/polyforge*, app/api/polyforge/*
 // — the Work panel's third, read-only 工单列表 sub-tab.
 //
 // Authored pre-code against artifacts/spec.md (Requirements 1–11) and
@@ -203,8 +204,16 @@ async function waitFor(fn, label, ms = 20_000) {
 }
 async function openDock(page) {
   if ((await dock(page).count()) > 0 && await dock(page).isVisible().catch(() => false)) return dock(page);
+  // the toggle renders only after the mount-time status probe
+  // (`pfPresent`) and, since, is resident at ≤480px / inline
+  // wider. Never open ⋯ to reveal it: ⋯'s overlay covers that slot and
+  // intercepts the click. Wait for the toggle, close ⋯ if it is open, click.
   const more = page.locator('[data-mobile-toolbar-more="true"]');
-  if ((await pfButton(page).count()) === 0 && (await more.count()) > 0 && (await more.getAttribute("aria-expanded")) !== "true") await more.click();
+  await waitFor(async () => (await pfButton(page).count()) > 0, "the Polyforge toggle renders", 20_000);
+  if ((await more.count()) > 0 && (await more.getAttribute("aria-expanded")) === "true") {
+    await more.click();
+    await page.locator('[data-mobile-toolbar-actions="true"]').waitFor({ state: "hidden", timeout: 10_000 });
+  }
   await pfButton(page).click(); await dock(page).waitFor({ timeout: 20_000 }); return dock(page);
 }
 async function openWork(page) {
@@ -268,7 +277,7 @@ try {
     for (const [locale, label] of [["en", "Work items"], ["zh-TW", "工單列表"]]) {
       await withPage({ locale }, async (page) => {
         await openWork(page);
-        // Owner ruling 2026-10-31 (authored-check-defects-203): compare the whole label line (the badge sits on its own line), not the first whitespace token.
+        // Owner ruling 2026-10-31: compare the whole label line (the badge sits on its own line), not the first whitespace token.
         assert.equal((await segment(page, new RegExp(label, "i")).innerText()).trim().split("\n")[0].trim(), label, `${locale} labels the third sub-tab ${label}`);
       });
     }
@@ -440,10 +449,10 @@ try {
       assert.deepEqual(await badges(), [], "before the first list read the items badge is absent");
       await segment(page, RE_ITEMS).click();
       await waitFor(() => listRequests(page) > 0, "the first list read", 20_000);
-      // Owner ruling 2026-10-31 (authored-check-defects-203): the badge is the count of status === "running" rows of the read (baseItems holds exactly one), not queue.running (3).
+      // Owner ruling 2026-10-31: the badge is the count of status === "running" rows of the read (baseItems holds exactly one), not queue.running (3).
       await waitFor(async () => (await badges()).some((name) => name === "1 个运行中的工单"), "the badge shows the first read's running-row count (1)", 20_000);
       const reads = queues().length;
-      // Owner ruling 2026-10-31 (authored-check-ledger-reset-203): change only the state; seed() would also empty the argv ledger.
+      // Owner ruling 2026-10-31: change only the state; seed() would also empty the argv ledger.
       writeFileSync(stateFile, JSON.stringify(fixture({ queue: { running: 4, max_concurrent: 6 } })));
       await waitFor(() => queues().length === reads + 1, "a count-key change re-reads exactly once", 25_000);
       await requestBarrier(page);

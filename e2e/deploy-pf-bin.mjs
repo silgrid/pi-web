@@ -1,3 +1,4 @@
+// carries: deploy-piweb.sh, bin/pi-web-deploy.js, bin/pi-web.js, lib/polyforge-pf-bin*
 // AC6: the deploy reports which pf the service uses (absolute
 // path + `pf --version`) and pins it into the restart loop.
 //

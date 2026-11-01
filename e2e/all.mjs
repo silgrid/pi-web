@@ -12,12 +12,19 @@
 // node_modules and one Chromium install, and keep a warm Turbopack cache for
 // the next run. Suites that touch host-global resources (tmux, pgrep, ...) are
 // not browser suites and run one at a time in a separate serial lane.
-// Suites whose assertions are wall-clock responsiveness bounds opt in with the
-// `e2e/all: isolated` marker: they run one at a time after both lanes drain,
-// because a second `next dev` + Chromium on the host can push such a bound over
-// even though the suite passes alone ( full bar: 20167ms vs 10s).
+// Suites whose assertions are wall-clock responsiveness bounds, or whose
+// scenarios are proven load-sensitive on a shared host, opt in
+// with the `e2e/all: isolated` marker: they run one at a time after both lanes
+// drain, because a second `next dev` + Chromium on the host can push such a
+// bound over even though the suite passes alone ( full bar:
+// 20167ms vs 10s).
 // Output is buffered and printed in sorted suite order; the exit code is
 // non-zero when any suite fails. A hung suite is killed after the timeout.
+// When anything failed, a `===== failures =====` section before the summary
+// names each failing unit in one line, `FAIL e2e/<suite>: <scenario> — <first
+// message line>` (or `FAIL e2e/<suite>: no scenario marker — <last line>` for a
+// crash, a timeout kill or a spawn error), and prints each failing suite's
+// targeted re-run, `re-run: npm run test:e2e:all -- <suite>`.
 import { spawn } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { cpus } from "node:os";
@@ -155,7 +162,34 @@ settled.sort((a, b) => a.suite.localeCompare(b.suite));
 
 for (const r of settled) {
   console.log(`\n===== ${r.ok ? "PASS" : "FAIL"} ${r.suite} (${r.seconds}s) =====`);
-  console.log(r.ok ? r.output.split("\n").filter((l) => /^(PASS|FAIL)/.test(l)).join("\n") : r.output);
+  console.log(r.ok ? r.output.split("\n").filter((l) => /^(PASS|FAIL|SKIP)/.test(l)).join("\n") : r.output);
+}
+// one line per failing scenario marker (`FAIL: <id>` with an
+// indented message below it, or `FAIL <id>: <message>` on one line), else the
+// runner's own trailer or the last output line, then the suite's re-run.
+const clip = (line) => line.replace(/\s+/g, " ").trim().slice(0, 200);
+function failureLines(r) {
+  const lines = r.output.split("\n");
+  const found = [];
+  lines.forEach((line, i) => {
+    const m = /^FAIL(?::\s*|\s+)(.+)$/.exec(line);
+    if (!m) return;
+    const colon = line.startsWith("FAIL:") ? -1 : m[1].indexOf(": ");
+    const scenario = clip(colon < 0 ? m[1] : m[1].slice(0, colon));
+    let message = colon < 0 ? "" : clip(m[1].slice(colon + 2));
+    for (let j = i + 1; !message && j < lines.length && /^(\s|$)/.test(lines[j]); j++) message = clip(lines[j]);
+    found.push(`FAIL e2e/${r.suite}: ${scenario}${message ? ` — ${message}` : ""}`);
+  });
+  if (!found.length) {
+    const nonEmpty = lines.map(clip).filter(Boolean);
+    const last = nonEmpty.findLast((l) => l.startsWith("[all.mjs] ")) ?? nonEmpty.at(-1) ?? "no output";
+    found.push(`FAIL e2e/${r.suite}: no scenario marker — ${last}`);
+  }
+  return [...found, `re-run: npm run test:e2e:all -- ${r.suite}`];
+}
+if (settled.some((r) => !r.ok)) {
+  console.log("\n===== failures =====");
+  for (const r of settled) if (!r.ok) console.log(failureLines(r).join("\n"));
 }
 console.log("\n===== summary =====");
 for (const r of settled) console.log(`${r.ok ? "PASS" : "FAIL"} ${r.suite} ${r.seconds}s`);

@@ -18,7 +18,8 @@ import { buildQuotedSelection } from "@/lib/quoted-selection";
 import { dropMentionText, splitDroppedItems, uploadFiles, type DroppedItem } from "@/lib/file-upload-client";
 import { MessageView } from "./MessageView";
 import { MarkdownBody } from "./MarkdownBody";
-import { ChatInput, type ChatInputHandle } from "./ChatInput";
+import { ChatInput, type ChatInputHandle, type ClaudeComposerState } from "./ChatInput";
+import { isClaudeModelAlias, isClaudeToolPreset } from "@/lib/claude-shared";
 import { ChatMinimap, MINIMAP_WIDTH, useMessageRefs } from "./ChatMinimap";
 import { ExtensionStatusBar } from "./ExtensionStatusBar";
 import { AnsiText } from "./AnsiText";
@@ -302,7 +303,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
   const [restoreAnchorReady, setRestoreAnchorReady] = useState(false);
 
   const {
-    loading, error, messages, activeToolResults, entryIds, messageKeys, historyCursor, hasEarlierMessages, streamingStore,
+    loading, error, messages, activeToolResults, entryIds, messageKeys, historyCursor, hasEarlierMessages, earlierTurnCount, streamingStore,
     agentRunning, bashRunning, pendingBash, modelNames, modelList, modelError, missingCwd, modelScopeWarnings, modelThinkingLevels, modelThinkingLevelMaps, toolPreset, thinkingLevel,
     retryInfo, contextUsage, forkingEntryId,
     isCompacting, compactError, compactResult, displayModel: displayModelValue, modelSwitching, sessionStats,
@@ -327,6 +328,8 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
     loadContext, activeLeafId, scrollToBottom, scrollToMessage, scrollToOffset,
     refreshFromDisk,
     manualFetch, manualFetching, manualFetchAvailable,
+    isClaudeSession, claudeSessionChoices, newSessionHarness, setNewSessionHarness, newSessionModelAlias, setNewSessionModelAlias,
+    newSessionClaudePreset, setNewSessionClaudePreset, claudeAvailability,
   } = useAgentSession({
     session, sessionRunning, newSessionCwd, newSessionDraftKey, initialNewSessionChoices, onNewSessionChoicesChange, onAgentEnd: wrappedOnAgentEnd, onToolEnd, onAttentionNeeded, onBackgroundTasksEvent, onSessionCreated, onSessionForked,
     modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemToolsChange, onSystemInfoLoaderChange, onSessionStatsPanelOpen,
@@ -339,6 +342,30 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
   const hasStreamingContent = useStreamingSelector(streamingStore, selectHasStreamingContent);
   const getStreamingMessage = useCallback(() => streamingStore.getState().streamingMessage, [streamingStore]);
   const sessionBusy = agentRunning || bashRunning;
+  // a fresh composer picks pi or claude; a claude session shows its fixed alias and preset.
+  const claudeComposer = useMemo<ClaudeComposerState | undefined>(() => {
+    if (isNew) {
+      return {
+        choosing: true,
+        harness: newSessionHarness,
+        modelAlias: newSessionModelAlias,
+        preset: newSessionClaudePreset,
+        availability: claudeAvailability,
+        onHarnessChange: setNewSessionHarness,
+        onModelAliasChange: setNewSessionModelAlias,
+        onPresetChange: setNewSessionClaudePreset,
+      };
+    }
+    if (!isClaudeSession) return undefined;
+    const fixed = claudeSessionChoices;
+    return {
+      choosing: false,
+      harness: "claude",
+      modelAlias: isClaudeModelAlias(fixed?.modelAlias) ? fixed.modelAlias : "claude-default",
+      preset: isClaudeToolPreset(fixed?.preset) ? fixed.preset : "read-only",
+      availability: null,
+    };
+  }, [isNew, isClaudeSession, claudeSessionChoices, newSessionHarness, newSessionModelAlias, newSessionClaudePreset, claudeAvailability, setNewSessionHarness, setNewSessionModelAlias, setNewSessionClaudePreset]);
   // External-write signal: each new key reloads the mounted session from disk
   // exactly once, and only when it targets the session this window shows.
   const externalSessionChangeKeyRef = useRef<number | null>(null);
@@ -1113,9 +1140,9 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
       ref={chatInputRef}
       onSend={isActivePane ? handleSend : (() => {}) as () => void}
       onAbort={isActivePane ? handleAbort : (() => {}) as () => void}
-      onSteer={isActivePane && agentRunning ? handleSteer : undefined}
-      onFollowUp={isActivePane && agentRunning ? handleFollowUp : undefined}
-      onPromptWithStreamingBehavior={isActivePane && agentRunning ? handlePromptWithStreamingBehavior : undefined}
+      onSteer={isActivePane && agentRunning && !isClaudeSession ? handleSteer : undefined}
+      onFollowUp={isActivePane && agentRunning && !isClaudeSession ? handleFollowUp : undefined}
+      onPromptWithStreamingBehavior={isActivePane && agentRunning && !isClaudeSession ? handlePromptWithStreamingBehavior : undefined}
       isStreaming={sessionBusy}
       model={displayModelValue}
       isAutoModelSelection={isAutoModelSelection}
@@ -1124,25 +1151,25 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
       modelError={modelError}
       missingCwd={missingCwd}
       modelScopeWarnings={modelScopeWarnings}
-      onModelChange={handleModelChange}
+      onModelChange={isClaudeSession ? undefined : handleModelChange}
       modelSwitching={modelSwitching}
       defaultModel={defaultModel}
       onSetDefaultModel={handleSetDefaultModel}
-      onCompact={session || isNew ? handleCompact : undefined}
+      onCompact={(session || isNew) && !isClaudeSession ? handleCompact : undefined}
       onAbortCompaction={handleAbortCompaction}
       isCompacting={isCompacting}
       compactError={compactError}
       onDismissCompactError={dismissCompactError}
       compactResult={compactResult}
       toolPreset={toolPreset}
-      onToolPresetChange={session || isNew ? handleToolPresetChange : undefined}
+      onToolPresetChange={(session || isNew) && !isClaudeSession ? handleToolPresetChange : undefined}
       thinkingLevel={thinkingLevel}
       isAutoThinkingSelection={isAutoThinkingSelection}
-      onThinkingLevelChange={session || isNew ? handleThinkingLevelChange : undefined}
+      onThinkingLevelChange={(session || isNew) && !isClaudeSession ? handleThinkingLevelChange : undefined}
       availableThinkingLevels={availableThinkingLevels}
       thinkingLevelMap={currentThinkingLevelMap}
       savedDefaultThinkingLevel={savedDefaultThinkingLevel}
-      onSetDefaultThinkingLevel={session || isNew ? handleSetDefaultThinkingLevel : undefined}
+      onSetDefaultThinkingLevel={(session || isNew) && !isClaudeSession ? handleSetDefaultThinkingLevel : undefined}
       retryInfo={retryInfo}
       queuedMessages={queuedMessages}
       inputHistory={inputHistory}
@@ -1150,13 +1177,14 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
       slashCommands={slashCommands}
       slashCommandsLoading={slashCommandsLoading}
       onLoadSlashCommands={loadSlashCommands}
-      onBuiltinCommand={handleBuiltinSlashCommand}
+      onBuiltinCommand={isClaudeSession ? undefined : handleBuiltinSlashCommand}
       soundEnabled={soundEnabled}
       onSoundToggle={onSoundToggle}
       onAudioUnlock={unlockAudio}
       draftKey={session?.id ?? newSessionDraftKey ?? undefined}
       cwd={session?.cwd ?? newSessionCwd}
       onAttachFiles={onAttachFiles}
+      claude={claudeComposer}
     />
   );
 
@@ -1385,7 +1413,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
                     onOpenSubagent={onOpenSubagent}
                     entryId={entryIds[idx]}
                     searchBlock={entryIds[idx] === pendingSearchScroll?.entryId ? searchBlock : undefined}
-                    onFork={bashRunning || isNew ? undefined : handleFork}
+                    onFork={bashRunning || isNew || isClaudeSession ? undefined : handleFork}
                     forking={forkingEntryId === entryIds[idx]}
                     onEditContent={sessionBusy ? undefined : handleEditContent}
                     onCancelEdit={cancelEdit}
@@ -1395,7 +1423,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
                     sessionId={session?.id ?? sessionIdRef.current ?? undefined}
                     writtenFiles={options.writtenFiles}
                     turnDurationMs={options.turnDurationMs}
-                    onCompact={options.recoverTruncation ? handleCompact : undefined}
+                    onCompact={options.recoverTruncation && !isClaudeSession ? handleCompact : undefined}
                     isCompacting={options.recoverTruncation ? isCompacting : undefined}
                     compactError={options.recoverTruncation ? compactError : undefined}
                   />
@@ -1610,6 +1638,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
             messageRefs={messageRefs}
             onRevealHistory={revealHistoryForMinimap}
             scrollToOffset={scrollToOffset}
+            turnsBefore={earlierTurnCount}
           />
         )}
         </>}
@@ -1673,7 +1702,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
             <span aria-hidden="true" style={{ fontSize: 15 }}>@</span>
             <span>{t("chat.askInCurrent")}</span>
           </button>
-          {onAskInNewChat && quotedSelection.sourceEntryId && !bashRunning && (
+          {onAskInNewChat && !isClaudeSession && quotedSelection.sourceEntryId && !bashRunning && (
             <button
               type="button"
               className="file-viewer-icon-button"

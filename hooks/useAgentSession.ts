@@ -14,6 +14,15 @@ import type {
   UserMessage,
 } from "@/lib/types";
 import { isBlockingExtensionUiRequest } from "@/lib/browser-notifications";
+import {
+  CLAUDE_HARNESS,
+  DEFAULT_CLAUDE_MODEL_ALIAS,
+  DEFAULT_CLAUDE_TOOL_PRESET,
+  PI_HARNESS,
+  type ClaudeModelAlias,
+  type ClaudeToolPreset,
+  type SessionHarness,
+} from "@/lib/claude-shared";
 import { normalizeToolCalls } from "@/lib/normalize";
 import { AgentCommandError, agentStatusUrl, isPromptRejectedError, sendAgentCommand } from "@/lib/agent-client";
 import { missingCwdFromBody } from "@/lib/missing-cwd";
@@ -83,6 +92,8 @@ export interface SessionData {
     entryIds: string[];
     oldestEntryId: string | null;
     hasMore: boolean;
+    /** Turns on the branch before `oldestEntryId` (the minimap's numbering offset). */
+    turnsBefore: number;
     thinkingLevel: string;
     model: { provider: string; modelId: string } | null;
   };
@@ -90,6 +101,46 @@ export interface SessionData {
   stats?: SessionFileStats;
   /** True when GET ?force=1 dropped a stale live wrapper and rebuilt from disk. */
   wrapperRebuilt?: boolean;
+  /** The session's list row as the server sees it (a claude session's carries `harness`). */
+  info?: SessionInfo | null;
+}
+
+/** What GET /api/claude reports: whether claude is on PATH, and the config dir it would use. */
+export interface ClaudeAvailability {
+  available: boolean;
+  configDir: string;
+}
+
+/**
+ * The POST /api/agent/new body a fresh composer sends to create its session. A pi
+ * body is the one sent before claude sessions existed; a claude one carries only
+ * the harness and its fixed alias and preset (no pi model, reasoning or tools).
+ */
+export function newSessionRequestBody(options: {
+  cwd: string;
+  harness: SessionHarness;
+  modelAlias: ClaudeModelAlias;
+  claudePreset: ClaudeToolPreset;
+  toolNames?: string[];
+  model?: SelectedModel | null;
+  thinkingLevel?: string | null;
+}): Record<string, unknown> {
+  if (options.harness === CLAUDE_HARNESS) {
+    return {
+      cwd: options.cwd,
+      type: "ensure_session",
+      harness: CLAUDE_HARNESS,
+      modelAlias: options.modelAlias,
+      claudePreset: options.claudePreset,
+    };
+  }
+  return {
+    cwd: options.cwd,
+    type: "ensure_session",
+    ...(options.toolNames !== undefined ? { toolNames: options.toolNames } : {}),
+    ...(options.model ? { provider: options.model.provider, modelId: options.model.modelId } : {}),
+    ...(options.thinkingLevel ? { thinkingLevel: options.thinkingLevel } : {}),
+  };
 }
 
 interface AgentEvent {
@@ -253,6 +304,10 @@ type ConcreteThinkingLevel = Exclude<ThinkingLevelOption, "auto">;
 export interface NewSessionChoices {
   model: { provider: string; modelId: string } | null;
   thinkingLevel: ConcreteThinkingLevel | null;
+  /** The harness picked for the new session (absent: pi), with claude's fixed alias and preset. */
+  harness?: SessionHarness;
+  modelAlias?: ClaudeModelAlias;
+  claudePreset?: ClaudeToolPreset;
 }
 
 function asConcreteThinkingLevel(value?: string | null): ConcreteThinkingLevel | null {
@@ -582,6 +637,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [messageKeyAliases, setMessageKeyAliases] = useState<ReadonlyMap<string, string>>(() => new Map());
   const [historyCursor, setHistoryCursor] = useState<string | null>(null);
   const [hasEarlierMessages, setHasEarlierMessages] = useState(false);
+  // Turns before `historyCursor` (server `turnsBefore`); moves with the cursor.
+  const [earlierTurnCount, setEarlierTurnCount] = useState(0);
   // Outside React state: a streamed chunk must not re-render the whole chat (see StreamingStore).
   const [streamingStore] = useState(createStreamingStore);
   const dispatch = streamingStore.dispatch;
@@ -607,6 +664,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [newSessionDefaultModel, setNewSessionDefaultModel] = useState<SelectedModel | null>(null);
   const [toolPreset, setToolPreset] = useState<ToolPreset>(CONFIGURED_TOOL_PRESET);
   const [newSessionThinkingLevel, setNewSessionThinkingLevel] = useState<ConcreteThinkingLevel | null>(() => initialChoices?.thinkingLevel ?? null);
+  // A fresh composer's harness: pi by default; claude with an alias and a preset.
+  const [newSessionHarness, setNewSessionHarness] = useState<SessionHarness>(() => initialChoices?.harness ?? PI_HARNESS);
+  const [newSessionModelAlias, setNewSessionModelAlias] = useState<ClaudeModelAlias>(() => initialChoices?.modelAlias ?? DEFAULT_CLAUDE_MODEL_ALIAS);
+  const [newSessionClaudePreset, setNewSessionClaudePreset] = useState<ClaudeToolPreset>(() => initialChoices?.claudePreset ?? DEFAULT_CLAUDE_TOOL_PRESET);
+  const [claudeAvailability, setClaudeAvailability] = useState<ClaudeAvailability | null>(null);
   const [newSessionDefaultThinkingLevel, setNewSessionDefaultThinkingLevel] = useState<ConcreteThinkingLevel | null>(null);
   const [savedDefaultThinkingLevel, setSavedDefaultThinkingLevel] = useState<ConcreteThinkingLevel | null>(null);
   const [currentThinkingOverride, setCurrentThinkingOverride] = useState<ConcreteThinkingLevel | null>(null);
@@ -750,6 +812,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const activeLeafIdRef = useRef<string | null>(null);
   const historyCursorRef = useRef<string | null>(null);
   const hasEarlierMessagesRef = useRef(false);
+  const earlierTurnCountRef = useRef(0);
 
   sessionPropIdRef.current = session?.id ?? null;
   dataRef.current = data;
@@ -758,6 +821,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   activeLeafIdRef.current = activeLeafId;
   historyCursorRef.current = historyCursor;
   hasEarlierMessagesRef.current = hasEarlierMessages;
+  earlierTurnCountRef.current = earlierTurnCount;
   isCompactingRef.current = isCompacting;
   extensionUiCountRef.current = extensionDialogs.length + extensionCustomUis.length;
 
@@ -801,8 +865,33 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   const onNewSessionChoicesChange = opts.onNewSessionChoicesChange;
   useEffect(() => {
-    if (isNew) onNewSessionChoicesChange?.({ model: newSessionModel, thinkingLevel: newSessionThinkingLevel });
-  }, [isNew, newSessionModel, newSessionThinkingLevel, onNewSessionChoicesChange]);
+    if (isNew) {
+      onNewSessionChoicesChange?.({
+        model: newSessionModel,
+        thinkingLevel: newSessionThinkingLevel,
+        harness: newSessionHarness,
+        modelAlias: newSessionModelAlias,
+        claudePreset: newSessionClaudePreset,
+      });
+    }
+  }, [isNew, newSessionModel, newSessionThinkingLevel, newSessionHarness, newSessionModelAlias, newSessionClaudePreset, onNewSessionChoicesChange]);
+
+  // A fresh composer asks once whether claude is on PATH (the harness picker's state).
+  useEffect(() => {
+    if (!isNew) return;
+    let current = true;
+    void (async () => {
+      try {
+        const response = await fetch("/api/claude");
+        if (!response.ok) return;
+        const body = await response.json() as { available?: unknown; configDir?: unknown };
+        if (current) setClaudeAvailability({ available: body.available === true, configDir: typeof body.configDir === "string" ? body.configDir : "" });
+      } catch {
+        // Unknown: the claude option stays unavailable.
+      }
+    })();
+    return () => { current = false; };
+  }, [isNew]);
 
   const scrollToBottom = useCallback((behavior: ScrollBehavior = "smooth") => {
     const container = scrollContainerRef.current;
@@ -1001,6 +1090,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           setEntryIds([]);
           setHistoryCursor(null);
           setHasEarlierMessages(false);
+          setEarlierTurnCount(0);
           setError(null);
         }
         deleteSessionViewSnapshot(sid);
@@ -1079,9 +1169,20 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             )
           : baseWindow.messages;
         const view = appliedMessages === baseWindow.messages ? baseWindow : { ...baseWindow, messages: appliedMessages };
-        setData(view === freshWindow ? d : { ...d, context: { ...d.context, ...view } });
+        // The offset belongs to the page that owns a cursor: the fresh read's
+        // own, else the one already loaded (a kept or merged older window).
+        // A missing value reads as zero.
+        const turnsBeforeFor = (oldestEntryId: string | null) => oldestEntryId === d.context.oldestEntryId
+          ? d.context.turnsBefore ?? 0
+          : earlierTurnCountRef.current;
+        const viewTurnsBefore = turnsBeforeFor(view.oldestEntryId);
+        setData(view === freshWindow ? d : { ...d, context: { ...d.context, ...view, turnsBefore: viewTurnsBefore } });
         setActiveLeafId(d.leafId);
         if (revisionUnchanged) {
+          // The kept window's offset still comes from the page owning its
+          // cursor: a snapshot written without one (a hover prefetch before
+          //) must not pin the view at zero.
+          setEarlierTurnCount(viewTurnsBefore);
           // Refresh the cached snapshot with the newest leaf/tree/stats while
           // preserving the wider loaded window.
           setSessionViewSnapshot({
@@ -1092,6 +1193,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             leafId: d.leafId,
             oldestEntryId: historyCursorRef.current,
             hasMore: hasEarlierMessagesRef.current,
+            turnsBefore: viewTurnsBefore,
             summaryTree: d.tree,
             thinkingLevel: d.context.thinkingLevel,
             model: d.context.model,
@@ -1153,6 +1255,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           setEntryIds(next.entryIds);
           setHistoryCursor(view.oldestEntryId);
           setHasEarlierMessages(view.hasMore);
+          setEarlierTurnCount(viewTurnsBefore);
         }
         // Tool-preset state is independent of the view cache: it must be applied
         // on every read, cached window or not (#700).
@@ -1172,6 +1275,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             leafId: d.leafId,
             oldestEntryId: stored.oldestEntryId,
             hasMore: stored.hasMore,
+            turnsBefore: turnsBeforeFor(stored.oldestEntryId),
             summaryTree: d.tree,
             thinkingLevel: d.context.thinkingLevel,
             model: d.context.model,
@@ -1284,6 +1388,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (sessionIdRef.current !== sid || options?.signal?.aborted || !sessionHookMountedRef.current) return;
       setHistoryCursor(d.context.oldestEntryId);
       setHasEarlierMessages(d.context.hasMore);
+      // The page owning the new cursor carries its offset (older page or first page).
+      setEarlierTurnCount(d.context.turnsBefore ?? 0);
       setData((prev) => {
         if (!prev || prev.sessionId !== sid) return prev;
         const context = before ? {
@@ -1292,6 +1398,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           entryIds: [...d.context.entryIds, ...prev.context.entryIds],
           oldestEntryId: d.context.oldestEntryId,
           hasMore: d.context.hasMore,
+          turnsBefore: d.context.turnsBefore ?? 0,
         } : d.context;
         return { ...prev, context };
       });
@@ -1345,8 +1452,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       messageCount,
       firstMessage,
       transient: true,
+      ...(newSessionHarness === CLAUDE_HARNESS
+        ? { harness: CLAUDE_HARNESS, claude: { modelAlias: newSessionModelAlias, preset: newSessionClaudePreset } }
+        : {}),
     }, provisionalDraftKey);
-  }, [isNew, newSessionCwd, newSessionDraftKey, onSessionCreated, opts.chatInputRef]);
+  }, [isNew, newSessionCwd, newSessionDraftKey, onSessionCreated, opts.chatInputRef, newSessionHarness, newSessionModelAlias, newSessionClaudePreset]);
 
   const ensureNewSession = useCallback(async () => {
     if (sessionIdRef.current) return sessionIdRef.current;
@@ -1366,15 +1476,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       const res = await fetch("/api/agent/new", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+        body: JSON.stringify(newSessionRequestBody({
           cwd: newSessionCwd,
-          type: "ensure_session",
-          ...(toolNames !== undefined ? { toolNames } : {}),
-          ...(selectedModel ? { provider: selectedModel.provider, modelId: selectedModel.modelId } : {}),
-          ...(selectedThinkingLevel
-            ? { thinkingLevel: selectedThinkingLevel }
-            : {}),
-        }),
+          harness: newSessionHarness,
+          modelAlias: newSessionModelAlias,
+          claudePreset: newSessionClaudePreset,
+          toolNames,
+          model: selectedModel,
+          thinkingLevel: selectedThinkingLevel,
+        })),
       });
       if (!res.ok) {
         // The server's reason (a project folder that no longer exists, a model Chat only
@@ -1413,7 +1523,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } finally {
       ensuringNewSessionRef.current = null;
     }
-  }, [isNew, newSessionCwd, toolPreset]);
+  }, [isNew, newSessionCwd, toolPreset, newSessionHarness, newSessionModelAlias, newSessionClaudePreset]);
 
   // Opening the System or Tools panel may initialize an otherwise dormant
   // session. This is deliberately a non-prompt command: it creates no message
@@ -2615,7 +2725,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
         if (!sid) throw new Error("Unable to create a session for the prompt");
         sentSessionId = sid;
-        if (selectedModel) {
+        // A claude session's model is its fixed alias: no pi model is set on it.
+        if (selectedModel && newSessionHarness !== CLAUDE_HARNESS) {
           setPendingModel(selectedModel);
           if (existingSid) {
             await sendAgentCommand(sid, { type: "set_model", provider: selectedModel.provider, modelId: selectedModel.modelId });
@@ -2705,7 +2816,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       setAgentPhase(null);
       dispatch({ type: "end" });
     }
-  }, [isNew, newSessionCwd, newSessionModel, session, ensureNewSession, ensureEventsConnected, promoteNewSession, waitForPromptSettlement, addNotice, notifyPromptReloadedFromDisk, releaseUnconfirmedSend, cancelEventStreamGrace, closeEvents, composerDraftKey, dispatch, reconcileAgentState, restoreSubmission, editEntryId, setEdit]);
+  }, [isNew, newSessionCwd, newSessionModel, newSessionHarness, session, ensureNewSession, ensureEventsConnected, promoteNewSession, waitForPromptSettlement, addNotice, notifyPromptReloadedFromDisk, releaseUnconfirmedSend, cancelEventStreamGrace, closeEvents, composerDraftKey, dispatch, reconcileAgentState, restoreSubmission, editEntryId, setEdit]);
 
   const executeBash = useCallback(async (command: string, excludeFromContext: boolean) => {
     if (agentRunningRef.current || bashRunningRef.current) return;
@@ -3530,6 +3641,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             entryIds: cached.entryIds,
             oldestEntryId: cached.oldestEntryId,
             hasMore: cached.hasMore,
+            // A snapshot written before the offset was tracked reads as zero.
+            turnsBefore: cached.turnsBefore ?? 0,
             thinkingLevel: cached.thinkingLevel,
             model: cached.model,
           },
@@ -3540,6 +3653,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         setEntryIds(cached.entryIds);
         setHistoryCursor(cached.oldestEntryId);
         setHasEarlierMessages(cached.hasMore);
+        setEarlierTurnCount(cached.turnsBefore ?? 0);
         setError(null);
         setLoading(false);
       }
@@ -3575,6 +3689,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             leafId: activeLeafIdRef.current,
             oldestEntryId: historyCursorRef.current,
             hasMore: hasEarlierMessagesRef.current,
+            turnsBefore: earlierTurnCountRef.current,
             summaryTree: currentData.tree,
             thinkingLevel: currentData.context.thinkingLevel,
             model: currentData.context.model,
@@ -3776,9 +3891,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     [entryIds, messages.length, messageKeyAliases],
   );
 
+  // a claude session (or a fresh composer set to claude).
+  const isClaudeSession = isNew ? newSessionHarness === CLAUDE_HARNESS : (session?.harness ?? data?.info?.harness) === CLAUDE_HARNESS;
+
   return {
     // State
-    data, loading, error, activeLeafId, messages, activeToolResults, entryIds, messageKeys, historyCursor, hasEarlierMessages, streamingStore,
+    data, loading, error, activeLeafId, messages, activeToolResults, entryIds, messageKeys, historyCursor, hasEarlierMessages, earlierTurnCount, streamingStore,
     agentRunning, modelNames, modelList, modelError, missingCwd, modelScopeWarnings, modelThinkingLevels, modelThinkingLevelMaps, newSessionModel, toolPreset, thinkingLevel,
     retryInfo, contextUsage, systemPrompt, forkingEntryId,
     isCompacting, compactError, compactResult, currentModel, displayModel, modelSwitching, sessionStats, autoCompactionEnabled,
@@ -3787,6 +3905,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     isAutoModelSelection: isNew && newSessionModel === null,
     isAutoThinkingSelection: isNew && newSessionThinkingLevel === null,
     defaultModel: newSessionDefaultModel,
+    // a claude session (or a fresh composer set to claude) and the composer's claude choices.
+    isClaudeSession,
+    claudeSessionChoices: isNew ? null : (session?.claude ?? data?.info?.claude ?? null),
+    newSessionHarness, setNewSessionHarness,
+    newSessionModelAlias, setNewSessionModelAlias,
+    newSessionClaudePreset, setNewSessionClaudePreset,
+    claudeAvailability,
     savedDefaultThinkingLevel,
     agentPhase,
     isNew,
@@ -3802,7 +3927,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     dismissCompactError,
     handleRecallQueue,
     handleBuiltinSlashCommand,
-    handleEditContent,
+    // A claude session's history is claude's own transcript: no "edit from here".
+    handleEditContent: isClaudeSession ? undefined : handleEditContent,
     // Present only while a history edit is pending.
     cancelEdit: editEntryId ? cancelEdit : undefined,
     addNotice,

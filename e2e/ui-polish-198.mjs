@@ -1,3 +1,5 @@
+// carries: components/Polyforge*, components/polyforge-*, hooks/usePolyforge*, lib/polyforge*, app/api/polyforge/*
+// carries: components/MachineLoadSection*, components/DebugPanel*, components/AppShell*, components/SettingsPanel*, components/SettingsUi*, components/settings-ui-helpers*, lib/settings-navigation*, lib/package-settings*, app/api/plugins/*, lib/i18n/*, app/globals.css
 // — pi-web UI polish batch acceptance pass (five items).
 //
 // Authored PRE-CODE from artifacts/spec.md (Requirements + `#### Scenario`)
@@ -225,10 +227,17 @@ const jobsRoutes = [
 ];
 const jobsDock = (page) => page.locator("#polyforge-dock").or(page.getByRole("dialog", { name: /polyforge/i })).first();
 async function openJobsDock(page) {
+  // the toggle renders only after the mount-time status probe
+  // (`pfPresent`) and, since, is resident at ≤480px / inline
+  // wider. Never open ⋯ to reveal it: ⋯'s overlay covers that slot and
+  // intercepts the click. Wait for the toggle, close ⋯ if it is open, click.
   const more = page.locator('[data-mobile-toolbar-more="true"]');
   const pf = page.getByRole("button", { name: /^(?!.*close).*polyforge/i }).first();
-  if ((await pf.count()) === 0 && (await more.count()) > 0 && (await more.getAttribute("aria-expanded")) !== "true") await more.click();
-  if ((await pf.count()) === 0) throw new Error("Polyforge button not found");
+  await waitFor(async () => (await pf.count()) > 0, "the Polyforge toggle renders", 20_000);
+  if ((await more.count()) > 0 && (await more.getAttribute("aria-expanded")) === "true") {
+    await more.click();
+    await page.locator('[data-mobile-toolbar-actions="true"]').waitFor({ state: "hidden", timeout: 10_000 });
+  }
   await pf.click();
   const dock = jobsDock(page);
   await dock.waitFor({ timeout: 20_000 });

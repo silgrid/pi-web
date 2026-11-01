@@ -88,32 +88,58 @@ Failures save a screenshot, Playwright trace, and server log under
   The first run after a clean checkout compiles cold and is slower and more
   sensitive to the suites' page-load timeouts; lower `E2E_JOBS` if a loaded
   machine times out.
-- Page-load ceilings live in one place, `e2e/timeouts.mjs`; a suite imports
-  them instead of spelling its own number. Both bound a single await
-  (`page.goto`/`page.reload` or the first-text wait after it) and stay bounded
-  waits:
+- Page-load and action ceilings live in one place, `e2e/timeouts.mjs`; a
+  suite imports them instead of spelling its own number. The two page-load
+  ceilings bound a single await (`page.goto`/`page.reload` or the first-text
+  wait after it); all three stay bounded waits:
   - `COLD_MS` (env `E2E_COLD_MS`, default `480000`, 8 min): the warm-up load
     that compiles the route cold.
   - `NAV_MS` (env `E2E_NAV_MS`, default `180000`, 3 min): every other page
     load and first-text wait (the former 90 s and 60 s ceilings).
+  - `ACTION_MS` (env `E2E_ACTION_MS`, default `30000`, 30 s): a suite's
+    `page.setDefaultTimeout`, the window in which Playwright retries an
+    action's actionability (a click waiting for its control to become visible,
+    stable and enabled). It bounds no assertion and no wait that spells its
+    own timeout; it is the load-sensitive bound
+    because a busy host delays rendering, not correctness: the former 8 s of
+    `polyforge-work-tab-163.mjs` timed out `locator.click` in the parallel bar
+    (/#227/#235); `polyforge-panel-213.mjs` (former 10 s) takes it
+    as a precaution, since it shares that suite's `openDock()` click path
+. Other suites still spell their own default.
 
   Override in milliseconds, e.g.
-  `E2E_COLD_MS=540000 E2E_NAV_MS=240000 npm run test:e2e:all`. A blank or unset
-  variable keeps the default; `0`, a negative or a non-numeric value is
+  `E2E_COLD_MS=540000 E2E_NAV_MS=240000 E2E_ACTION_MS=45000 npm run test:e2e:all`.
+  A blank or unset variable keeps the default; `0`, a negative or a non-numeric value is
   refused: the suite fails at start with an error naming the variable instead
   of running with a different ceiling. Keep `E2E_COLD_MS` below
   `E2E_SUITE_TIMEOUT_MS`, which still kills a hung suite. On a busy machine
   raise the ceilings before lowering `E2E_JOBS`; on a shared host already under
   someone else's load, lower `E2E_JOBS` first, since a longer ceiling does not
   reduce the load.
-- A suite that asserts a wall-clock responsiveness bound opts in with the
-  `e2e/all: isolated` marker in its source (`session-stall-recovery.mjs`, whose
-  10s bound is the acceptance). The runner starts those suites
-  only after both lanes have drained, one at a time, so another `next dev` +
-  Chromium cannot push the bound over while the suite passes alone.
+- A suite that asserts a wall-clock responsiveness bound, or whose scenarios
+  are proven load-sensitive on a shared host, opts in with the
+  `e2e/all: isolated` marker in its source: `session-stall-recovery.mjs` (its
+  10s bound is the acceptance), `polyforge-work-tab-163.mjs`
+  (8 s click timeouts in the parallel bar,/#227/#235) and
+  `polyforge-panel-213.mjs` (a precaution: named by and sharing
+  work-tab-163's `openDock()` click path; its S213-12 failures were a
+  context-read race, fixed in the suite, not a load bound). The
+  runner starts those suites only after both lanes have drained, one at a
+  time, so another `next dev` + Chromium cannot push the bound over while the
+  suite passes alone.
 - Output is buffered and printed in sorted suite order with a summary; a
   failing suite does not stop the others. `E2E_SUITE_TIMEOUT_MS` (default
   10 min) kills a hung suite and reports it as a FAIL.
+- When anything failed, a `===== failures =====` section before the summary
+  names every failing unit in one line:
+  - `FAIL e2e/<suite>: <scenario> — <first message line>` for each scenario
+    marker in the suite's output (`FAIL: <id>` with its message indented below,
+    or `FAIL <id>: <message>` on one line);
+  - `FAIL e2e/<suite>: no scenario marker — <line>` for a failing suite that
+    printed no marker (a crash, a timeout kill or a spawn error), quoting the
+    runner's own `[all.mjs]` trailer, else the suite's last output line;
+  - `re-run: npm run test:e2e:all -- <suite>` once per failing suite: the
+    targeted re-run of exactly that suite, to copy as is (also on a base commit).
 - Re-run only some suites: `npm run test:e2e:all -- polyforge.mjs run.mjs`.
   To reproduce failures on a base commit, re-run just the failing suites there,
   and reuse an installed `node_modules` when `package-lock.json` is unchanged

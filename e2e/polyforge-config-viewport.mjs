@@ -1,3 +1,5 @@
+// carries: components/Polyforge*, components/polyforge-*, hooks/usePolyforge*, lib/polyforge*, app/api/polyforge/*
+// carries: components/SettingsPanel*, components/SettingsUi*, components/settings-ui-helpers*, lib/settings-navigation*, lib/package-settings*, app/api/plugins/*
 // — Settings › Polyforge configuration page VIEWPORT acceptance.
 //
 // The owner's third photo review after #88 and #126 reports that the page still

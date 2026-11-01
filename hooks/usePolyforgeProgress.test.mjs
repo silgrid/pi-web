@@ -18,8 +18,9 @@ globalThis.document = page;
 const WI = "wi_progress01";
 const OTHER = "wi_progress02";
 const entry = (id, text = id, kind = "narration") => ({ id, kind, text });
-const GOOD = { available: true, entries: [entry("a", "STEP-CODE"), entry("b", "bash: ls", "tool")] };
-const NEXT = { available: true, entries: [entry("z", "STEP-REVIEW")] };
+const GOOD = { available: true, lines: [entry("a", "STEP-CODE"), entry("b", "bash: ls", "tool"), { id: "e", kind: "event", text: "00:00:01 ▶ code #1", tone: "accent", event: "step_started" }], omitted: 0 };
+const NEXT = { available: true, lines: [entry("z", "STEP-REVIEW")], omitted: 2 };
+const UNAVAILABLE = { available: false, lines: [], omitted: 0 };
 const settle = async () => { for (let index = 0; index < 10; index++) await new Promise((resolve) => setImmediate(resolve)); };
 const setVisibility = (state) => {
   page.visibilityState = state;
@@ -79,7 +80,7 @@ test("a running selection reads at once, then exactly once per 2 s tick", async 
     assert.equal(state.requests.length, 2);
     state.server.body = NEXT;
     await state.tick(PROGRESS_POLL_MS);
-    assert.deepEqual(state.hook.result, NEXT, "a new step's tail replaces the old one wholesale");
+    assert.deepEqual(state.hook.result, NEXT, "a newer snapshot replaces the old one wholesale");
     for (let index = 0; index < 4; index++) await state.tick(PROGRESS_POLL_MS);
     assert.equal(state.requests.length, 7, "one request per tick, no second timer");
   } finally {
@@ -134,7 +135,7 @@ test("a hidden page issues no request; hiding aborts the one in flight; showing 
   }
 });
 
-test("a failed or degraded read keeps the last good tail; with none, degraded is the unavailable state", async () => {
+test("a failed or degraded read keeps the last good snapshot; with none, degraded is the unavailable state", async () => {
   const state = await setup();
   try {
     for (const answer of ["error", "offline"]) {
@@ -143,19 +144,22 @@ test("a failed or degraded read keeps the last good tail; with none, degraded is
       assert.deepEqual(state.hook.result, GOOD, `${answer}: the last good tail stays`);
     }
     state.server.answer = "ok";
-    state.server.body = { available: false, entries: [] };
+    state.server.body = UNAVAILABLE;
     await state.tick(PROGRESS_POLL_MS);
-    assert.deepEqual(state.hook.result, GOOD, "a degraded body keeps the last good tail");
+    assert.deepEqual(state.hook.result, GOOD, "a degraded body keeps the last good snapshot");
+    state.server.body = { available: true, entries: [entry("old")] };
+    await state.tick(PROGRESS_POLL_MS);
+    assert.deepEqual(state.hook.result, GOOD, "a malformed (-shaped) body keeps the last good snapshot");
   } finally {
     await teardown(state);
   }
   const fresh = await setup({ visible: false });
   try {
-    fresh.server.body = { available: false, entries: [] };
+    fresh.server.body = UNAVAILABLE;
     setVisibility("visible");
     await settle();
     fresh.hook.flush();
-    assert.deepEqual(fresh.hook.result, { available: false, entries: [] });
+    assert.deepEqual(fresh.hook.result, UNAVAILABLE);
   } finally {
     await teardown(fresh);
   }
@@ -178,7 +182,7 @@ test("a never-settling read is aborted at the bound and at most one request is e
   }
 });
 
-test("another job never shows the previous tail; no wi or a non-id reads nothing; unmount stops everything", async () => {
+test("another job never shows the previous snapshot; no wi or a non-id reads nothing; unmount stops everything", async () => {
   const state = await setup();
   try {
     assert.deepEqual(state.hook.result, GOOD);
@@ -204,5 +208,41 @@ test("another job never shows the previous tail; no wi or a non-id reads nothing
     mock.timers.reset();
     page.visibilityState = "visible";
     await settle();
+  }
+});
+
+test(" (N5): a first read that fails outright is the unavailable state, never Loading; a later good read replaces it", async () => {
+  for (const answer of ["error", "offline", "malformed", "never"]) {
+    const state = await setup({ visible: false });
+    try {
+      state.server.answer = answer === "malformed" ? "ok" : answer;
+      if (answer === "malformed") state.server.body = { available: true, entries: [] };
+      setVisibility("visible");
+      await settle();
+      if (answer === "never") await state.tick(PROGRESS_REQUEST_TIMEOUT_MS);
+      state.hook.flush();
+      assert.deepEqual(state.hook.result, UNAVAILABLE, `${answer}: the first failed read is unavailable, not null (Loading)`);
+      state.server.answer = "ok";
+      state.server.body = GOOD;
+      await state.tick(PROGRESS_POLL_MS);
+      assert.deepEqual(state.hook.result, GOOD, `${answer}: a later good read replaces the unavailable state`);
+    } finally {
+      await teardown(state);
+    }
+  }
+});
+
+test(" (N5): hiding or deselecting during the first read writes nothing — only a failed read is unavailable", async () => {
+  const state = await setup({ visible: false });
+  try {
+    state.server.answer = "never";
+    setVisibility("visible");
+    await settle();
+    setVisibility("hidden");
+    await settle();
+    state.hook.flush();
+    assert.equal(state.hook.result, null, "an abort by hiding is not a failed read");
+  } finally {
+    await teardown(state);
   }
 });

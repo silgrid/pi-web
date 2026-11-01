@@ -589,7 +589,39 @@ function GeneralSettings({ sessionId, onSessionReloaded, quoteSelectionEnabled, 
           {logoutError && <p role="alert" className="settings-general-error">{logoutError}</p>}
         </section>
       )}
+      <ClaudeConfigDirSection />
     </div>
+  );
+}
+
+/**
+ * Settings › General's read-only claude line: the config dir every claude
+ * session runs with, and what it and each preset do — including whether a preset loads the
+ * session folder's CLAUDE.md. Nothing here is editable and no credential is shown.
+ */
+export function ClaudeConfigDirSection({ initialConfigDir = null }: { initialConfigDir?: string | null }) {
+  const { t } = useI18n();
+  const [configDir, setConfigDir] = useState<string | null>(initialConfigDir);
+  useEffect(() => {
+    let current = true;
+    void fetch("/api/claude")
+      .then((response) => response.ok ? response.json() : null)
+      .then((data: { configDir?: unknown } | null) => {
+        if (current && typeof data?.configDir === "string") setConfigDir(data.configDir);
+      })
+      .catch(() => {});
+    return () => { current = false; };
+  }, []);
+  return (
+    <section className="settings-general-section settings-claude-section">
+      <h3 className="settings-general-heading">{t("claude.settingsHeading")}</h3>
+      <p className="settings-general-description">
+        {t("claude.configDir", { path: configDir ?? "…" })}
+      </p>
+      <p className="settings-general-description">{t("claude.configDirNote")}</p>
+      <p className="settings-general-description">{t("claude.presetReadOnlyText")}</p>
+      <p className="settings-general-description">{t("claude.presetWritableText")}</p>
+    </section>
   );
 }
 

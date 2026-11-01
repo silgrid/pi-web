@@ -16,6 +16,7 @@ import {
   withSubagentDisplayStatus,
 } from "@/lib/rpc-manager";
 import { startServerPerf } from "@/lib/perf";
+import { getClaudeSessionInfos, getRunningClaudeSessionIds } from "@/lib/claude-session";
 
 export const dynamic = "force-dynamic";
 
@@ -33,9 +34,10 @@ export async function GET(req: Request) {
       : listAllSessions({ force });
     // Capture before awaiting: mutations during the scan still require a later refresh.
     const sessionListVersion = getSessionListVersion();
+    // claude rows come from pi-web's own index, beside the live pi rows.
     const [persistedSessions, runtimeSessions] = await Promise.all([
       persistedSessionsPromise,
-      attachSessionProjectInfo(getRpcSessionInfos()),
+      attachSessionProjectInfo([...getRpcSessionInfos(), ...getClaudeSessionInfos()]),
     ]);
     perf?.span("scan+projects");
     // Trim at the RESPONSE layer only — the reader's view cache and the
@@ -46,7 +48,7 @@ export async function GET(req: Request) {
       {
         sessions,
         sessionListVersion,
-        runningSessionIds: getRunningRpcSessionIds(),
+        runningSessionIds: [...getRunningRpcSessionIds(), ...getRunningClaudeSessionIds()],
         awaitingSessionIds: getAwaitingRpcSessionIds(),
         completionNotificationSuppressedSessionIds: getCompletionNotificationSuppressedRpcSessionIds(),
       },
@@ -56,7 +58,7 @@ export async function GET(req: Request) {
       {
         sessions,
         sessionListVersion,
-        runningSessionIds: getRunningRpcSessionIds(),
+        runningSessionIds: [...getRunningRpcSessionIds(), ...getRunningClaudeSessionIds()],
         awaitingSessionIds: getAwaitingRpcSessionIds(),
         completionNotificationSuppressedSessionIds: getCompletionNotificationSuppressedRpcSessionIds(),
       },

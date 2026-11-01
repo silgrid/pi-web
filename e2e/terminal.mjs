@@ -1,3 +1,4 @@
+// carries: components/Terminal*, components/terminal-*, hooks/useTerminalTheme*, lib/terminal-*, app/api/terminal/*, bin/prepare-terminal.js
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";

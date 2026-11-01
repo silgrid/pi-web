@@ -5,6 +5,9 @@ import { getSessionSettings, openSessionManager, resolveSessionPath, SESSION_ID_
 import { computeSessionStats, type SessionUsageSummary } from "@/lib/session-stats";
 import { computeSessionTotalActiveMs } from "@/lib/session-timing";
 import type { SessionEntry } from "@/lib/types";
+import { getClaudeSessionRecord } from "@/lib/claude-index";
+import { claudeSessionStats, readClaudeHistory } from "@/lib/claude-session";
+import { CLAUDE_PROVIDER } from "@/lib/claude-shared";
 
 export const dynamic = "force-dynamic";
 
@@ -33,6 +36,18 @@ function refusal(status: number, error: string) {
 }
 
 async function readSummary(id: string): Promise<SessionUsageSummary | null> {
+  // A claude session: tokens and cost are the index's `result` totals.
+  const claudeRecord = getClaudeSessionRecord(id);
+  if (claudeRecord) {
+    const stats = claudeSessionStats(claudeRecord, readClaudeHistory(id).messages);
+    return {
+      tokens: stats.tokens,
+      cost: stats.cost,
+      toolCalls: stats.toolCalls,
+      totalActiveMs: 0,
+      model: { provider: CLAUDE_PROVIDER, modelId: claudeRecord.modelAlias },
+    };
+  }
   const rpc = getRpcSession(id);
   let sm: SessionManagerLike;
   if (rpc?.isAlive()) {

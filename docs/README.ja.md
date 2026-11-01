@@ -13,6 +13,8 @@
 - **2 種類の分岐**：**New session** は以前のメッセージから独立したセッションファイルを作成し、**Edit from here** は現在のセッション内にブランチを作成します。
 - **プロジェクトファイルツール**：ファイルの閲覧とアップロード、Git Diff の確認、ソース、Markdown、画像、音声、PDF、DOCX のプレビューに対応し、変更時は自動更新されます。
 - **Web での設定**：Pi Web を離れずに、Provider のログインと API Key、モデル、モデルテスト、プラグインパッケージ、スキルを管理できます。
+- **Polyforge パネル**：マシンに `pf` があれば、トップバーのボタンで Polyforge ドックパネル（スマートフォンでは下部シート）が開きます。Jobs カードとジョブ詳細（ステップグラフとジョブ全体の実行進捗）、Tasks、工単リスト（工单列表）、プロジェクトの Memory、プロジェクトごとに連絡先をまとめメンバー管理もできる Messages を扱えます。詳しくは [agents/polyforge-panel.md](./agents/polyforge-panel.md) を参照してください。
+- **claude セッション**：新しいコンポーザーで pi と claude のどちらのハーネスを使うか選べます。claude セッションはモデルエイリアスと `read-only` / `writable` のツールプリセットをセッションの間固定し、専用の設定ディレクトリ `<pi agent dir>/claude` で claude を実行します。詳しくは [agents/claude-sessions.md](./agents/claude-sessions.md) を参照してください。
 - **英語、簡体字中国語、繁体字中国語の UI**：初回はブラウザーの言語に従い、トップバーから言語を切り替えられます。
 
 ## クイックスタート
