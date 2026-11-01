@@ -17,7 +17,10 @@ export interface PolyforgePreferenceSpec {
   max: number;
 }
 
-export const POLYFORGE_TITLE_LENGTH: PolyforgePreferenceSpec = { key: POLYFORGE_TITLE_LENGTH_KEY, defaultValue: 30, min: 10, max: 200 };
+/** The goal's truncation length in code points. owner 有意变更:
+ *  the default is 60 (was 30) so a goal fills the card's two-line clamp; the
+ *  10/200 bounds are unchanged, and a browser that stored 30 keeps 30. */
+export const POLYFORGE_TITLE_LENGTH: PolyforgePreferenceSpec = { key: POLYFORGE_TITLE_LENGTH_KEY, defaultValue: 60, min: 10, max: 200 };
 /** Seconds. */
 export const POLYFORGE_POLL_INTERVAL: PolyforgePreferenceSpec = { key: POLYFORGE_POLL_INTERVAL_KEY, defaultValue: 3, min: 1, max: 60 };
 

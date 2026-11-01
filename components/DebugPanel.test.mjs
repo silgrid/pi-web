@@ -678,14 +678,18 @@ test("without a chat or with a reader that throws, the panel says so and still s
   assert.doesNotMatch(before, /<div class="debug-panel-scroll">/);
 });
 
-test("the open panel shows's machine-load section once, above the columns; first open reads Unavailable", () => {
+test("the open panel shows's machine-load section once, as the grid's last row after every column; first open reads Unavailable", () => {
   const html = render();
   const scroll = html.indexOf('<div class="debug-panel-scroll">');
-  const machine = html.indexOf('<div class="machine-load-section"');
   const cols = html.indexOf('<div class="debug-cols">');
-  assert.ok(scroll !== -1 && scroll < machine && machine < cols, "inside the scroll body, before the columns");
+  const load = html.indexOf('<div class="debug-load">');
+  const machine = html.indexOf('<div class="machine-load-section"');
+  const lastColumn = Math.max(...["debug-col-page", "debug-col-server", "debug-col-sessions"].map((name) => html.indexOf(`class="debug-col ${name}"`)));
+  assert.ok(scroll !== -1 && scroll < cols && cols < lastColumn, "the columns inside the scroll body");
+  assert.ok(lastColumn < load && load < machine, "inside .debug-cols, after all three columns");
   assert.equal((html.match(/class="machine-load-section"/g) || []).length, 1);
-  const section = html.slice(machine, cols);
+  assert.equal(html.slice(scroll, cols).includes("machine-load-section"), false, "not above the columns");
+  const section = html.slice(machine);
   assert.ok(section.includes(`>${t("session.machineLoad")}<`));
   assert.ok(section.includes(`>${t("session.machineHost")}<`));
   assert.equal(section.split(`>${t("session.machineUnavailable")}<`).length - 1, 4, "no value before the first answer");
@@ -702,9 +706,12 @@ test("the panel keeps to the theme and to Safari 16.2: tokens, the three state c
   const outside = css.replace(/@container debug-panel \(max-width: \d+px\) \{[^]*?\n {2}\}\n/g, "");
   // Three columns on a wide panel, each but the page's capped; the sessions under the server's
   // pages on a narrower one (its height going to their row); one above the other on a phone.
-  assert.match(css, /\.debug-cols \{\s*display: grid;\s*grid-template-areas: "page server sessions";\s*grid-template-columns: minmax\(320px, max-content\) minmax\(340px, 480px\) minmax\(360px, 560px\);/);
-  assert.match(css, /@container debug-panel \(max-width: 1239px\) \{\s*\.debug-cols \{\s*grid-template-areas: "page server" "page sessions";\s*grid-template-columns: minmax\(320px, max-content\) minmax\(0, 560px\);\s*grid-template-rows: auto 1fr;/);
-  assert.match(css, /@container debug-panel \(max-width: 760px\) \{\s*\.debug-cols \{\s*grid-template-areas: "page" "server" "sessions";\s*grid-template-columns: minmax\(0, 1fr\);/);
+  // The machine load is the last row across every column at all three widths; the grid hugs its
+  // columns, so that row's edges are the grid's.
+  assert.match(css, /\.debug-cols \{\s*display: grid;\s*grid-template-areas: "page server sessions" "load load load";\s*grid-template-columns: minmax\(320px, max-content\) minmax\(340px, 480px\) minmax\(360px, 560px\);\s*gap: 0;\s*width: fit-content;\s*max-width: 100%;/);
+  assert.match(css, /\.debug-load \{\s*grid-area: load;/);
+  assert.match(css, /@container debug-panel \(max-width: 1239px\) \{\s*\.debug-cols \{\s*grid-template-areas: "page server" "page sessions" "load load";\s*grid-template-columns: minmax\(320px, max-content\) minmax\(0, 560px\);\s*grid-template-rows: auto 1fr auto;/);
+  assert.match(css, /@container debug-panel \(max-width: 760px\) \{\s*\.debug-cols \{\s*grid-template-areas: "page" "server" "sessions" "load";\s*grid-template-columns: minmax\(0, 1fr\);\s*grid-template-rows: none;\s*width: auto;/);
   // A measure's details wrap in the table instead of widening it.
   assert.match(css, /\.debug-measure-sub,\s*\.debug-measure-empty \{\s*grid-column: 2 \/ -1;\s*width: 0;\s*min-width: 100%;/);
   assert.doesNotMatch(outside, /\{[^}]*\{/, "no nested rule");
@@ -750,9 +757,11 @@ test("the Debug button only toggles its panel, left of the session stats", () =>
   const stats = between(shellSource, "const renderSessionStatsButton = (mobile: boolean) => {", "const renderDebugButton");
   assert.match(stats, /\n\s*marginLeft: 0,/);
   assert.match(shellSource, /marginLeft: !mobile && !showChat \? "auto" : 0,/);
-  // Phones: before the stats on a wide one, in the "more" overlay on a narrow one.
-  assert.match(shellSource, /\{!isNarrowMobile && renderChatToolbarActions\(true\)\}\s*\{!isNarrowMobile && renderDebugButton\(true\)\}\s*\{renderSessionStatsButton\(true\)\}/);
-  assert.match(shellSource, /\{renderChatToolbarActions\(true\)\}\s*\{renderDebugButton\(true\)\}\s*<\/div>/);
+  // Phones 481–640px keep the inline row; owner 有意变更 at
+  // ≤480px the Polyforge button is resident between the More toggle and the
+  // stats, and the More overlay no longer contains it.
+  assert.match(shellSource, /\{!isNarrowMobile && renderChatToolbarActions\(true\)\}\s*\{isNarrowMobile && renderPolyforgeButton\(true\)\}\s*\{!isNarrowMobile && renderDebugButton\(true\)\}\s*\{renderSessionStatsButton\(true\)\}/);
+  assert.match(shellSource, /\{renderChatToolbarActions\(true, \{ includePolyforge: false \}\)\}\s*\{renderDebugButton\(true\)\}\s*<\/div>/);
 });
 
 test("Escape with focus in the panel gives it back to the Debug button, after the panel left the page", () => {
@@ -776,8 +785,23 @@ test("Escape with focus in the panel gives it back to the Debug button, after th
 });
 
 test("the narrow phone's more overlay scrolls the buttons it cannot fit instead of clipping the last", () => {
-  const overlay = between(shellSource, 'data-mobile-toolbar-actions="true"', "{renderChatToolbarActions(true)}");
+  const overlay = between(shellSource, 'data-mobile-toolbar-actions="true"', "{renderChatToolbarActions(true, { includePolyforge: false })}");
   assert.match(overlay, /overflowX: "auto",\s*overflowY: "hidden",\s*scrollbarWidth: "none",/);
+  // owner 有意变更 the overlay keeps every other action and no
+  // longer carries the Polyforge button (it is resident in the phone toolbar).
+  assert.doesNotMatch(overlay, /renderPolyforgeButton|data-pf-toggle/);
+});
+
+test("the phone stats strip scrolls instead of clipping its leftmost items", () => {
+  const stats = between(shellSource, "const renderSessionStatsButton = (mobile: boolean) => {", "const renderDebugButton");
+  // Right-aligned while the items fit (the wrapper's auto margin), scrolled
+  // from the leftmost item when they do not; the tap handler is unchanged.
+  assert.match(stats, /overflowX: mobile \? "auto" : "hidden"/);
+  assert.match(stats, /overflowY: "hidden"/);
+  assert.match(stats, /marginLeft: "auto"/);
+  assert.match(stats, /minWidth: "max-content"/);
+  assert.match(shellSource, /\.mobile-session-stats \{[\s\S]*?scrollbar-width: none;[\s\S]*?\}/);
+  assert.match(shellSource, /\.mobile-session-stats::-webkit-scrollbar \{\s*display: none;\s*\}/);
 });
 
 test("AppShell keeps the chat's reader in a ref and the panel open across session switches", () => {

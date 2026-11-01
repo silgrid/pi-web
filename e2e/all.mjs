@@ -12,6 +12,10 @@
 // node_modules and one Chromium install, and keep a warm Turbopack cache for
 // the next run. Suites that touch host-global resources (tmux, pgrep, ...) are
 // not browser suites and run one at a time in a separate serial lane.
+// Suites whose assertions are wall-clock responsiveness bounds opt in with the
+// `e2e/all: isolated` marker: they run one at a time after both lanes drain,
+// because a second `next dev` + Chromium on the host can push such a bound over
+// even though the suite passes alone ( full bar: 20167ms vs 10s).
 // Output is buffered and printed in sorted suite order; the exit code is
 // non-zero when any suite fails. A hung suite is killed after the timeout.
 import { spawn } from "node:child_process";
@@ -131,12 +135,23 @@ async function lane(queue, width) {
   return results;
 }
 
+const isolatedMarker = "e2e/all: isolated";
+const isolated = new Set(all.filter((f) => source.get(f).includes(isolatedMarker)));
+const solo = suites.filter((s) => isolated.has(s));
+const regular = suites.filter((s) => !isolated.has(s));
+
 const started = Date.now();
-console.log(`e2e/all: ${suites.length} suite(s), browser pool ${jobs}, serial lane 1`);
+console.log(`e2e/all: ${suites.length} suite(s), browser pool ${jobs}, serial lane 1`
+  + (solo.length ? `, ${solo.length} isolated` : ""));
 const settled = (await Promise.all([
-  lane(suites.filter(isBrowser), jobs),
-  lane(suites.filter((s) => !isBrowser(s)), 1),
-])).flat().sort((a, b) => a.suite.localeCompare(b.suite));
+  lane(regular.filter(isBrowser), jobs),
+  lane(regular.filter((s) => !isBrowser(s)), 1),
+])).flat();
+for (const suite of solo) {
+  if (interrupted) break;
+  settled.push(await runSuite(suite));
+}
+settled.sort((a, b) => a.suite.localeCompare(b.suite));
 
 for (const r of settled) {
   console.log(`\n===== ${r.ok ? "PASS" : "FAIL"} ${r.suite} (${r.seconds}s) =====`);

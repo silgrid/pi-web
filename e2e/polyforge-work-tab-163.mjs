@@ -13,8 +13,10 @@
 //
 // Baseline posture: the baseline a7dc872e predates the #163 carry, so there is
 // no Work tab, no sub-tab rail, no card grid and no detail step graph yet;
-// every kept scenario is assertion-level RED. Each passing scenario prints
-// `PASS S<n>` (the binding marker).
+// every kept scenario is assertion-level RED. Each scenario prints its
+// `PASS: S<n>` / `FAIL: S<n>` verification marker (the release verify-run unit
+// parser locates `PASS:`/`FAIL:` lines, so a transient failure can be re-run
+// and classified instead of leaving the whole command as the unit).
 //
 //   node --experimental-strip-types e2e/polyforge-work-tab-163.mjs
 import assert from "node:assert/strict";
@@ -25,6 +27,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
 import { startNextServer } from "./next-server.mjs";
+import { NAV_MS } from "./timeouts.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 assert.ok(!existsSync(join(root, process.env.PI_WEB_DIST_DIR || ".next", "dev/lock")), "Run in a checkout without an active dev server");
@@ -133,6 +136,7 @@ const task = (id, projectName, state, summary, extra = {}) => ({
   id, spec: { project: projectName, max_duration_ns: 1_200_000_000_000, max_tokens: 1_000_000, prompt: `PROMPT-${id}` },
   state, prompt_summary: summary, candidate: "pi:e2e/task-model", created_at: EPOCH, tokens_consumed: 12_345, delivered: false,
   started_at: extra.started_at, ended_at: extra.ended_at, wall_consumed_ns: extra.wall_consumed_ns ?? 0,
+  report_tail: extra.report_tail ?? "", reporter: extra.reporter ?? "machine",
 });
 // Fresh per seed: the running task started five seconds ago, so the block's
 // client tick is visible at second granularity in any duration format.
@@ -140,7 +144,7 @@ const taskRows = () => {
   const started = new Date(Date.now() - 5_000).toISOString();
   return [
     task(T1, "workbench", "running", `${M1} run the long job`, { started_at: started }),
-    task(T2, "polyforge", "completed", `${M2} finished report`, { started_at: EPOCH, ended_at: ENDED, wall_consumed_ns: 42_000_000_000 }),
+    task(T2, "polyforge", "completed", `${M2} finished report`, { started_at: EPOCH, ended_at: ENDED, wall_consumed_ns: 42_000_000_000, reporter: "alice" }),
     task(T3, "workbench", "failed", `${M3} broke`, { started_at: EPOCH, ended_at: ENDED, wall_consumed_ns: 10_000_000_000 }),
   ];
 };
@@ -199,10 +203,16 @@ const taskLists = () => calls().filter((a) => a[0] === "task" && a[1] === "list"
 // ---- scenario bookkeeping and helpers ----
 const failures = [];
 async function check(id, fn) {
-  try { await fn(); console.log(`PASS ${id}`); }
-  catch (error) { failures.push(id); console.log(`FAIL ${id}: ${String(error?.message ?? error).split("\n")[0]}`); }
+  try { await fn(); console.log(`PASS: ${id}`); }
+  catch (error) {
+    failures.push(id);
+    const detail = String(error?.message ?? error).split("\n").map((line) => `  ${line}`).join("\n");
+    console.log(`FAIL: ${id}\n${detail}`);
+  }
 }
 const RE_MEMORY = /记忆|memory/i, RE_MESSAGES = /消息|messages/i, RE_WORK = /工单|work/i, RE_JOBS = /作业|jobs/i, RE_TASKS = /任务|tasks/i;
+// Work's third sub-tab, 工单列表 (subTab only; RE_WORK stays top-level).
+const RE_ITEMS = /工单列表|work items/i;
 const errors = [];
 let browser; let base; let stop = async () => {};
 async function openPage({ viewport = { width: 1280, height: 800 }, storage = {} } = {}) {
@@ -222,8 +232,8 @@ async function openPage({ viewport = { width: 1280, height: 800 }, storage = {} 
     if (pathname === "/api/polyforge/cards") page.__cards.push(Date.now());
     if (pathname.startsWith("/api/polyforge/")) page.__pf.push(pathname);
   });
-  await page.goto(`${base}/?session=${SESSION}`, { waitUntil: "domcontentloaded", timeout: 90_000 });
-  await page.getByText("E2E pf work host session").first().waitFor({ state: "attached", timeout: 90_000 });
+  await page.goto(`${base}/?session=${SESSION}`, { waitUntil: "domcontentloaded", timeout: NAV_MS });
+  await page.getByText("E2E pf work host session").first().waitFor({ state: "attached", timeout: NAV_MS });
   return page;
 }
 const withPage = async (opts, fn) => { const page = await openPage(opts); try { return await fn(page); } finally { await page.context().close(); } };
@@ -234,9 +244,14 @@ const topTab = (page, re) => topTabs(page).filter({ hasText: re }).first();
 const subTab = (page, re) => dock(page).getByRole("tab", { name: re }).or(dock(page).getByRole("button", { name: re })).last();
 const card = (page, wi) => dock(page).locator(`[data-pf-card-wi="${wi}"]`);
 async function openDock(page) {
-  // At ≤480px the app folds the Polyforge button behind the toolbar's More toggle.
+  // The helper tolerates a folded Polyforge button, though made it
+  // resident right of the toolbar's More toggle at ≤480px.
   const more = page.locator('[data-mobile-toolbar-more="true"]');
   if ((await pfButton(page).count()) === 0 && (await more.count()) > 0 && (await more.getAttribute("aria-expanded")) !== "true") await more.click();
+  // rewind: the toggle only renders once the mount-time status
+  // probe resolves (`pfPresent`), so wait for that bounded condition instead
+  // of letting the 8 s click bound absorb a slow probe under host load.
+  await waitFor(async () => (await pfButton(page).count()) > 0, "the Polyforge toggle renders", 20_000);
   await pfButton(page).click(); await dock(page).waitFor({ timeout: 20_000 }); return dock(page);
 }
 async function openWork(page, sub) {
@@ -287,12 +302,13 @@ async function assertTaskListReads(page, expected, message) {
   assert.equal(taskLists().length, expected, message);
 }
 const isActive = async (locator) => (await locator.getAttribute("aria-selected")) === "true";
+// (intentional 2026-10-31 third-segment change): the rail/bar is
+// the union of all three sub-tab segments, 作业 / 任务 / 工单列表.
 async function railBox(page) {
-  const boxes = [await subTab(page, RE_JOBS).boundingBox(), await subTab(page, RE_TASKS).boundingBox()];
+  const boxes = [await subTab(page, RE_JOBS).boundingBox(), await subTab(page, RE_TASKS).boundingBox(), await subTab(page, RE_ITEMS).boundingBox()];
   if (boxes.some((box) => !box)) return null;
-  const [a, b] = boxes;
-  return { x: Math.min(a.x, b.x), y: Math.min(a.y, b.y), width: Math.max(a.x + a.width, b.x + b.width) - Math.min(a.x, b.x),
-    height: Math.max(a.y + a.height, b.y + b.height) - Math.min(a.y, b.y) };
+  const x = Math.min(...boxes.map((box) => box.x)), y = Math.min(...boxes.map((box) => box.y));
+  return { x, y, width: Math.max(...boxes.map((box) => box.x + box.width)) - x, height: Math.max(...boxes.map((box) => box.y + box.height)) - y };
 }
 // A task block is the clickable `data-pf-task` button (carried #163 convention).
 const taskBlock = (page, id) => dock(page).locator(`[data-pf-task="${id}"]`).first();
@@ -326,7 +342,13 @@ const labelStyles = (page, wi, pattern) => card(page, wi).evaluate((el, source) 
 }, pattern);
 const firstOptionTexts = (select) => select.locator("option").allInnerTexts().then((rows) => rows.map((row) => row.trim()));
 // Per-step duration row in the detail: the line naming `id` and carrying a `+<n>` duration.
-const timingLine = (text, id) => text.split("\n").map((line) => line.trim()).find((line) => line.includes(id) && /\+\s*\d/.test(line)) ?? "";
+// owner 有意变更 a step's duration and ×N moved from a detail row (name + start + duration on
+// one line) to the line under its DAG node, [data-pf-step-timing="<id>"]; "" when it shows no duration.
+const timingLine = async (page, id) => {
+  const line = dock(page).locator(`[data-pf-step-timing="${id}"]`).first();
+  const text = (await line.count()) ? (await line.innerText()).trim() : "";
+  return /\+\s*\d/.test(text) ? text : "";
+};
 // The visible marker node's box, constrained to its card (width/height > 0 and inside the card).
 const markerBox = (page, wi, pattern) => card(page, wi).evaluate((el, source) => {
   const re = new RegExp(source, "i");
@@ -369,7 +391,7 @@ try {
     await dock(page).getByText(M1).waitFor({ timeout: 20_000 });
     assert.equal(await card(page, A.wi).count(), 0, "任务 is still the selected sub-tab");
     await page.reload({ waitUntil: "domcontentloaded" });
-    await page.getByText("E2E pf work host session").first().waitFor({ state: "attached", timeout: 90_000 });
+    await page.getByText("E2E pf work host session").first().waitFor({ state: "attached", timeout: NAV_MS });
     await openWork(page);
     await card(page, A.wi).waitFor({ timeout: 30_000 });
     assert.equal(await dock(page).getByText(M1).count(), 0, "a reload returns to the 作业 sub-tab");
@@ -384,16 +406,26 @@ try {
     assert.ok(main.width >= dockBox.width * 0.55, `the main area keeps the remaining width (${main.width}/${dockBox.width})`);
     await withPage({ viewport: { width: 375, height: 800 } }, async (mobile) => {
       seed(); await openWork(mobile); await card(mobile, A.wi).waitFor({ timeout: 30_000 });
-      const bar = await railBox(mobile); const content = await card(mobile, A.wi).boundingBox(); const sheet = await dock(mobile).boundingBox();
-      assert.ok(bar && content && sheet, "the switch bar and main area render at 375px");
-      assert.ok(bar.width >= sheet.width * 0.6, `the two segments form a top bar, not a right rail (${bar.width}/${sheet.width})`);
-      assert.ok(bar.y + bar.height <= content.y + 2, `the bar sits above the main area (bar end ${bar.y + bar.height}, content ${content.y})`);
-      assert.ok(bar.height <= 48, `the switch bar is a horizontal segment bar (${bar.height}px)`);
-      // the documented DOM order — the Work sub-tab strip
-      // comes AFTER the main area in the DOM and column-reverse lifts it
-      // visually above (asserted just above). Pinned as documented in
-      // docs/agents/polyforge-panel.md; the reading order (strip after the
-      // content it controls) is a known a11y follow-up, not changed here.
+      const bar = await railBox(mobile); const content = await card(mobile, A.wi).locator("xpath=..").boundingBox(); const sheet = await dock(mobile).boundingBox();
+      assert.ok(bar && content && sheet, "the switch rail and main area render at 375px");
+      // owner 有意变更（重立自 #209）: the ≤640px selector is a 40px
+      // vertical icon rail on the right (was the three-segment top bar).
+      const strip = dock(mobile).locator('[data-pf-tabstrip="work"]');
+      assert.equal(await strip.getAttribute("aria-orientation"), "vertical", "the mobile rail is vertical");
+      const stripBox = await strip.boundingBox();
+      assert.ok(stripBox && Math.abs(stripBox.width - 40) <= 4, `the mobile rail is about 40px wide (${stripBox?.width})`);
+      assert.ok(bar.width <= 44, `the three buttons form a narrow right rail, not a top bar (${bar.width}/${sheet.width})`);
+      assert.ok(bar.x >= content.x + content.width - 2, `the rail sits right of the main area (rail ${bar.x}, main end ${content.x + content.width})`);
+      assert.ok(bar.height >= 3 * 34, `the three buttons stack vertically (${bar.height}px)`);
+      for (const re of [RE_JOBS, RE_TASKS, RE_ITEMS]) {
+        const box = await subTab(mobile, re).boundingBox();
+        assert.ok(box && Math.abs(box.width - 40) <= 6 && Math.abs(box.height - 40) <= 6, `the ${re} button is about 40×40 (${box?.width}×${box?.height})`);
+      }
+      assert.ok(content.width >= sheet.width - stripBox.width - 12 && !overlap(content, stripBox), `the main area keeps the remaining width beside the rail (${content.width}/${sheet.width})`);
+      // (+ #213): the documented DOM order — the Work sub-tab
+      // strip comes AFTER the main area in the DOM in one row at every width,
+      // so the rail reads after the content it controls and the main area
+      // never remounts on a sub-tab switch.
       const stripAfterMain = await dock(mobile).locator('[data-pf-tabstrip="work"]').evaluate((strip, wi) => {
         const main = strip.closest("#polyforge-dock,[role=dialog]")?.querySelector(`[data-pf-card-wi="${wi}"]`);
         return Boolean(main) && Boolean(main.compareDocumentPosition(strip) & Node.DOCUMENT_POSITION_FOLLOWING) && !strip.contains(main);
@@ -444,7 +476,9 @@ try {
     const text = await a.innerText();
     assert.ok(text.includes(A.slug) && text.includes("E2E-GOAL-START") && !text.includes("GOALTAIL") && /…/.test(text), `the card keeps slug + truncated goal: ${text.slice(0, 160)}`);
     assert.match(text, /running|运行/i, "the status label is shown");
-    assert.ok(text.includes("A-PROGRESS-LAST"), "the narration is still on the card");
+    // owner 有意变更 (reverses the 32px narration):
+    // the card shows no narration; it stays in the job detail.
+    assert.ok(!text.includes("A-PROGRESS"), "the card shows no narration");
     for (const step of A_STEPS) assert.ok(!text.includes(step), `no step name on the card (${step})`);
     assert.doesNotMatch(text, /×\s*\d+|未知|unknown|—/, `no rerun/unknown/unstarted step text on the card: ${text.slice(0, 200)}`);
     assert.equal(await a.locator("[data-pf-step-phase]").count(), 0, "no step-phase styling on the card");
@@ -488,8 +522,23 @@ try {
   await check("S9", () => withPage({}, async (page) => {
     seed(); await openWork(page);
     const b = card(page, B.wi); await b.waitFor({ timeout: 30_000 });
-    await waitFor(async () => /暂无进度消息/.test(await b.innerText()), "the narration-free card shows 暂无进度消息");
-    assert.ok((await card(page, A.wi).innerText()).includes("A-PROGRESS-LAST"), "a narrated card still shows its narration");
+    const a = card(page, A.wi); await a.waitFor({ timeout: 30_000 });
+    // owner 有意变更 (reverses the 32px narration):
+    // neither card shows narration, the 暂无进度消息 placeholder or a
+    // card-owned scroll region any more.
+    for (const node of [a, b]) {
+      const text = await node.innerText();
+      assert.ok(!text.includes("A-PROGRESS"), `no narration text on the card (${text.slice(0, 160)})`);
+      assert.ok(!/暂无进度消息|进度不可用/.test(text), `no narration placeholder on the card (${text.slice(0, 160)})`);
+      const scrolls = await node.evaluate((el) => {
+        for (const child of [el, ...el.querySelectorAll("*")]) {
+          const style = getComputedStyle(child);
+          if (/(auto|scroll)/.test(style.overflowY) && child.scrollHeight > child.clientHeight + 8) return true;
+        }
+        return false;
+      });
+      assert.equal(scrolls, false, "no card-owned scroll region");
+    }
   }));
 
   await check("S10", () => withPage({ storage: { "pi-web:polyforge-dock-width": "460" } }, async (page) => {
@@ -508,11 +557,14 @@ try {
       assert.ok(narrow.every(Boolean) && sameRow(narrow[1], narrow[2]) && gapX(narrow[1], narrow[2]) >= 4,
         `at 375px two task blocks still share a row (${JSON.stringify(narrow.map((box) => box && [box.y, box.width]))})`);
     });
+    // owner 有意变更（重立自 #209）: the Tasks grid shares the Jobs
+    // cards' 150px minimum (was 112px), so the 340px dock stacks the blocks one
+    // per row — discrete, non-overlapping and aligned in one column.
     await withPage({ storage: { "pi-web:polyforge-dock-width": "340" } }, async (tight) => {
       seed(); await openWork(tight, RE_TASKS); await taskBlock(tight, T1).waitFor({ timeout: 30_000 });
       const narrow = await blockList(tight, [M1, M2, M3]);
-      assert.ok(narrow.every(Boolean) && sameRow(narrow[1], narrow[2]) && gapX(narrow[1], narrow[2]) >= 4,
-        `at 340px two task blocks still share a row (${JSON.stringify(narrow.map((box) => box && [box.y, box.width]))})`);
+      assert.ok(narrow.every(Boolean) && !sameRow(narrow[1], narrow[2]) && Math.abs(narrow[1].x - narrow[2].x) < 1 && !overlap(narrow[1], narrow[2]),
+        `at 340px the task blocks stack one per row (${JSON.stringify(narrow.map((box) => box && [box.x, box.y, box.width]))})`);
     });
   }));
 
@@ -554,7 +606,12 @@ try {
     assert.ok(one && typeof one.started_at === "string", "the list forwards started_at");
     assert.ok(done && typeof done.ended_at === "string", "the list forwards ended_at");
     assert.equal(done.wall_consumed_ns, 42_000_000_000, "the list forwards wall_consumed_ns");
-    const allowed = new Set(["id", "project", "state", "prompt_summary", "started_at", "ended_at", "wall_consumed_ns"]);
+    // / owner-intended 2026-10-30 contract extension, not a relaxation:
+    // the allowlist names exactly nine keys, report_tail and reporter added.
+    assert.equal(done.report_tail, "", "the list forwards an empty report_tail as \"\"");
+    assert.equal(done.reporter, "alice", "the list forwards a human reporter");
+    assert.equal(one.reporter, "machine", "the list forwards the machine reporter");
+    const allowed = new Set(["id", "project", "state", "prompt_summary", "started_at", "ended_at", "wall_consumed_ns", "report_tail", "reporter"]);
     for (const row of rows) for (const key of Object.keys(row)) assert.ok(allowed.has(key), `raw field ${key} stays unfowarded`);
   });
 
@@ -588,7 +645,7 @@ try {
     assert.equal(await dock(page).getByText(M1).count() + await dock(page).getByText(M3).count(), 0, "project + state + search combine");
     assert.equal(taskLists().length, reads, "filtering the already-read list spawns no new pf call");
     await page.reload({ waitUntil: "domcontentloaded" });
-    await page.getByText("E2E pf work host session").first().waitFor({ state: "attached", timeout: 90_000 });
+    await page.getByText("E2E pf work host session").first().waitFor({ state: "attached", timeout: NAV_MS });
     await openWork(page, RE_TASKS);
     for (const marker of [M1, M2, M3]) await dock(page).getByText(marker).waitFor({ timeout: 20_000 });
     assert.equal(await project.evaluate((el) => el.selectedIndex), 0, "filters are not persisted: the project filter resets");
@@ -689,6 +746,10 @@ try {
     assert.ok(ticks.length >= 2, `the cards poll keeps its cadence (${ticks.length} ticks)`);
     for (let i = 1; i < ticks.length; i++) assert.ok(ticks[i] - ticks[i - 1] >= 600, `no new faster polling loop (gaps ${ticks.slice(1).map((t, i) => t - ticks[i])})`);
   }));
+  // owner 有意变更（重立自 #213）: at the 460px dock the job cards
+  // still share one row — now a fixed 150px each in the single horizontally
+  // scrolling row, whose free space (not a stretched card) stays at the right
+  // while more cards scroll.
   await check("S19", () => withPage({ storage: { "pi-web:polyforge-dock-width": "460" } }, async (page) => {
     seed(); await openWork(page);
     const a = card(page, A.wi); const b = card(page, B.wi);
@@ -697,8 +758,17 @@ try {
     assert.ok(boxA && boxB && dockBox, "the two job cards and the dock measure");
     assert.ok(sameRow(boxA, boxB), `at 460px the job cards sit side by side (${boxA.y}/${boxB.y})`);
     assert.ok(gapX(boxA, boxB) >= 6, `a visible gap between the job cards (${gapX(boxA, boxB)})`);
+    assert.ok(Math.abs(boxA.width - 150) <= 0.5 && Math.abs(boxB.width - 150) <= 0.5, `a job card is a fixed 150px wide (${boxA.width}/${boxB.width})`);
     assert.ok(boxA.width < dockBox.width * 0.6, `a job card is narrower than the main area (${boxA.width}/${dockBox.width})`);
     assert.ok(!overlap(boxA, boxB), "the job cards do not overlap");
+    const row = await a.evaluate((el) => {
+      const container = el.parentElement;
+      return { clientWidth: container.clientWidth, scrollWidth: container.scrollWidth,
+        overflowX: getComputedStyle(container).overflowX, scrollbarWidth: getComputedStyle(container).scrollbarWidth };
+    });
+    assert.equal(row.overflowX, "auto", `the job card row scrolls horizontally (${row.overflowX})`);
+    assert.equal(row.scrollbarWidth, "thin", `the row's scrollbar stays visible but thin (${row.scrollbarWidth})`);
+    assert.ok(row.scrollWidth <= row.clientWidth, `at 460px two 150px job cards still fit with free space at the right (${row.scrollWidth}/${row.clientWidth})`);
     await subTab(page, RE_TASKS).click(); await taskBlock(page, T2).waitFor({ timeout: 30_000 });
     const m2 = await block(page, M2); const m3 = await block(page, M3);
     assert.ok(m2 && m3, "task blocks render");
@@ -706,17 +776,32 @@ try {
     assert.ok(m2.width < dockBox.width * 0.6, `a task block is narrower than the main width (${m2.width}/${dockBox.width})`);
   }));
 
+  // owner 有意变更（重立自 #209）: the Tasks blocks keep the shared
+  // 150px track minimum (was Jobs 160px / Tasks 112px) — two across at the 375px
+  // sheet (beside its 40px rail), one per row at the 340px dock.
+  // owner 有意变更 the job cards are ONE row of fixed 150px cards
+  // at both widths — the 340px dock scrolls the row instead of stacking the
+  // cards one per row like the task blocks (the 375px sheet still fits both).
   await check("S20", async () => {
-    const measure = (opts, label) => withPage(opts, async (page) => {
+    const measure = (opts, label, tasksAcross, overflows) => withPage(opts, async (page) => {
       seed(); await openWork(page);
       const a = await card(page, A.wi).boundingBox(); const b = await card(page, B.wi).boundingBox();
-      assert.ok(a && b && sameRow(a, b) && gapX(a, b) >= 4, `${label}: the job cards stay side by side (${a?.y}/${b?.y})`);
+      assert.ok(a && b && sameRow(a, b) && gapX(a, b) >= 4, `${label}: the job cards stay in one row (${a?.y}/${b?.y})`);
+      assert.ok(a && b && Math.abs(a.width - 150) <= 0.5 && Math.abs(b.width - 150) <= 0.5, `${label}: each job card is a fixed 150px wide (${a?.width}/${b?.width})`);
+      assert.ok(!overlap(a, b), `${label}: the job cards do not overlap`);
+      const row = await card(page, A.wi).evaluate((el) => {
+        const container = el.parentElement;
+        return { clientWidth: container.clientWidth, scrollWidth: container.scrollWidth };
+      });
+      if (overflows) assert.ok(row.scrollWidth > row.clientWidth, `${label}: the job card row scrolls instead of wrapping (${row.scrollWidth}/${row.clientWidth})`);
+      else assert.ok(row.scrollWidth <= row.clientWidth, `${label}: the two 150px job cards fit with free space at the right (${row.scrollWidth}/${row.clientWidth})`);
       await subTab(page, RE_TASKS).click(); await taskBlock(page, T2).waitFor({ timeout: 30_000 });
       const m2 = await block(page, M2); const m3 = await block(page, M3);
-      assert.ok(m2 && m3 && sameRow(m2, m3) && gapX(m2, m3) >= 4, `${label}: two task blocks stay side by side (${m2?.y}/${m3?.y})`);
+      if (tasksAcross) assert.ok(m2 && m3 && sameRow(m2, m3) && gapX(m2, m3) >= 4, `${label}: two task blocks stay side by side (${m2?.y}/${m3?.y})`);
+      else assert.ok(m2 && m3 && !sameRow(m2, m3) && Math.abs(m2.x - m3.x) < 1 && !overlap(m2, m3), `${label}: the task blocks stack one per row (${m2?.x},${m2?.y}/${m3?.x},${m3?.y})`);
     });
-    await measure({ viewport: { width: 375, height: 800 } }, "375px");
-    await measure({ storage: { "pi-web:polyforge-dock-width": "340" } }, "340px");
+    await measure({ viewport: { width: 375, height: 800 } }, "375px", true, false);
+    await measure({ storage: { "pi-web:polyforge-dock-width": "340" } }, "340px", false, true);
   });
 
   await check("S21", async () => {
@@ -770,7 +855,12 @@ try {
     const positions = A_STEPS.map((id) => labels.findIndex((text) => text.includes(id)));
     assert.ok(positions.every((index) => index >= 0), `every declared step has a node: ${JSON.stringify(labels)}`);
     assert.deepEqual([...positions].sort((a, b) => a - b), positions, `the graph follows the declared order: ${JSON.stringify(positions)}`);
-    assert.match(await dock(page).innerText(), /当前步骤[：:]\s*step-code|step-code\s*·\s*进行中|in progress[^\n]*step-code/i, "the current step is recognizable in the detail");
+    // owner 有意变更 the current step moved from the old header's visible text into the
+    // title row's hover title; the node's own title/aria-label still names it as in progress.
+    const hover = await dock(page).locator("[data-pf-detail-title]").first().getAttribute("title") ?? "";
+    const codeNode = await dock(page).getByRole("listitem").filter({ hasText: "step-code" }).first().getAttribute("aria-label") ?? "";
+    assert.match(`${hover}\n${codeNode}`, /当前步骤[：:]\s*step-code|step-code\s*·\s*进行中|in progress[^\n]*step-code/i, "the current step is recognizable in the detail");
+    assert.match(hover, /当前步骤[：:]\s*step-code|current step[：:]\s*step-code/i, "the title row's hover names the current step");
   }));
 
   await check("S24", () => withPage({ storage: { "pi-web:polyforge-dock-width": "460" } }, async (page) => {
@@ -778,18 +868,32 @@ try {
     await card(page, A.wi).waitFor({ timeout: 30_000 });
     await card(page, A.wi).click();
     await dock(page).getByRole("button", { name: /返回|back|deselect/i }).first().waitFor({ timeout: 15_000 });
+    // owner 有意变更（重立自 #209）: the node renders the step name
+    // and its dot only; the state moved from visible text to title/aria-label
+    // (both must carry it), and skipped additionally reads as a hollow ring.
     const stateText = async (id) => {
       const node = dock(page).getByRole("listitem").filter({ hasText: id }).first();
       await node.waitFor({ timeout: 15_000 });
-      return (await node.innerText()).trim();
+      const label = (await node.getAttribute("aria-label") ?? "").trim();
+      // owner 有意变更 a started step's title also carries its start time after the aria-label text.
+      const title = (await node.getAttribute("title") ?? "").trim();
+      assert.ok(title === label || (title.startsWith(`${label} · `) && /^\d{2}:\d{2}(:\d{2})?$/.test(title.slice(label.length + 3))), `the title carries the same state as the aria-label (${label}; title ${title})`);
+      assert.equal((await node.innerText()).trim(), id, `the node shows the step name and no visible state text (${id})`);
+      return label;
     };
     const states = [];
     for (const id of ["step-grill", "step-code", "step-review", "step-skip", "step-mystery"]) {
       const text = await stateText(id);
-      const remainder = text.replace(id, "").trim();
-      assert.ok(remainder.length > 0, `the step state is visible text, not only a tooltip (${text})`);
+      const remainder = text.replace(id, "").replace(/^\s*·\s*/, "").trim();
+      assert.ok(remainder.length > 0, `the step state is named in title/aria-label (${text})`);
       states.push(text);
     }
+    const dot = (id) => dock(page).getByRole("listitem").filter({ hasText: id }).first().locator('span[aria-hidden="true"]').first()
+      .evaluate((el) => ({ background: getComputedStyle(el).backgroundColor, border: parseFloat(getComputedStyle(el).borderTopWidth) || 0 }));
+    const clear = (color) => color === "transparent" || /rgba\(\s*\d+\s*,\s*\d+\s*,\s*\d+\s*,\s*0\s*\)/.test(color);
+    const skipDot = await dot("step-skip"); const pendingDot = await dot("step-review");
+    assert.ok(clear(skipDot.background) && skipDot.border >= 1, `the skipped dot is a hollow ring: ${JSON.stringify(skipDot)}`);
+    assert.ok(!clear(pendingDot.background), `the not-started dot stays filled: ${JSON.stringify(pendingDot)}`);
     assert.equal(new Set(states).size, states.length, `completed/current/not-started/skipped/unknown are distinguishable: ${JSON.stringify(states)}`);
     const skipped = await stateText("step-skip");
     assert.match(skipped, /已跳过|skipped/i, `a skipped step is labelled skipped: ${skipped}`);
@@ -802,16 +906,17 @@ try {
     await card(page, A.wi).click();
     await dock(page).getByRole("button", { name: /返回|back|deselect/i }).first().waitFor({ timeout: 15_000 });
     await waitFor(async () => {
-      const text = await dock(page).innerText();
-      return ["step-grill", "step-spec", "step-code"].every((id) => timingLine(text, id));
+      for (const id of ["step-grill", "step-spec", "step-code"]) if (!(await timingLine(page, id))) return false;
+      return true;
     }, "the detail shows per-step durations", 15_000);
     const detail = await dock(page).innerText();
-    for (const id of ["step-grill", "step-spec", "step-code"]) assert.ok(timingLine(detail, id), `the started step ${id} keeps its duration`);
-    assert.match(timingLine(detail, "step-spec"), /×\s*2/, `the rerun marker ×2 is visible on the detail's step row: ${timingLine(detail, "step-spec")}`);
+    for (const id of ["step-grill", "step-spec", "step-code"]) assert.ok(await timingLine(page, id), `the started step ${id} keeps its duration`);
+    const spec = await timingLine(page, "step-spec");
+    assert.match(spec, /×\s*2/, `the rerun marker ×2 is visible on the step's timing line: ${spec}`);
     assert.match(detail, /step-review\s*→\s*step-spec/, "the rewind marker stays visible in the detail");
-    const before = timingLine(detail, "step-code");
+    const before = await timingLine(page, "step-code");
     await waitFor(async () => {
-      const line = timingLine(await dock(page).innerText(), "step-code");
+      const line = await timingLine(page, "step-code");
       return line && line !== before;
     }, "the running step's duration advances with the detail's refresh", 12_000);
   }));
@@ -820,12 +925,22 @@ try {
     seed(); await openWork(page);
     const a = card(page, A.wi); await a.waitFor({ timeout: 30_000 });
     const before = await a.boundingBox();
+    const beforeText = await a.innerText();
     const extra = Array.from({ length: 80 }, (_, index) => pi(`a-extra-${index}`, [{ type: "text", text: `A-PROGRESS-EXTRA-${String(index).padStart(3, "0")}` }]));
     appendFileSync(aTranscript, extra.map((row) => JSON.stringify(row)).join("\n") + "\n");
-    await waitFor(async () => (await a.innerText()).includes("A-PROGRESS-EXTRA-079"), "the long narration reaches the card", 20_000);
+    // owner 有意变更 (reverses the 32px narration):
+    // a long narration still flows on the cards route, but it never changes
+    // the card's height or text any more (the age's minutes may tick over).
+    await waitFor(async () => {
+      const response = await fetch(`${base}/api/polyforge/cards`, { signal: AbortSignal.timeout(30_000) });
+      return (await response.text()).includes("A-PROGRESS-EXTRA-079");
+    }, "the long narration reaches the route", 20_000);
     const after = await a.boundingBox();
-    assert.ok(before && after && Math.abs(after.height - before.height) <= 2, `long narration does not grow the card beyond its frame (${before?.height} -> ${after?.height})`);
+    assert.ok(before && after && Math.abs(after.height - before.height) <= 2, `long narration does not grow the card (${before?.height} -> ${after?.height})`);
     const text = await a.innerText();
+    const withoutAge = (value) => value.replace(/运行中\s+\d+m/, "运行中 <n>m");
+    assert.equal(withoutAge(text), withoutAge(beforeText), "a long narration does not change the card's text");
+    assert.ok(!text.includes("A-PROGRESS"), "no narration reaches the card");
     assert.ok(!text.includes("pi:e2e/model-a") && !/步龄|空闲|step age|idle age/i.test(text), "no model or step/idle age on the card");
     for (const step of A_STEPS) assert.ok(!text.includes(step), `no step information on the card after a long narration (${step})`);
   }));
@@ -843,7 +958,9 @@ try {
     });
     const narrow = await measure({ storage: { "pi-web:polyforge-dock-width": "340" } });
     const wide = await measure({ storage: { "pi-web:polyforge-dock-width": "700" }, viewport: { width: 1600, height: 900 } });
-    assert.ok(narrow.row >= 2, `the 340px dock keeps two cards per row (${narrow.row})`);
+    // owner 有意变更（重立自 #209）: the shared 150px track gives the
+    // 340px dock exactly one column (was two with the old 112px minimum).
+    assert.equal(narrow.row, 1, `the 340px dock shows one card per row (${narrow.row})`);
     assert.ok(wide.row > narrow.row, `a wider main area adds columns (${narrow.row} -> ${wide.row})`);
     assert.ok(wide.heading && wide.cards[0] && wide.heading.y + wide.heading.height <= wide.cards[0].y + 2, "正在运行 stays above the running grid");
     assert.ok(wide.allHeading && wide.cards[0] && wide.allHeading.y + wide.allHeading.height <= wide.cards[1].y + 2, "全部 stays above its grid"); // its first block (D6)

@@ -14,7 +14,7 @@ import { createJiti } from "jiti";
 const shimPath = fileURLToPath(new URL("./__fixtures__/react-hook-shim.mjs", import.meta.url));
 const jiti = createJiti(import.meta.url, { tsconfigPaths: true, alias: { react: shimPath } });
 const { renderHook } = await import(pathToFileURL(shimPath).href);
-const { useAgentSession } = await jiti.import("./useAgentSession.ts");
+const { useAgentSession, MANUAL_FETCH_TAIL_MS } = await jiti.import("./useAgentSession.ts");
 const { deleteSessionViewSnapshot } = await jiti.import("@/lib/session-view-cache");
 
 globalThis.document ??= Object.assign(new EventTarget(), { visibilityState: "visible" });
@@ -42,17 +42,23 @@ function deferred() {
   return { promise, resolve };
 }
 
-async function setup() {
+// `mountGate` holds the mount read's answer; `send: false` leaves the view
+// without a run of its own (the mount read and the stream only); `state` is
+// the session /state answer.
+async function setup({ mountGate = null, send = true, state = { running: true, state: { isStreaming: true, isPromptRunning: true } } } = {}) {
   mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] });
   const sources = [];
   const server = {
     context: { messages: [earlier], entryIds: ["e1"] },
-    gate: null,
+    gate: mountGate,
     reads: [],
-    state: { running: true, state: { isStreaming: true, isPromptRunning: true } },
+    state,
     statusGate: null,
     statusReads: [],
     statusState: { isStreaming: true, isPromptRunning: true },
+    // The session /state read: its answer is generated now, its delivery can wait.
+    stateGate: null,
+    stateReads: [],
     response: Promise.withResolvers(),
   };
   globalThis.EventSource = class {
@@ -90,7 +96,14 @@ async function setup() {
       if (gate) await gate.promise;
       return body;
     }
-    if (url === "/api/sessions/A/state") return json(server.state);
+    if (url === "/api/sessions/A/state") {
+      const gate = server.stateGate;
+      server.stateGate = null;
+      server.stateReads.push({ held: Boolean(gate) });
+      const body = json(server.state);
+      if (gate) await gate.promise;
+      return body;
+    }
     if (url === "/api/agent/A" && init.body) {
       await server.response.promise;
       return json({ success: true, data: null });
@@ -123,10 +136,10 @@ async function setup() {
     await settle();
     hook.flush();
   };
-  const sending = hook.result.handleSend("first submission");
+  const sending = send ? hook.result.handleSend("first submission") : Promise.resolve();
   await settle();
   hook.flush();
-  assert.equal(hook.result.agentRunning, true, "the run is active");
+  if (send) assert.equal(hook.result.agentRunning, true, "the run is active");
   return {
     hook,
     emit,
@@ -141,10 +154,10 @@ async function setup() {
   };
 }
 
-async function withSetup(body) {
+async function withSetup(body, options) {
   const originalError = console.error;
   console.error = () => {};
-  const env = await setup();
+  const env = await setup(options);
   try {
     await body(env);
   } finally {
@@ -279,5 +292,157 @@ test("a status event that arrives after an agent_end read began survives its rep
 
     assert.deepEqual(env.hook.result.extensionStatuses.map((status) => status.key).sort(), ["late", "saved"],
       "the newer status event survived the read, and the other key took the snapshot");
+  });
+});
+
+///#169: the mount read's /state half keeps a status event that
+// arrived while it was in flight (the per-key touch counter), as agent_end does.
+test("a status event that arrives while the mount /state read is in flight survives its reply", async () => {
+  const stateGate = deferred();
+  const mountGate = deferred();
+  await withSetup(async (env) => {
+    env.server.stateGate = stateGate;
+    env.server.state = { running: true, state: { isStreaming: false, extensionStatuses: [{ key: "late", text: "from the snapshot" }, { key: "saved", text: "saved" }] } };
+    mountGate.resolve();
+    await until(() => env.server.stateReads.some((read) => read.held), "the mount /state read was not issued");
+
+    await env.emit({ type: "extension_ui_request", id: "s1", method: "setStatus", statusKey: "late", statusText: "live after the read" });
+    assert.equal(env.hook.result.extensionStatuses.find((status) => status.key === "late")?.text, "live after the read");
+
+    stateGate.resolve();
+    await settle();
+    env.hook.flush();
+
+    assert.deepEqual(env.hook.result.extensionStatuses.map((status) => [status.key, status.text]).sort(),
+      [["late", "live after the read"], ["saved", "saved"]],
+      "the newer status event survived the mount read; the untouched key took the snapshot");
+  }, { mountGate, send: false });
+});
+
+///#177: the reconcile poll's idle reply merges statuses the
+// same way: a key touched while it was in flight keeps its live value.
+test("a status event that arrives while a reconcile read is in flight survives its idle reply", async () => {
+  await withSetup(async (env) => {
+    env.server.response.resolve();
+    await env.sending;
+
+    const gate = deferred();
+    env.server.statusState = { isStreaming: false, isPromptRunning: false, extensionStatuses: [{ key: "late", text: "from the snapshot" }, { key: "saved", text: "saved" }] };
+    env.server.statusGate = gate;
+    window.dispatchEvent(new Event("online"));
+    await until(() => env.server.statusReads.some((read) => read.held), "the reconcile read was not issued");
+
+    await env.emit({ type: "extension_ui_request", id: "s1", method: "setStatus", statusKey: "late", statusText: "live after the read" });
+
+    gate.resolve();
+    await settle();
+    env.hook.flush();
+
+    assert.deepEqual(env.hook.result.extensionStatuses.map((status) => [status.key, status.text]).sort(),
+      [["late", "live after the read"], ["saved", "saved"]],
+      "the reconcile idle reply kept the newer status; the untouched key took the snapshot");
+  });
+});
+
+///#193: a showLoading read overtaken by a newer applied read ends
+// its own loading screen when it finds itself stale, not after its /state
+// round trip.
+test("a stale showLoading read clears its loading when it recognises staleness", async () => {
+  const mountGate = deferred();
+  await withSetup(async (env) => {
+    assert.equal(env.hook.result.loading, true, "the uncached mount read raised the loading screen");
+    // A newer read applies while the mount answer is held.
+    env.server.context = { messages: [earlier, prompt], entryIds: ["e1", "e2"] };
+    await env.hook.result.refreshFromDisk("A");
+    await settle();
+    env.hook.flush();
+    assert.equal(env.hook.result.messages.length, 2, "the newer read applied its view");
+
+    // The mount answer lands stale; its /state request is held.
+    const stateGate = deferred();
+    env.server.stateGate = stateGate;
+    mountGate.resolve();
+    await until(() => env.server.stateReads.some((read) => read.held), "the stale read's /state request was not issued");
+    await settle();
+    env.hook.flush();
+    assert.equal(env.hook.result.loading, false, "the stale read ended its loading before its /state round trip");
+    assert.equal(env.hook.result.messages.length, 2, "the stale snapshot did not replace the newer view");
+
+    stateGate.resolve();
+    await settle();
+    env.hook.flush();
+    assert.equal(env.hook.result.loading, false);
+  }, { mountGate, send: false });
+});
+
+///#193: a manual fetch's tail lives MANUAL_FETCH_TAIL_MS (the
+// stale bound plus one watchdog check: in a foreground tab the kept stream
+// delivers or the watchdog replaces it within it). Within it, even past the
+// stale bound, the half-dead stream's buffered run is the
+// read's and renders once; past it, a later run that repeats the same messages
+// renders them.
+async function manualFetchTail(env) {
+  env.server.context = { messages: [earlier, ping, pong], entryIds: ["e1", "e2", "e3"] };
+  await env.hook.result.manualFetch();
+  await settle();
+  env.hook.flush();
+  assert.equal(env.hook.result.agentRunning, false, "the view saw no run");
+  assert.equal(env.hook.result.messages.filter(isPing).length, 1, "the manual fetch showed the run's messages");
+}
+const ping = { role: "user", content: "PING-193", timestamp: 30 };
+const pong = reply("PONG-193", 31);
+const isPing = (message) => message.role === "user" && message.content === "PING-193";
+const isPong = (message) => message.role === "assistant" && message.content?.[0]?.text === "PONG-193";
+async function deliverRun(env) {
+  await env.emit({ type: "agent_start" });
+  await env.emit({ type: "message_end", message: ping });
+  await env.emit({ type: "message_end", message: pong });
+}
+
+test("a manual fetch's tail swallows the half-dead stream's buffered run within the tail bound", async () => {
+  await withSetup(async (env) => {
+    await manualFetchTail(env);
+    mock.timers.setTime(Date.now() + MANUAL_FETCH_TAIL_MS - 1000);
+    await deliverRun(env);
+    assert.equal(env.hook.result.messages.filter(isPing).length, 1, "the buffered prompt is the one the read already showed");
+    assert.equal(env.hook.result.messages.filter(isPong).length, 1, "the buffered reply is the one the read already showed");
+  }, { send: false, state: { running: false } });
+});
+
+test("a manual fetch's tail past the tail bound is dropped: a later same-text run renders", async () => {
+  await withSetup(async (env) => {
+    await manualFetchTail(env);
+    mock.timers.setTime(Date.now() + MANUAL_FETCH_TAIL_MS + 1000);
+    await deliverRun(env);
+    assert.equal(env.hook.result.messages.filter(isPing).length, 2, "the later same-text message is not swallowed");
+    assert.equal(env.hook.result.messages.filter(isPong).length, 2, "the later same-text reply is not swallowed");
+  }, { send: false, state: { running: false } });
+});
+
+// the same status ordering at the other run-end read, the 15 s
+// running poll's idle reply. routed it through the per-key merge
+// as well; this pins that point, which no repo test covered before.
+test("a status event that arrives after the reconcile read began survives its reply", async () => {
+  await withSetup(async (env) => {
+    env.server.response.resolve();
+    await env.sending;
+
+    const gate = deferred();
+    env.server.statusState = { isStreaming: false, isPromptRunning: false, extensionStatuses: [{ key: "saved", text: "from the snapshot" }] };
+    env.server.statusGate = gate;
+    // The running poll fires on the foreground tick as well as on its interval.
+    document.dispatchEvent(new Event("visibilitychange"));
+    await until(() => env.server.statusReads.some((read) => read.held), "the reconcile state read was not issued");
+
+    await env.emit({ type: "extension_ui_request", id: "s1", method: "setStatus", statusKey: "late", statusText: "live after the read" });
+    assert.equal(env.hook.result.extensionStatuses.some((status) => status.key === "late"), true,
+      "the stream's status rendered before the reconcile reply answered");
+
+    gate.resolve();
+    await settle();
+    env.hook.flush();
+
+    assert.deepEqual(env.hook.result.extensionStatuses.map((status) => status.key).sort(), ["late", "saved"],
+      "the newer status event survived the reconcile reply, and the other key took the snapshot");
   });
 });

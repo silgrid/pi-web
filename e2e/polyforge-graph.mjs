@@ -16,6 +16,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
 import { startNextServer } from "./next-server.mjs";
+import { NAV_MS } from "./timeouts.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 assert.ok(!existsSync(join(root, process.env.PI_WEB_DIST_DIR || ".next", "dev/lock")), "Run in a checkout without an active dev server");
@@ -66,6 +67,13 @@ for (const [slug, declared] of Object.entries(FALLBACK)) {
 }
 const JOBS = Object.keys(WATCHES).map((slug, i) => ({ work_item_id: WATCHES[slug].work_item, slug, status: "running", spawn_n: 1,
   step_age_sec: 10 + i, last_work_ago_sec: 5, candidate: "pi:e2e", origin: { kind: "chat", owner: "u_e2e" } }));
+// owner 有意变更 the selected running job's progress read
+// (GET /api/polyforge/progress) looks the wi up in the daemon's own job record;
+// a throwaway data root lists every fixture job (no capsule → a 200
+// `available:false` read), as a real daemon lists every job it runs, instead
+// of the host's real data root answering 400 for jobs it never ran.
+const dataRoot = join(work, "pf-data"); mkdirSync(dataRoot);
+writeFileSync(join(dataRoot, "runtime-state.json"), JSON.stringify({ version: 1, jobs: JOBS.map((job) => ({ work_item_id: job.work_item_id })) }));
 const stubDir = join(work, "stub-bin"); mkdirSync(stubDir);
 writeFileSync(join(stubDir, "state.json"), JSON.stringify({ ops: { machine_id: "m-e2e", jobs: JOBS, queue: { pending: 0, running: JOBS.length, max_concurrent: 20 } }, watch: WATCHES }));
 writeFileSync(join(stubDir, "pf"), `#!${process.execPath}
@@ -126,7 +134,7 @@ async function startServer() {
     name: "polyforge-graph",
     logFile,
     env: { ...process.env, PATH: `${stubDir}${delimiter}${process.env.PATH}`, PI_CODING_AGENT_DIR: agentDir, PI_WEB_PASSWORD: "",
-      NEXT_TELEMETRY_DISABLED: "1", PI_WEB_ALLOWED_ROOT_PREFIXES: work },
+      NEXT_TELEMETRY_DISABLED: "1", PI_WEB_ALLOWED_ROOT_PREFIXES: work, POLYFORGE_DATA_DIR: dataRoot },
   });
   base = started.base;
   stop = started.stop;
@@ -151,8 +159,8 @@ async function openPage({ viewport = { width: 1280, height: 800 }, mode, reduced
   // Navigation headroom only: the host is shared and other capsules' e2e
   // servers routinely push a cold page load past this page's 10s action
   // timeout. Assertions below still use the 10s default.
-  await page.goto(`${base}/?session=${SESSION}`, { waitUntil: "domcontentloaded", timeout: 60_000 });
-  await page.getByText("E2E polyforge graph host session").first().waitFor({ state: "attached", timeout: 60_000 });
+  await page.goto(`${base}/?session=${SESSION}`, { waitUntil: "domcontentloaded", timeout: NAV_MS });
+  await page.getByText("E2E polyforge graph host session").first().waitFor({ state: "attached", timeout: NAV_MS });
   return page;
 }
 const pfButton = (page) => page.getByRole("button", { name: /^(?!.*close).*polyforge/i }).first();
@@ -204,6 +212,8 @@ const readGraph = (panel) => panel.first().evaluate((root, labels) => {
     for (let n = walker.nextNode(); n; n = walker.nextNode()) {
       if (!(a.compareDocumentPosition(n) & Node.DOCUMENT_POSITION_FOLLOWING) || !(n.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING)) continue;
       if (a.contains(n) || b.contains(n) || n.contains?.(a) || n.contains?.(b)) continue;
+      // owner 有意变更 a node's timing line sits under it in its column; it is not a connector.
+      if ((n.nodeType === 3 ? n.parentElement : n)?.closest?.("[data-pf-step-timing]")) continue;
       if (n.nodeType === 3 ? n.textContent.trim() : (() => { const r = n.getBoundingClientRect(); return r.width > 0 && r.height > 0; })()) return true;
     }
     return false;
@@ -387,8 +397,12 @@ try {
       //   started at dock open, so it drifts against the watch poll like
       //   the messages read. Its effect depends only on dock-open, active
       //   tab and interval (hooks/usePolyforge.ts), never on a node click.
+      // - GET /api/polyforge/progress (owner 有意变更): the
+      //   selected running job's execution progress reads on its own fixed 2 s
+      //   timer (hooks/usePolyforgeProgress.ts), started at selection, never on
+      //   a node click — the /api/polyforge/cards precedent.
       // Any other request still fails.
-      const background = new Set(["/api/polyforge/status", "/api/agent/running", "/api/polyforge/messages", "/api/polyforge/cards"]);
+      const background = new Set(["/api/polyforge/status", "/api/agent/running", "/api/polyforge/messages", "/api/polyforge/cards", "/api/polyforge/progress"]);
       const early = hits.filter((h) => h.t > t0 + 250 && h.t < t0 + 2500 && !background.has(h.path));
       assert.deepEqual(early, [], `clicking nodes issued ${JSON.stringify(early)}`);
       assert.equal(page.url(), url, "clicking a node navigated");

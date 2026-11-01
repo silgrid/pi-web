@@ -37,7 +37,7 @@ globalThis.document = emitter({ body: { style: { cursor: "", userSelect: "" } } 
 // One panel at a time: the previous test's stops listening to the window.
 let mounted = null;
 
-function mount({ storedHeight, persistClamp, room }) {
+function mount({ storedHeight, persistClamp, room, defaultWidthForRoom }) {
   mounted?.unmount();
   stored.clear();
   if (storedHeight !== undefined) stored.set(KEY, String(storedHeight));
@@ -48,6 +48,7 @@ function mount({ storedHeight, persistClamp, room }) {
     axis: "vertical",
     cssVariable: "--test-height",
     defaultWidth: 240,
+    getDefaultWidth: defaultWidthForRoom ? () => defaultWidthForRoom(space.room) : undefined,
     getMaxWidth: () => space.room,
     growthDirection: "down",
     maxWidth: 800,
@@ -93,6 +94,21 @@ test("without persistClamp a short window shows less, saves nothing and grows ba
   panel.resize(1000);
   assert.equal(panel.shown(), 400, "never past it");
   assert.equal(panel.saved(), "400");
+});
+
+test("without persistClamp an unchosen size follows the default as the room changes", () => {
+  const panel = mount({ persistClamp: false, room: 500, defaultWidthForRoom: (room) => Math.round(room * 0.35) });
+  assert.equal(panel.shown(), 175);
+  assert.equal(panel.saved(), undefined, "the default is not written on mount");
+  panel.resize(300);
+  assert.equal(panel.shown(), 120, "the default follows the smaller room, clamped to the minimum");
+  assert.equal(panel.saved(), undefined, "still not a stored choice");
+  panel.resize(600);
+  assert.equal(panel.shown(), 210, "and grows back with the room");
+  panel.key("ArrowDown");
+  assert.equal(panel.saved(), "222", "a key is the user's choice");
+  panel.resize(1000);
+  assert.equal(panel.shown(), 222, "once chosen, the size stops following the default");
 });
 
 test("without persistClamp keys and a reset are the user's choice and are saved", () => {

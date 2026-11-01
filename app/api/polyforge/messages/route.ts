@@ -13,11 +13,18 @@ export const dynamic = "force-dynamic";
 
 /**
  * GET /api/polyforge/messages — the caller's member-only conversations, the
- * configured `contacts` (; [] when their own read fails) and the
- * Messages capability answer. Degradation-first: pf absent,
- * below the 2.20.12 floor, an unreadable list or an unreachable daemon all
- * answer 200 with fields, never 5xx. Below the floor no message or contact
- * verb is spawned. The in-route gate is the authenticated-surface check every
+ * configured `contacts` (; [] when their own read fails), the
+ * project `groups` (one per `cli.toml`-mapped project, name
+ * order, `{project, contacts: [{id, display_name}], error?}` — a project's
+ * own failed or timed-out `pf projects get` is its `error` only; [] when the
+ * contact read fails) and the Messages capability answer.
+ * Every branch carries both `contacts` and `groups`, except `?groups=0` (the
+ * dock off the Messages tab), which spawns no `projects get` and omits
+ * `groups` from a capable answer (pf absent / below the floor still carry
+ * `groups: []`). Degradation-first: pf
+ * absent, below the 2.20.12 floor, an unreadable list or an unreachable
+ * daemon all answer 200 with fields, never 5xx. Below the floor no message,
+ * contact or project verb is spawned. The in-route gate is the authenticated-surface check every
  * polyforge route re-checks.
  *
  * POST /api/polyforge/messages — send one message. JSON-only; every value is
@@ -29,7 +36,8 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
   try {
-    return NextResponse.json(await readPolyforgeMessages());
+    const withGroups = new URL(request.url).searchParams.get("groups") !== "0";
+    return NextResponse.json(await readPolyforgeMessages({ withGroups }));
   } catch {
     // A capability probe can only throw unexpectedly; keep the read
     // degraded (200, capable so an open conversation stays rendered) and
@@ -41,6 +49,7 @@ export async function GET(request: Request) {
       error: "the messages read failed; polyforge may be unavailable",
       conversations: [],
       contacts: [],
+      groups: [],
     });
   }
 }

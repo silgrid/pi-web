@@ -332,13 +332,12 @@ export function DebugPanelView({ page, server, samples = EMPTY_DEBUG_SAMPLES, se
       {page !== null && (
         <div className="debug-panel-scroll">
           {issues.length > 0 && <IssueList issues={issues} />}
-          {/* The host's load (the Session-info popover's section, its own 2 s visible-only poll): mounted with the
-              open panel, so closing it stops the poll and drops the values. */}
-          <MachineLoadSection translate={t} />
           {/* What this page holds and measures; what the server holds (its totals and the pages
               connected to it); the sessions it holds, the chat's details under its own row. Three
               columns on a wide panel, the sessions under the server's on a narrower one, all one
-              above the other on a phone. */}
+              above the other on a phone. The host's load is the grid's last row, across every
+              column at each width: its own 2 s visible-only poll, mounted with the open panel, so
+              closing it stops the poll and drops the values. */}
           <div className="debug-cols">
             <PageColumn page={page} samples={samples} reply={reply} ctx={ctx} />
             <div className="debug-col debug-col-server">
@@ -347,6 +346,9 @@ export function DebugPanelView({ page, server, samples = EMPTY_DEBUG_SAMPLES, se
             </div>
             <div className="debug-col debug-col-sessions">
               <SessionList reply={reply} detail={detail} groups={groups} targetSessionId={targetSessionId} sources={page.sources} ctx={ctx} />
+            </div>
+            <div className="debug-load">
+              <MachineLoadSection translate={t} />
             </div>
           </div>
         </div>
@@ -1615,12 +1617,16 @@ const DEBUG_PANEL_CSS = `
   }
 
   /* Three columns when the panel is wide: the page's as wide as its table, the server's and the
-     sessions' each capped, so names never stretch and push the badges to the far edge. */
+     sessions' each capped, so names never stretch and push the badges to the far edge. The machine
+     load is the last row across them all; the grid is as wide as its columns (fit-content), so that
+     row ends where the last column does. */
   .debug-cols {
     display: grid;
-    grid-template-areas: "page server sessions";
+    grid-template-areas: "page server sessions" "load load load";
     grid-template-columns: minmax(320px, max-content) minmax(340px, 480px) minmax(360px, 560px);
     gap: 0;
+    width: fit-content;
+    max-width: 100%;
   }
   .debug-col {
     display: flex;
@@ -1636,6 +1642,10 @@ const DEBUG_PANEL_CSS = `
   }
   .debug-col-sessions {
     grid-area: sessions;
+  }
+  .debug-load {
+    grid-area: load;
+    min-width: 0;
   }
   .debug-col-server,
   .debug-col-sessions {
@@ -2208,9 +2218,9 @@ const DEBUG_PANEL_CSS = `
      beside them, its height going to the sessions' row rather than opening a gap under the pages. */
   @container debug-panel (max-width: 1239px) {
     .debug-cols {
-      grid-template-areas: "page server" "page sessions";
+      grid-template-areas: "page server" "page sessions" "load load";
       grid-template-columns: minmax(320px, max-content) minmax(0, 560px);
-      grid-template-rows: auto 1fr;
+      grid-template-rows: auto 1fr auto;
     }
     .debug-col-sessions {
       padding-top: 10px;
@@ -2218,9 +2228,10 @@ const DEBUG_PANEL_CSS = `
   }
   @container debug-panel (max-width: 760px) {
     .debug-cols {
-      grid-template-areas: "page" "server" "sessions";
+      grid-template-areas: "page" "server" "sessions" "load";
       grid-template-columns: minmax(0, 1fr);
       grid-template-rows: none;
+      width: auto;
     }
     .debug-col-server {
       margin-top: 10px;

@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { closeSync, constants, fstatSync, openSync, readdirSync, readSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, join, sep } from "node:path";
+import { basename, isAbsolute, join, sep } from "node:path";
 import { parseFrontmatter } from "./frontmatter";
 import { readRegularFileText } from "./regular-file";
 import { maskPolyforgeCredentials, type PolyforgeJob } from "./polyforge-status";
@@ -11,6 +11,8 @@ import {
   CARD_POLL_PAGE,
   CARD_RESPONSE_MAX_BYTES,
   CARD_RESPONSE_MAX_ENTRIES,
+  PROGRESS_MAX_BYTES,
+  PROGRESS_MAX_ENTRIES,
   capCodePoints,
   formatCardCursor,
   isPolyforgeWorkItemId,
@@ -20,6 +22,8 @@ import {
   type PolyforgeCardEntry,
   type PolyforgeCardProgress,
   type PolyforgeCardStep,
+  type PolyforgeProgressEntry,
+  type PolyforgeProgressTail,
 } from "./polyforge-cards-pure";
 
 /**
@@ -38,8 +42,8 @@ import {
  * - `<capsule>/runtime-state/spawn-journal.jsonl` latest line → the current
  *   step's `harness`, `started_at`, `harness_session` and `transcript`. The
  *   harness's live session file is read first (pi: the newest file under
- *   `<data root>/step-agent-sessions/<encoded capsule>/` written since the
- *   step started; claude: `<data root>/claude-config/projects/<encoded
+ *   `<data root>/step-agent-sessions/<encoded capsule>/`, unless that
+ *   session itself started before the step; claude: `<data root>/claude-config/projects/<encoded
  *   capsule>/<harness_session>.jsonl`), then the journal's `transcript` (the
  *   capsule copy, complete only once the step ends). The job record's own
  *   `transcript` is the job's first step, never the current one, so it is
@@ -51,6 +55,12 @@ import {
  * narration text, credential-masked never a tool call, its
  * name or command/argument, tool results, thinking, user/system prompts. Every failure degrades to an
  * absent field or `available: false`; nothing here throws to the route.
+ *
+ * The job detail's execution-progress face (`readProgressTail`)
+ * is a separate, wider projection over the same resolved transcript:
+ * narration plus one masked, truncated `<name>: <primary argument>` line per
+ * tool call (`progressEntries`). It never reaches the card stream above,
+ * whose whitelist stays narration only.
  */
 
 /** Small JSON records (job index, capsule, work item, execution). */
@@ -363,8 +373,13 @@ export function encodeClaudeProjectDir(cwd: string): string {
   return cwd.replace(/[^A-Za-z0-9]/g, "-");
 }
 
-/** Slack for a pi session file created just before the journal's start stamp. */
-const SESSION_START_SLACK_MS = 60_000;
+/** Clock-skew allowance between the spawn journal's `started_at` and the pi
+ *  session's own start stamp (one host, so only a few seconds). */
+const SESSION_START_SKEW_MS = 5_000;
+/** Bytes read from a session file's head for its `{"type":"session"}` record. */
+const SESSION_HEAD_BYTES = 4 * 1024;
+/** pi's session file name: `<ISO timestamp, ':' and '.' → '-'>_<uuid>.jsonl`. */
+const PI_SESSION_FILE_STAMP = /^(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})-(\d{2})-(\d{3})Z_/;
 
 function newestJsonl(dir: string): { path: string; mtime: number } | undefined {
   try {
@@ -379,6 +394,26 @@ function newestJsonl(dir: string): { path: string; mtime: number } | undefined {
   } catch {
     return undefined;
   }
+}
+
+/** When a pi session started, by its own record, not its last write: the
+ *  first record's `timestamp` (type `"session"`), else the ISO timestamp in
+ *  the file name, else the file's mtime. A previous step's
+ *  session can still be written after the next step starts, so its mtime
+ *  says nothing about which step it belongs to. */
+function piSessionStartMs(path: string, mtime: number): number {
+  const head = readSlice(path, 0, SESSION_HEAD_BYTES);
+  const first = head ? parseLine(head.buffer.toString("utf8").split("\n")[0] ?? "") : undefined;
+  if (first?.type === "session") {
+    const stamp = Date.parse(asString(first.timestamp) ?? "");
+    if (Number.isFinite(stamp)) return stamp;
+  }
+  const named = PI_SESSION_FILE_STAMP.exec(basename(path));
+  if (named) {
+    const stamp = Date.parse(`${named[1]}T${named[2]}:${named[3]}:${named[4]}.${named[5]}Z`);
+    if (Number.isFinite(stamp)) return stamp;
+  }
+  return mtime;
 }
 
 /** The current step's transcript and harness, from the spawn journal's
@@ -399,11 +434,13 @@ export function resolveTranscript(root: string, capsuleDir: string): PolyforgeTr
   const roots = [capsuleDir, root];
   const candidates: (string | undefined)[] = [];
   if (harness === "pi") {
-    // The newest session of this capsule, unless it predates the step (the
-    // current step has not written its own yet).
+    // The newest session of this capsule, unless it started before the step
+    // (a previous step's session: the current step has not written its own yet).
     const newest = newestJsonl(join(root, "step-agent-sessions", encodePiSessionDir(capsuleDir)));
     const startedMs = Date.parse(asString(latest?.started_at) ?? "");
-    if (newest && (!Number.isFinite(startedMs) || newest.mtime >= startedMs - SESSION_START_SLACK_MS)) candidates.push(newest.path);
+    if (newest && (!Number.isFinite(startedMs) || piSessionStartMs(newest.path, newest.mtime) >= startedMs - SESSION_START_SKEW_MS)) {
+      candidates.push(newest.path);
+    }
   } else {
     const session = asString(latest?.harness_session);
     if (session && HARNESS_SESSION_PATTERN.test(session)) {
@@ -448,6 +485,55 @@ export function transcriptEntries(record: Record<string, unknown>, harness: Poly
     if (block.type !== "text" || typeof block.text !== "string") return;
     const text = cleanText(block.text);
     if (text) entries.push({ id: `${idPrefix}.${index}`, text });
+  });
+  return entries;
+}
+
+/** A tool-call line's cap, in code points after masking. */
+export const PROGRESS_TOOL_MAX = 200;
+
+/** A tool call's primary argument: a string `command`, else the first
+ *  string-valued argument in key order, else nothing. */
+function primaryArgument(args: unknown): string | undefined {
+  const object = asObject(args);
+  if (!object) return undefined;
+  if (typeof object.command === "string" && object.command.trim()) return object.command;
+  for (const value of Object.values(object)) {
+    if (typeof value === "string" && value.trim()) return value;
+  }
+  return undefined;
+}
+
+/** The execution-progress entries of one transcript record:
+ *  each assistant text block → `narration` (as `transcriptEntries`), each pi
+ *  `toolCall` / claude `tool_use` block → one `tool` line `<name>: <primary
+ *  argument>`, credential-masked and capped at PROGRESS_TOOL_MAX. Tool
+ *  results, thinking, user/system records and every other field produce
+ *  nothing. Only `readProgressTail` uses it; the card face never does. */
+export function progressEntries(record: Record<string, unknown>, harness: PolyforgeHarness, idPrefix: string): PolyforgeProgressEntry[] {
+  const message = asObject(record.message);
+  if (!message || message.role !== "assistant") return [];
+  if (harness === "pi" ? record.type !== "message" : record.type !== "assistant") return [];
+  const content = message.content;
+  const blocks = typeof content === "string" ? [{ type: "text", text: content }] : Array.isArray(content) ? content : [];
+  const entries: PolyforgeProgressEntry[] = [];
+  blocks.forEach((value, index) => {
+    const block = asObject(value);
+    if (!block) return;
+    const id = `${idPrefix}.${index}`;
+    if (block.type === "text" && typeof block.text === "string") {
+      const text = cleanText(block.text);
+      if (text) entries.push({ id, kind: "narration", text });
+      return;
+    }
+    const toolBlock = harness === "pi" ? "toolCall" : "tool_use";
+    if (block.type !== toolBlock) return;
+    const name = asString(block.name);
+    if (!name) return;
+    const argument = primaryArgument(harness === "pi" ? block.arguments : block.input);
+    const line = (argument ? `${name}: ${argument}` : name).replace(/\s+/g, " ").trim();
+    const text = capCodePoints(maskPolyforgeCredentials(line), PROGRESS_TOOL_MAX);
+    if (text) entries.push({ id, kind: "tool", text });
   });
   return entries;
 }
@@ -554,6 +640,64 @@ export function readCardProgress(
   // next poll reads the newest page again instead of skipping it.
   if (entries.length === 0 && all.length > 0) return { available: true, entries: [] };
   return { available: true, entries, cursor: formatCardCursor(identity, slice.start + end), reset: true };
+}
+
+// ---- the execution-progress tail ----
+
+const unavailableTail = (): PolyforgeProgressTail => ({ available: false, entries: [] });
+
+/**
+ * The job detail's execution progress for one capsule: the current step's
+ * transcript (`resolveTranscript`, same containment), its newest
+ * TRANSCRIPT_WINDOW_BYTES read as whole lines only, projected by
+ * `progressEntries`, keeping the newest PROGRESS_MAX_ENTRIES entries within
+ * PROGRESS_MAX_BYTES of entry JSON. Every call is a fresh newest page, and
+ * the ids embed the transcript identity (path, device, inode, harness,
+ * step) as an opaque hash, so a step change replaces the tail and never
+ * splices two steps. No readable/recognised transcript, a partial line or
+ * any error → `available: false`. Never throws.
+ */
+export function readProgressTail(root: string, capsuleDir: string): PolyforgeProgressTail {
+  try {
+    const source = resolveTranscript(root, capsuleDir);
+    if (!source) return unavailableTail();
+    const slice = readSlice(source.path, (size) => size - TRANSCRIPT_WINDOW_BYTES, TRANSCRIPT_WINDOW_BYTES);
+    if (!slice) return unavailableTail();
+    const identity = createHash("sha256")
+      .update(`${source.path}\0${slice.dev}\0${slice.ino}\0${source.harness}\0${source.step ?? ""}`)
+      .digest("hex")
+      .slice(0, 16);
+    const text = slice.buffer;
+    let lineStart = 0;
+    if (slice.start > 0) {
+      const first = text.indexOf(0x0a);
+      lineStart = first < 0 ? text.length : first + 1;
+    }
+    const end = text.lastIndexOf(0x0a) + 1;
+    const all: PolyforgeProgressEntry[] = [];
+    let known = false;
+    while (lineStart < end) {
+      const newline = text.indexOf(0x0a, lineStart);
+      const record = parseLine(text.subarray(lineStart, newline).toString("utf8"));
+      if (record && recognised(record, source.harness)) {
+        known = true;
+        all.push(...progressEntries(record, source.harness, `${identity}.${slice.start + lineStart}`));
+      }
+      lineStart = newline + 1;
+    }
+    if (!known) return unavailableTail();
+    const entries: PolyforgeProgressEntry[] = [];
+    let bytes = 0;
+    for (let i = all.length - 1; i >= 0 && entries.length < PROGRESS_MAX_ENTRIES; i--) {
+      const size = Buffer.byteLength(JSON.stringify(all[i]), "utf8") + 1;
+      if (bytes + size > PROGRESS_MAX_BYTES) break;
+      bytes += size;
+      entries.unshift(all[i]);
+    }
+    return { available: true, entries };
+  } catch {
+    return unavailableTail();
+  }
 }
 
 // ---- the card stream ----

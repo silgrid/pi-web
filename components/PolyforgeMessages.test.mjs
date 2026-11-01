@@ -30,14 +30,45 @@ test("the panel is two columns: the list column right of the chat pane", () => {
   // row-reverse + DOM order [list, chat] keeps the column flush right while
   // it stays first in DOM order.
   assert.match(source, /flexDirection: "row-reverse"/, "the column is the right-hand item");
-  assert.match(source, /width: isMobile \? "100%" : "clamp\(120px, 35%, 220px\)",\s*flexShrink: 0/, "mobile fills the sheet; desktop keeps the clamped, never-shrinking width");
-  assert.match(source, /borderLeft: isMobile \? "none" : "1px solid var\(--border\)"/, "no desktop divider on the mobile single view");
-  assert.match(source, /\{showListColumn && listColumn\}\n      \{showChatPane && chatPane\}/, "the column and the pane are the two children");
-  // Desktop keeps both columns at every dock width; mobile shows one view.
-  assert.match(source, /const isMobile = useIsMobile\(\);/);
-  assert.match(source, /const showListColumn = !isMobile \|\| !chatOpen;/, "mobile hides the list while a chat is open");
-  assert.match(source, /const showChatPane = !isMobile \|\| chatOpen;/, "mobile shows the chat pane only while a chat is open");
+  // owner 有意变更（重立自 #209）: mobile keeps the desktop two-pane
+  // layout at every width (was a single-view switch), and owner 有意变更
+  // desktop replaces the fixed clamp with the resizer's stored
+  // width; mobile keeps the clamp and gets no handle.
+  assert.match(source, /width: isMobile \? "clamp\(120px, 35%, 220px\)" : "var\(--pf-messages-list-width\)"/, "desktop width is the resizer variable; mobile keeps the clamp");
+  assert.match(source, /borderLeft: "1px solid var\(--border\)",\s*overflowY: "auto"/, "the list column's divider stays at every width");
+  assert.match(source, /flexDirection: "row-reverse" \}\}>\n      \{listColumn\}\n      \{chatPane\}\n    <\/div>/, "the column and the pane are always the two children");
+  assert.doesNotMatch(source, /showListColumn|showChatPane/, "no single-view switch remains");
+  assert.doesNotMatch(source, /\{isMobile \? \(listColumn/, "the list column is never conditionally dropped");
+  assert.match(source, /const chatPane = !chatOpen \? \(/, "nothing open keeps the empty chat pane (no auto-open)");
+  assert.match(source, /t\("polyforge\.messages\.select"\)/, "the empty pane reads the select-a-conversation copy");
   assert.match(source, /← \{t\("polyforge\.messages\.back"\)\}/, "the back control stays on the chat header");
+});
+
+test("the desktop list column is the resize separator of the shared panel hook", () => {
+  assert.match(source, /const listResizer = useResizablePanel\(\{/);
+  assert.match(source, /ariaLabel: t\("polyforge\.messages\.resizeList"\)/);
+  assert.match(source, /cssVariable: "--pf-messages-list-width"/);
+  assert.match(source, /defaultWidth: POLYFORGE_MESSAGES_LIST_MIN_WIDTH/);
+  assert.match(source, /getDefaultWidth: listDefaultWidth/);
+  assert.match(source, /getMaxWidth: listMaxWidth/);
+  assert.match(source, /growthDirection: "left"/);
+  assert.match(source, /minWidth: POLYFORGE_MESSAGES_LIST_MIN_WIDTH/);
+  assert.match(source, /maxWidth: POLYFORGE_MESSAGES_LIST_MAX_WIDTH/);
+  assert.match(source, /persistClamp: false/);
+  assert.match(source, /storageKey: "pi-web:polyforge-messages-list-width"/);
+  assert.match(source, /getPolyforgeMessagesListMaxWidth\(panelWidth\)/);
+  assert.match(source, /getPolyforgeMessagesListDefaultWidth\(panelWidth\)/);
+  // The dock drag changes the panel without a window resize: the surface's
+  // own box drives the re-fit, not only the hook's window listener.
+  assert.match(source, /new ResizeObserver\(\(\) => \{ reclampListWidth\(\); \}\)/);
+  assert.match(source, /observer\.observe\(element\)/);
+  assert.match(source, /\}, \[reclampListWidth, pfPresent, capable\]\)/, "the observer follows the branch's element");
+  // The separator is the desktop divider only; mobile renders none.
+  assert.match(source, /\{!isMobile && \(\n        <div\n          \{\.\.\.listResizer\.separatorProps\}/);
+  assert.match(source, /data-resize-handle="polyforge-messages-list"/);
+  assert.match(source, /className=\{`pf-messages-resize-handle\$\{listResizer\.isResizing \? " is-resizing" : ""\}`\}/);
+  assert.match(source, /title=\{`\$\{t\("polyforge\.messages\.resizeList"\)\}: \$\{t\("layout\.resizeHint"\)\}`\}/);
+  assert.match(source, /aria-controls="pf-messages-list"/);
 });
 
 test("the list column carries the flat direct area, the group section and their placeholders", () => {
@@ -148,4 +179,84 @@ test("the composer clears on submit and restores the attempt on a refusal", () =
   assert.match(source, /setDraftText\(attempt\.text\);/, "a refusal restores the attempt");
   assert.match(source, /setSendError\(submitError instanceof Error \? submitError\.message : String\(submitError\)\);/, "the refusal text shows");
   assert.match(source, /<textarea value=\{draftText\}/, "the textarea reads the draft");
+});
+
+test("project groups render between the direct area and 群聊", () => {
+  const directAt = source.indexOf("{direct.map((row) =>");
+  const groupsAt = source.indexOf("{groups.map(renderProjectGroup)}");
+  const chatsAt = source.indexOf("{sections.groups.map(renderRow)}");
+  assert.ok(directAt > 0 && groupsAt > directAt && chatsAt > groupsAt, "direct rows, then project groups, then 群聊");
+  assert.match(source, /\{groups\.length > 0 && \(/, "the projects label renders only with groups (no mapping: today's list)");
+  assert.match(source, /polyforge\.messages\.sectionProjects/);
+  assert.match(source, /const contacts = contactsOutsideGroups\(configuredContacts, groups\);/,
+    "a grouped contact is not repeated as a silent direct row; conversation rows stay");
+});
+
+test("a group header folds through the collapse hook and counts its contacts", () => {
+  assert.match(source, /import \{ usePolyforgeMessagesCollapse \} from "@\/hooks\/usePolyforgeMessagesCollapse";/);
+  assert.match(source, /const \{ collapsed, toggleProject \} = usePolyforgeMessagesCollapse\(\);/);
+  assert.match(source, /const expanded = !collapsed\.has\(group\.project\);/, "expanded unless stored collapsed; a stale stored name matches no group");
+  assert.match(source, /aria-expanded=\{expanded\}/);
+  assert.match(source, /aria-controls=\{bodyId\}/);
+  assert.match(source, /onClick=\{\(\) => toggleProject\(group\.project\)\}/);
+  assert.match(source, /t\("polyforge\.messages\.projectGroupLabel", \{ project: group\.project, count: group\.contacts\.length \}\)/,
+    "the header names the project and its contact count");
+  assert.match(source, /\{group\.contacts\.length\}<\/span>/, "the visible count is the contact count, folded or not");
+  assert.doesNotMatch(source, /localStorage|sessionStorage\./, "the component never touches storage directly");
+});
+
+test("a group shows its own failure note or an explicit empty placeholder", () => {
+  assert.match(source, /\{t\("polyforge\.messages\.groupReadFailed"\)\}: \{group\.error\}/, "pf's text is shown in that group only");
+  assert.match(source, /data-empty-group=\{group\.project\}/);
+  assert.match(source, /polyforge\.messages\.groupEmpty/);
+});
+
+test("a group row opens the existing conversation or the empty pane, with no unread badge", () => {
+  const start = source.indexOf("const renderGroupContact = ");
+  const end = source.indexOf("const renderProjectGroup = ", start);
+  const body = source.slice(start, end);
+  assert.ok(start > 0 && end > start);
+  assert.match(body, /const existing = conversationForContact\(conversations, contact\.id\);/);
+  assert.match(body, /if \(existing\) onSelectConversation\(existing\.id\);\s*else onSelectContact\(contact\);/, "no conversation is created by a click");
+  assert.doesNotMatch(body, /unread/, "unread lives on the direct row only");
+  assert.match(body, /\{name \|\| t\("polyforge\.messages\.unknownUser"\)\}/, "the display name or the placeholder, never an id");
+  assert.match(body, /<Avatar seed=\{contact\.id\} name=\{name\} \/>/);
+});
+
+test("management only for an admin; otherwise an explicit read-only notice", () => {
+  assert.match(source, /\{groups\.length > 0 && membershipAdmin === false && \(/, "a refused or failed probe shows the notice");
+  assert.match(source, /polyforge\.messages\.membershipNeedsAdmin/);
+  assert.match(source, /\{membershipAdmin === true && !group\.error && \(/, "add only for an admin, never over a failed group read");
+  assert.match(source, /\{membershipAdmin === true && \(\n          <button/, "remove only for an admin");
+  assert.match(source, /aria-label=\{t\("polyforge\.messages\.addMember", \{ project: group\.project \}\)\}/);
+  assert.match(source, /aria-label=\{t\("polyforge\.messages\.removeMember", \{ name: name \|\| t\("polyforge\.messages\.unknownUser"\), project \}\)\}/,
+    "the remove label names the display name or the placeholder, never an id");
+});
+
+test("the picker offers only users outside the group, with no role choice", () => {
+  const start = source.indexOf("const renderPicker = ");
+  const body = source.slice(start, source.indexOf("const renderProjectGroup = ", start));
+  assert.ok(start > 0);
+  assert.match(body, /const members = new Set\(group\.contacts\.map\(\(contact\) => contact\.id\)\);/);
+  assert.match(body, /users\.filter\(\(user\) => !members\.has\(user\.id\)\)\.sort\(compareContactsByName\)/, "existing members are hidden");
+  assert.match(body, /\{name \|\| t\("polyforge\.messages\.unknownUser"\)\}/);
+  assert.match(body, /changeMembership\("add", group\.project, user\)/);
+  assert.doesNotMatch(source, /<select|setRole|polyforge\.messages\.\w*[Rr]ole/, "no role selector: add is always writer server-side");
+  assert.doesNotMatch(body, /<input/, "no typed id field");
+});
+
+test("every change is confirmed by name first; cancel sends nothing; a refusal is shown, not applied", () => {
+  const start = source.indexOf("const changeMembership = useCallback");
+  const body = source.slice(start, source.indexOf("}, [membershipBusy, onChangeMembership, t]);", start));
+  assert.ok(start > 0);
+  assert.match(body, /const name = user\.display_name\.trim\(\) \|\| t\("polyforge\.messages\.unknownUser"\);/);
+  assert.match(body, /t\("polyforge\.messages\.confirmAddMember", \{ name, project \}\)/);
+  assert.match(body, /t\("polyforge\.messages\.confirmRemoveMember", \{ name, project \}\)/);
+  const confirmAt = body.indexOf("if (!window.confirm(question)) return;");
+  const changeAt = body.indexOf("await onChangeMembership({ action, project, userId: user.id });");
+  assert.ok(confirmAt > 0 && changeAt > confirmAt, "the confirmation precedes the one change; cancelling returns first");
+  assert.match(body, /setMembershipError\(\{ project, text: changeError instanceof Error \? changeError\.message : String\(changeError\) \}\);/,
+    "pf's refusal text is kept for its group");
+  assert.doesNotMatch(body, /setGroups|groups\.(push|splice|filter)/, "no optimistic membership change");
+  assert.match(source, /\{t\("polyforge\.messages\.membershipFailed"\)\}: \{membershipError\.text\}/);
 });

@@ -1,6 +1,7 @@
 import { execFileAsync } from "./exec-file";
 import { parsePfError } from "./polyforge-config-write";
 import { isPolyforgeVersionBelowMinimum } from "./polyforge-detect";
+import { polyforgePfBin } from "./polyforge-pf-bin";
 import { MEMORY_BODY_FORWARD_CAP } from "./polyforge-memory";
 import { capUtf8Bytes, memoryUtf8ByteLength } from "./polyforge-memory-pure";
 import { probePolyforgeVersion } from "./polyforge-status";
@@ -15,8 +16,12 @@ import { isPolyforgeTaskId, type PolyforgeTaskDetail, type PolyforgeTaskRow } fr
  * only degrade and answer.
  *
  * The sanitizers are the only passport off this module: a list row keeps
- * exactly id/project/state/prompt_summary plus the three timing facts
- * started_at?/ended_at?/wall_consumed_ns?; a detail keeps id/project/state/
+ * exactly nine keys — id/project/state/prompt_summary, the three timing facts
+ * started_at?/ended_at?/wall_consumed_ns? and
+ * report_tail?/reporter?: `report_tail` is pf's own bounded
+ * last non-empty report line (never re-cut here), `reporter` the spawn-time
+ * human display name or `machine`; each travels only when pf sends a string,
+ * so a 2.20.12 pf without them still lists (the floor is unchanged). A detail keeps id/project/state/
  * candidates/max_duration_ns/max_tokens/wall_consumed_ns/tokens_consumed/
  * created_at/started_at?/ended_at?/prompt/report/report_len/truncated, the
  * report cut to MEMORY_BODY_FORWARD_CAP UTF-8 bytes on a code-point boundary
@@ -86,7 +91,8 @@ function instant(value: unknown): string | undefined {
 
 /** One list row, cut to id/project/state/prompt_summary plus the timing
  *  facts (each only when pf carries it: a real instant, a numeric wall
- *  time); an invalid id drops it. */
+ *  time) and pf's report_tail/reporter strings as sent;
+ *  an invalid id drops it. */
 export function sanitizeTaskRow(raw: unknown): PolyforgeTaskRow | null {
   const row = asRow(raw);
   if (!row) return null;
@@ -103,6 +109,8 @@ export function sanitizeTaskRow(raw: unknown): PolyforgeTaskRow | null {
   if (started) sanitized.started_at = started;
   if (ended) sanitized.ended_at = ended;
   if (typeof row.wall_consumed_ns === "number" && Number.isFinite(row.wall_consumed_ns)) sanitized.wall_consumed_ns = num(row.wall_consumed_ns);
+  if (typeof row.report_tail === "string") sanitized.report_tail = row.report_tail;
+  if (typeof row.reporter === "string") sanitized.reporter = row.reporter;
   return sanitized;
 }
 
@@ -151,7 +159,7 @@ export function sanitizeTaskDetail(raw: unknown): PolyforgeTaskDetail | null {
 
 async function runPfJson(argv: string[]): Promise<unknown> {
   try {
-    const { stdout } = await execFileAsync("pf", argv, { timeout: READ_TIMEOUT_MS, maxBuffer: SPAWN_MAX_BUFFER });
+    const { stdout } = await execFileAsync(polyforgePfBin(), argv, { timeout: READ_TIMEOUT_MS, maxBuffer: SPAWN_MAX_BUFFER });
     return JSON.parse(stdout);
   } catch (error) {
     throw PolyforgeTasksError.fromSpawnError(error);

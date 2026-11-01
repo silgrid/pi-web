@@ -26,6 +26,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
 import { startNextServer } from "./next-server.mjs";
+import { NAV_MS } from "./timeouts.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 assert.ok(!existsSync(join(root, process.env.PI_WEB_DIST_DIR || ".next", "dev/lock")), "Run in a checkout without an active dev server");
@@ -213,10 +214,12 @@ async function openPage({ viewport = { width: 1280, height: 800 }, session = tru
   const context = await browser.newContext({ viewport, locale: "en-US" });
   await context.grantPermissions(["clipboard-read", "clipboard-write"]);
   const page = await context.newPage();
-  // 10s is the pool default but leaves no headroom while the parallel full bar
-  // shares the host with another Next dev + Chromium: this suite's first
-  // settings open timed out there under load. Action ceiling only; assertions
-  // and their polling unchanged (same reasoning as e2e/run.mjs's settle poll).
+  // 30s is the action ceiling for the warm path; the first settings open after a
+  // cold page load waits with NAV_MS instead (openSettings below), because 30s
+  // was still exceeded once under the parallel full bar on a loaded 32-core host
+  // ( verification, S1's Polyforge-tab wait). Action ceiling only;
+  // assertions and their polling unchanged (same reasoning as e2e/run.mjs's
+  // settle poll).
   page.setDefaultTimeout(30_000);
   page.on("pageerror", (error) => errors.push(error.message));
   page.on("console", (event) => { if (event.type() === "error") errors.push(event.text()); });
@@ -231,16 +234,21 @@ async function openPage({ viewport = { width: 1280, height: 800 }, session = tru
       detectHits.push({ at: Date.now(), url: request.url(), method: request.method(), body: request.postData() });
     }
   });
-  await page.goto(session ? `${base}/?session=${SESSION}` : `${base}/`, { waitUntil: "domcontentloaded", timeout: 60_000 });
-  if (session) await page.getByText("E2E polyforge settings host session").first().waitFor({ state: "attached", timeout: 60_000 });
-  else await page.getByRole("button", { name: "Settings", exact: true }).first().waitFor({ state: "attached", timeout: 60_000 });
+  await page.goto(session ? `${base}/?session=${SESSION}` : `${base}/`, { waitUntil: "domcontentloaded", timeout: NAV_MS });
+  if (session) await page.getByText("E2E polyforge settings host session").first().waitFor({ state: "attached", timeout: NAV_MS });
+  else await page.getByRole("button", { name: "Settings", exact: true }).first().waitFor({ state: "attached", timeout: NAV_MS });
   return page;
 }
 const openSettings = async (page) => {
   const show = page.getByRole("button", { name: "Show sidebar", exact: true });
   if (await show.isVisible().catch(() => false)) await show.click();
-  await page.getByRole("button", { name: "Settings", exact: true }).first().click();
-  return page.getByRole("dialog", { name: "Settings", exact: true });
+  // The first open after a cold page load compiles/renders the Settings dialog,
+  // so the click and the wait for the dialog use the repo's load-bound first-text
+  // ceiling (e2e/timeouts.mjs) instead of the warm 30 s action default.
+  await page.getByRole("button", { name: "Settings", exact: true }).first().click({ timeout: NAV_MS });
+  const dialog = page.getByRole("dialog", { name: "Settings", exact: true });
+  await dialog.waitFor({ timeout: NAV_MS });
+  return dialog;
 };
 const pfTab = (dialog) => dialog.getByRole("button", { name: "Polyforge", exact: true });
 const clipboard = (page) => page.evaluate(() => navigator.clipboard?.readText().catch(() => "") ?? "");
@@ -283,7 +291,7 @@ try {
   await withPage(T.S1, "pf absent: 未安装 section", { session: false }, async (page) => {
     const dialog = await openSettings(page);
     const tab = pfTab(dialog);
-    await tab.waitFor();
+    await tab.waitFor({ timeout: NAV_MS });
     assert.equal(await tab.isDisabled(), false, "the Polyforge section is project-gated (must open with no project)");
     await tab.click();
     await page.waitForRequest((request) => new URL(request.url()).pathname === "/api/polyforge/detect", { timeout: 15_000 }).catch(() => {});

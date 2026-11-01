@@ -2750,7 +2750,13 @@ select.mcp-add-input {
   white-space: nowrap;
 }
 .polyforge-config-value { font-family: var(--font-mono); word-break: break-all; }
-.polyforge-config-row.is-readonly .polyforge-config-value { color: var(--text-muted); }
+/* one muted treatment for every read-only row, whatever the
+   card: the value, the workspace path, chips and the unset placeholder. */
+.polyforge-config-row.is-readonly .polyforge-config-value,
+.polyforge-config-row.is-readonly .polyforge-config-workspace-path,
+.polyforge-config-row.is-readonly .polyforge-config-chips,
+.polyforge-config-row.is-readonly .polyforge-config-chip,
+.polyforge-config-row.is-readonly .polyforge-config-empty { color: var(--text-muted); }
 .polyforge-config-daemon { color: var(--text-muted); overflow-wrap: anywhere; }
 .polyforge-config-empty { color: var(--text-dim); }
 .polyforge-config-chips { display: flex; flex-wrap: wrap; gap: 4px; }
@@ -2775,42 +2781,166 @@ select.mcp-add-input {
   line-height: 1;
 }
 .polyforge-config-chip-remove:hover { color: var(--text); }
-/* Declared candidates: one collapsible group per project, each step a line
-   with its models as chips on the line below. */
-.polyforge-config-candidate-group { font-size: 12px; }
-.polyforge-config-candidate-group > summary {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 2px 0;
-  cursor: pointer;
-}
-.polyforge-config-candidate-group > summary:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
-}
-.polyforge-config-candidate-project { font-family: var(--font-mono); font-weight: 600; }
+/* The history title's entry count. */
 .polyforge-config-candidate-count { color: var(--text-muted); font-size: 11px; }
-.polyforge-config-candidate-step {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: 4px 0 4px 16px;
-  min-width: 0;
+/* a 工作区 row's source-file tag and the memory policy
+   sub-heading inside the card's fold. */
+.polyforge-config-file-tag {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 5px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-dim);
+  vertical-align: middle;
 }
+.polyforge-config-subtitle { margin: 4px 0 0; font-size: 11px; font-weight: 600; color: var(--text-muted); }
 @media (max-width: 640px) {
-  /* Phones: the same cells stack in one column; the header row hides. */
+  /* Phones: each row is two columns, the key on the left and
+     its class badge on the right of the same line, then the file value and the
+     daemon value each across the whole row below; the header row hides. */
   .polyforge-config-grid,
   .polyforge-config-grid.has-daemon { grid-template-columns: minmax(0, 1fr); }
   .polyforge-config-grid-header { display: none; }
   .polyforge-config-row,
   .polyforge-config-row.no-daemon {
-    grid-template-columns: minmax(0, 1fr);
-    gap: 4px;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 4px 8px;
     padding-bottom: 6px;
     border-bottom: 1px solid var(--border);
   }
-  .polyforge-config-row.no-daemon .polyforge-config-file { grid-column: auto; }
+  .polyforge-config-class { justify-self: end; }
+  .polyforge-config-badge { max-width: none; }
+  .polyforge-config-file,
+  .polyforge-config-daemon,
+  .polyforge-config-row.no-daemon .polyforge-config-file { grid-column: 1 / -1; }
   .polyforge-config-status .config-detail-grid { grid-template-columns: minmax(96px, 130px) minmax(0, 1fr); }
 }
 .polyforge-config-history { display: flex; flex-direction: column; gap: 4px; }
+/* the workflow card. A title line carrying the 26px ↻
+   ('s pattern; while busy the button carries animate-spin and
+   only its icon turns), the project selector, then one row per step id with
+   its live badge, next-dispatch note, bundles, declared/inherited chain,
+   effective chain and source; the write controls fold under the card's
+   disclosure region. */
+.polyforge-workflow-head { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; min-width: 0; }
+.polyforge-workflow-head > .polyforge-config-card-title { flex: 1 1 auto; }
+.polyforge-workflow-refresh {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  box-sizing: border-box;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-hover);
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.polyforge-workflow-refresh:disabled { cursor: default; }
+.polyforge-workflow-refresh.animate-spin { animation: none; }
+.polyforge-workflow-refresh.animate-spin > svg { animation: spin 1s linear infinite; }
+.polyforge-workflow-project { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+.polyforge-workflow-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.polyforge-workflow-row {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 6px 0;
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+  min-width: 0;
+}
+.polyforge-workflow-id { font-family: var(--font-mono); font-weight: 600; }
+.polyforge-workflow-kind { color: var(--text-muted); font-size: 11px; }
+.polyforge-workflow-note { margin: 0; font-size: 11px; color: var(--text-dim); }
+.polyforge-workflow-line,
+.polyforge-workflow-effective {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  margin: 0;
+  min-width: 0;
+}
+.polyforge-workflow-label { color: var(--text-muted); font-size: 11px; }
+.polyforge-workflow-inherit { color: var(--text-dim); font-style: italic; }
+.polyforge-workflow-bundle,
+.polyforge-workflow-chain { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 4px; min-width: 0; }
+.polyforge-workflow-bundle-name { font-family: var(--font-mono); color: var(--text-muted); }
+.polyforge-workflow-effective .polyforge-config-chip { color: var(--text-muted); }
+.polyforge-workflow-from { color: var(--text-dim); font-size: 11px; overflow-wrap: anywhere; }
+.polyforge-workflow-editor { display: flex; flex-direction: column; gap: 4px; }
+.polyforge-workflow-editor[hidden] { display: none; }
+
+/* the page's disclosure regions. A region's toggle is one
+   button line with a CSS chevron; its body is hidden until the region opens.
+   The open/closed state lives in this browser's localStorage only. */
+.polyforge-disclosure-toggle {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  width: 100%;
+  min-width: 0;
+  margin: 0;
+  padding: 2px 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.polyforge-disclosure-toggle::before {
+  content: "";
+  flex: none;
+  width: 0;
+  height: 0;
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  border-left: 5px solid var(--text-muted);
+  transition: transform 0.12s ease;
+}
+.polyforge-disclosure-toggle[aria-expanded="true"]::before { transform: rotate(90deg); }
+.polyforge-disclosure-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  border-radius: 3px;
+}
+.polyforge-disclosure-marker {
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.polyforge-disclosure-body[hidden] { display: none; }
+.polyforge-config-summary { min-width: 0; color: var(--text); overflow-wrap: anywhere; }
+.polyforge-config-summary.is-warning { color: #d97706; }
+.polyforge-config-fold { display: flex; flex-direction: column; gap: 6px; }
+/* Per-key results render under their own row, across the whole row. */
+.polyforge-config-row-feedback {
+  grid-column: 1 / -1;
+  margin: 0;
+  font-size: 11px;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+.polyforge-config-row-feedback.is-error { color: #ef4444; }
+.polyforge-config-history-row > .polyforge-config-row-feedback { flex-basis: 100%; }
+.polyforge-config-install-head { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; min-width: 0; }
+.polyforge-config-install-head > .polyforge-config-card-title { flex: 1 1 auto; min-width: 0; }

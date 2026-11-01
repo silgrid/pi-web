@@ -59,6 +59,15 @@ export interface AgentEventConnectionOptions {
 
 const EVENT_SOURCE_OPEN = 1;
 
+/**
+ * How often the stale watchdog checks a ready stream. A stream silent past
+ * `staleAfterMs` is replaced at the first check after it, so up to one interval
+ * later (later still while a background tab's timers are throttled).
+ */
+export function staleCheckIntervalMs(staleAfterMs: number): number {
+  return Math.max(1_000, Math.floor(staleAfterMs / 3));
+}
+
 /** Owns the EventSource, agent-readiness handshake, and passive reconnect. */
 export class AgentEventConnection {
   private current: Connection | null = null;
@@ -228,7 +237,7 @@ export class AgentEventConnection {
             if (Date.now() - (connection.lastSeenAt ?? openedAt) > staleAfterMs) {
               this.fail(connection, new AgentEventConnectionError("closed"), "stale");
             }
-          }, Math.max(1_000, Math.floor(staleAfterMs / 3)));
+          }, staleCheckIntervalMs(staleAfterMs));
         }
       } else if (event.type === "startup_error") {
         const message = typeof event.errorMessage === "string" ? event.errorMessage : undefined;

@@ -18,6 +18,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
 import { startNextServer } from "./next-server.mjs";
+import { NAV_MS } from "./timeouts.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 assert.ok(!existsSync(join(root, process.env.PI_WEB_DIST_DIR || ".next", "dev/lock")), "Run in a checkout without an active dev server");
@@ -139,10 +140,10 @@ async function openPage({ viewport = { width: 1280, height: 800 }, session = SES
   // Navigation headroom only: the host is shared and other capsules' e2e
   // servers routinely push a cold page load past this page's 20s action
   // timeout. Assertions below still use the 20s default.
-  await page.goto(`${base}/?session=${session}`, { waitUntil: "domcontentloaded", timeout: 60_000 });
+  await page.goto(`${base}/?session=${session}`, { waitUntil: "domcontentloaded", timeout: NAV_MS });
   // Locale- and viewport-independent readiness: the host session's first
   // message is mounted (the sidebar row is hidden behind the drawer on mobile).
-  await page.getByText("E2E pf widget host session").first().waitFor({ state: "attached", timeout: 60_000 });
+  await page.getByText("E2E pf widget host session").first().waitFor({ state: "attached", timeout: NAV_MS });
   return page;
 }
 const shelf = (page) => page.locator(".extension-status-shelf");

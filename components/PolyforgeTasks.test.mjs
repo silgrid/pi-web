@@ -18,7 +18,7 @@ test("the tab reads on gestures only: one list read per opening, one detail read
   assert.match(source, /if \(!isPolyforgeTaskId\(id\)\) return;/, "a malformed id is never fetched");
   assert.match(source, /if \(listReadRef\.current\) return;\s*listReadRef\.current = true;\s*readList\(\);/,
     "exactly one list read per mounted tab, even when mount effects re-run");
-  assert.equal((source.match(/readList\(\);/g) ?? []).length, 2, "the list is read at mount and on a count change, nowhere else");
+  assert.equal((source.match(/readList\(\);/g) ?? []).length, 3, "the list is read at mount, on a count change and from the refresh button's click (the third read), nowhere else");
 });
 
 test("one re-read per status task-count change while mounted; the mount value and a missing snapshot never read", () => {
@@ -49,7 +49,9 @@ test("the block clock runs only while a running task is listed, is cleared on un
 });
 
 test("the list is a responsive grid of discrete blocks with state dot + text, duration, project and a two-line summary", () => {
-  assert.match(source, /gridTemplateColumns: "repeat\(auto-fill, minmax\(112px, 1fr\)\)", gap: 8/, "the job cards' column minimum: two blocks side by side at the 375px sheet and the 340px dock");
+  // owner 有意变更（重立自 #209）: Tasks and Jobs share one 150px track.
+  assert.match(source, /gridTemplateColumns: "repeat\(auto-fill, minmax\(150px, 1fr\)\)", gap: 8/, "the 150px column minimum shared with the Jobs cards: two blocks side by side at the 460px dock and the 375px sheet, one at the 340px dock");
+  assert.doesNotMatch(source, /minmax\(112px, 1fr\)/, "the old 112px Tasks minimum is gone");
   assert.match(source, /import \{ POLYFORGE_BLOCK_STYLE \} from "@\/lib\/panel-layout";/);
   const row = source.slice(source.indexOf("const renderRow = (row: PolyforgeTaskRow) => {"), source.indexOf("const grid = ("));
   assert.match(row, /<button key=\{row\.id\} type="button" data-pf-task=\{row\.id\}[^>]*onClick=\{\(\) => openDetail\(row\.id\)\}/, "the whole block is the (keyboard-reachable) click target");
@@ -69,8 +71,25 @@ test("the list is a responsive grid of discrete blocks with state dot + text, du
   }
 });
 
+test("the report tail renders as plain text below the summary, clipped to two lines; placeholders are keyed on state", () => {
+  const row = source.slice(source.indexOf("const renderRow = (row: PolyforgeTaskRow) => {"), source.indexOf("const grid = ("));
+  const summary = row.indexOf("{row.prompt_summary}</span>");
+  const tail = row.indexOf('{row.state === "running" ? (');
+  assert.ok(summary >= 0 && tail > summary, "the tail line sits directly below the prompt summary");
+  assert.match(row, /\{row\.state === "running" \? \(\s*<span style=\{\{ fontSize: 11, color: "var\(--text-dim\)" \}\}>\{t\("polyforge\.tasks\.tailRunning"\)\}<\/span>/,
+    "a running block shows the dim 生成中… whatever its tail holds");
+  assert.match(row, /\) : row\.report_tail\?\.trim\(\) \? \(\s*<span style=\{\{ display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden"[^}]*\}\}>\{row\.report_tail\}<\/span>/,
+    "a non-running block with a non-blank tail shows the raw string, two-line CSS clamp, hidden overflow");
+  assert.match(row, /\) : \(\s*<span style=\{\{ fontSize: 11, color: "var\(--text-dim\)" \}\}>\{t\("polyforge\.tasks\.tailEmpty"\)\}<\/span>\s*\)\}/,
+    "an empty, whitespace-only or absent tail shows the dim 暂无报告");
+  assert.doesNotMatch(source, /report_tail\??\.(slice|substring|substr)\(/, "the client never cuts the tail");
+  assert.doesNotMatch(row, /MarkdownBody|dangerouslySetInnerHTML/, "the tail is plain text, never markdown");
+  assert.doesNotMatch(row, /report_tail\}…|\+ "…"/, "no appended ellipsis");
+  for (const key of ["tailRunning", "tailEmpty"]) assert.match(enSource, new RegExp(`"polyforge\\.tasks\\.${key}": "\\S`), `en translates ${key}`);
+});
+
 test("two sections — running and all — filtered by the client-side search over every section", () => {
-  assert.match(source, /splitTaskSections\(filterTaskRows\(rows, \{ search, project: projectFilter, state: stateFilter \}\)\)/,
+  assert.match(source, /splitTaskSections\(filterTaskRows\(rows, \{ search, project: projectFilter, state: stateFilter, reporter: reporterFilter \}\)\)/,
     "the search (and the filters) apply on the client and both sections render the filtered rows");
   assert.match(source, /t\("polyforge\.tasks\.running"\)[\s\S]*grid\(sections\.running\)[\s\S]*t\("polyforge\.tasks\.all"\)[\s\S]*grid\(sections\.all\)/,
     "正在运行 renders above 全部");
@@ -90,6 +109,20 @@ test("project and state selects filter the already-read list in component memory
   assert.equal((source.match(/fetch\(/g) ?? []).length, 2, "the two task reads stay the only requests");
   assert.doesNotMatch(source, /localStorage|sessionStorage/, "the filters are not persisted");
   assert.doesNotMatch(source, /model|time.?range/i, "no model or time-range filter");
+});
+
+test("a reporter select — 全部发起人, humans ascending, 机器发起 last — filters the loaded list in component memory, with no read", () => {
+  assert.match(source, /const \[reporterFilter, setReporterFilter\] = useState<string \| null>\(null\);/, "starts at 全部发起人 on every mount");
+  assert.match(source, /const reporters = taskReporterOptions\(rows\);/, "options come from the whole loaded list, not the filtered sections");
+  assert.match(source, /<select value=\{reporterFilter \?\? ""\} onChange=\{\(event\) => setReporterFilter\(event\.target\.value \|\| null\)\}\s*aria-label=\{t\("polyforge\.tasks\.filterReporter"\)\} title=\{t\("polyforge\.tasks\.filterReporter"\)\}/,
+    "a change only sets component state; the select is labelled like the project/state selects");
+  assert.match(source, /<option value="">\{t\("polyforge\.tasks\.filterAllReporters"\)\}<\/option>\s*\{reporters\.humans\.map\(\(reporter\) => <option key=\{reporter\} value=\{reporter\}>\{reporter\}<\/option>\)\}\s*\{reporters\.machine && <option value=\{TASK_REPORTER_MACHINE\}>\{t\("polyforge\.tasks\.reporterMachine"\)\}<\/option>\}/,
+    "全部发起人 first, the human names, 机器发起 last");
+  const selects = source.indexOf("filterAllProjects") < source.indexOf("TASK_STATE_FILTERS.map") && source.indexOf("TASK_STATE_FILTERS.map") < source.indexOf("filterAllReporters");
+  assert.ok(selects, "the reporter select sits after the project and state selects");
+  assert.equal((source.match(/fetch\(/g) ?? []).length, 2, "still only the two task reads");
+  assert.doesNotMatch(source, /localStorage|sessionStorage|useSearchParams|history\.(push|replace)State/, "the reporter selection is not persisted");
+  for (const key of ["filterReporter", "filterAllReporters", "reporterMachine"]) assert.match(enSource, new RegExp(`"polyforge\\.tasks\\.${key}": "\\S`), `en translates ${key}`);
 });
 
 test("the detail shows status, candidates, budget, times, prompt and the markdown report with the memory collapse rule", () => {
