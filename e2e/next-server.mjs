@@ -17,6 +17,16 @@ const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const ATTEMPTS = 3;
 const READY_TIMEOUT_MS = 120_000;
 
+function pidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === "EPERM";
+  }
+}
+
 async function freePort() {
   const probe = createServer();
   probe.listen(0, "127.0.0.1");
@@ -68,11 +78,14 @@ export async function startNextServer({ name, mode = "dev", env = process.env, l
         await exited;
         clearTimeout(forceKill);
       }
-      // A SIGTERM'd `next dev` can leave its lock behind; drop it only if it is this server's.
+      // A SIGTERM'd `next dev` can leave its lock behind (written by this server or by
+      // a child of it, so the pid need not be server.pid); drop it when it is this
+      // server's or its pid is no longer alive. A live other server's lock stays.
       const lock = join(root, distDir, "dev/lock");
       try {
-        if (JSON.parse(readFileSync(lock, "utf8")).pid === server.pid) rmSync(lock, { force: true });
-      } catch { /* no lock, or another server's */ }
+        const { pid } = JSON.parse(readFileSync(lock, "utf8"));
+        if (pid === server.pid || !pidAlive(pid)) rmSync(lock, { force: true });
+      } catch { /* no lock, or unreadable */ }
       if (endLog) await new Promise((resolve) => log.end(resolve));
     };
 

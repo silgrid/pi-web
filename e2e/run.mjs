@@ -13,6 +13,8 @@ import { checkChatAppearance } from "./chat-appearance.mjs";
 import { checkCodeBackground } from "./code-background.mjs";
 import { checkSplitPane } from "./split-pane-pass.mjs";
 import { checkModelDiscovery } from "./model-discovery.mjs";
+import { checkModelContext } from "./model-context.mjs";
+import { checkModelSelector } from "./model-selector.mjs";
 import { checkArchive } from "./archive.mjs";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -573,9 +575,11 @@ try {
       if (await showSidebar.isVisible()) await showSidebar.click();
       await checkModelDiscovery(page);
     }
+    await checkModelContext(page);
     await page.goto(`${base}/?session=${CODE_BACKGROUND}`, { waitUntil: "domcontentloaded" });
     await page.locator(".markdown-code-block pre").waitFor();
     await checkCodeBackground(page);
+    await checkModelSelector(page, { base, project, artifacts });
     // wi_tN1cVXKf1VIr: the archive acceptance pass (authored pre-code; see
     // e2e/archive.mjs). Desktop-only, and self-guarding — a failing archive
     // scenario logs FAIL and sets the exit code without aborting the rest

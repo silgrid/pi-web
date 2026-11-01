@@ -27,6 +27,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
 import { startNextServer } from "./next-server.mjs";
+import { COLD_MS, NAV_MS } from "./timeouts.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 assert.ok(!existsSync(join(root, process.env.PI_WEB_DIST_DIR || ".next", "dev/lock")), "Run in a checkout without an active dev server");
@@ -182,8 +183,8 @@ async function openPage({ session = SESSIONS.mapped, viewport = { width: 1280, h
   page.on("console", (event) => { if (event.type() === "error") errors.push(event.text()); });
   page.on("response", async (r) => { if (!r.url().startsWith(base)) return; if (r.status() >= 500) errors.push(`${r.status()} ${r.url()}`);
     if (r.url().includes("/api/polyforge/memory")) responses.push({ status: r.status(), text: await r.text().catch(() => "") }); });
-  await page.goto(`${base}/?session=${session[0]}`, { waitUntil: "domcontentloaded", timeout: warm ? 240_000 : 90_000 });
-  await page.getByText(session[2]).first().waitFor({ state: "attached", timeout: warm ? 240_000 : 90_000 });
+  await page.goto(`${base}/?session=${session[0]}`, { waitUntil: "domcontentloaded", timeout: warm ? COLD_MS : NAV_MS });
+  await page.getByText(session[2]).first().waitFor({ state: "attached", timeout: warm ? COLD_MS : NAV_MS });
   return page;
 }
 const withPage = async (opts, fn) => { const page = await openPage(opts); try { return await fn(page); } finally { await page.context().close(); } };
@@ -403,7 +404,10 @@ try {
     await panel.getByRole("button", { name: /back|←/i }).first().click(); await panel.getByText(DOC.title).click(); await panel.getByText("E2E-BOLD").first().waitFor();
     const before = calls().length;
     await link(/wi_e2eaaaa0001/).click();
-    await panel.getByText("WATCH-DETAIL-99").first().waitFor({ timeout: 15_000 });
+    // owner 有意变更 the current step moved from the old detail header's visible text into
+    // the title row's hover; the same guarantee (this work item's watch read opened its detail) is read from
+    // the title row carrying the slug with the watched current step on hover.
+    await panel.locator('[data-pf-detail-title][title*="WATCH-DETAIL-99"]').getByText("task-42").first().waitFor({ timeout: 15_000 });
     assert.equal(await tabs(page).filter({ hasText: /jobs/i }).first().getAttribute("aria-selected"), "true", "the dock must switch to Jobs");
     assert.ok(calls().slice(before).some((a) => a[0] === "watch" && a.includes("wi_e2eaaaa0001")), "the existing watch read must run for wi_e2eaaaa0001");
   }));

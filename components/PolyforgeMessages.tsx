@@ -4,9 +4,20 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import { useI18n } from "@/hooks/useI18n";
 import { useIsMobile } from "@/hooks/useIsMobile";
+import { usePolyforgeMessagesCollapse } from "@/hooks/usePolyforgeMessagesCollapse";
+import { useResizablePanel } from "@/hooks/useResizablePanel";
+import {
+  getPolyforgeMessagesListDefaultWidth,
+  getPolyforgeMessagesListMaxWidth,
+  POLYFORGE_MESSAGES_LIST_MAX_WIDTH,
+  POLYFORGE_MESSAGES_LIST_MIN_WIDTH,
+} from "@/lib/panel-layout";
 import {
   avatarColor,
   avatarInitial,
+  compareContactsByName,
+  contactsOutsideGroups,
+  conversationForContact,
   conversationName,
   directRows,
   groupConversations,
@@ -14,6 +25,7 @@ import {
   type PolyforgeContact,
   type PolyforgeConversation,
   type PolyforgeMessage,
+  type PolyforgeProjectGroup,
 } from "@/lib/polyforge-messages-pure";
 
 /**
@@ -26,9 +38,20 @@ import {
  * bubbles right without attribution, peer bubbles left with a first-of-run
  * avatar and name, timestamps kept). No surface ever renders a raw user id:
  * every identity is the display name or the unknown-user placeholder. It
- * renders only inside the dock panel (desktop dock and mobile sheet share
- * the same component, one view at a time below the mobile breakpoint) and
- * never writes a chat session, the agent composer or a storage key.
+ * renders only inside the dock panel (the desktop dock and the mobile sheet
+ * share the same component, two panes side by side at every width). On
+ * desktop the list's left divider is also its resize separator
+ *. Between the direct area and 群聊 sit the project groups
+ *: one collapsible group per `cli.toml`-mapped project with
+ * its contact count, an explicit empty or read-failure note, and rows that
+ * open the contact's existing conversation or its empty pane (no unread
+ * badge — unread lives on the direct row only). An admin (the users read
+ * answered) gets an add control per group — a picker of human non-members,
+ * added as writer — and a remove control per row, each behind a confirmation
+ * naming the project and the display name; anyone else sees the groups
+ * read-only with an explicit needs-admin notice. Its own storage is that width
+ * and, through `usePolyforgeMessagesCollapse`, the collapsed groups. It never
+ * writes a chat session or the agent composer.
  */
 
 export interface PolyforgeMessagesProps {
@@ -37,6 +60,16 @@ export interface PolyforgeMessagesProps {
   reason: string | null;
   conversations: PolyforgeConversation[];
   contacts: PolyforgeContact[];
+  /** The mapped projects' groups; [] renders no group. */
+  groups: PolyforgeProjectGroup[];
+  /** The admin probe: true enables add/remove, false shows the read-only
+   *  notice, null (not answered yet) shows neither. */
+  membershipAdmin: boolean | null;
+  /** The picker's human users (id + display name only). */
+  users: PolyforgeContact[];
+  /** One confirmed membership change; resolves after the groups re-read and
+   *  rejects with pf's text on a refusal. */
+  onChangeMembership: (input: { action: "add" | "remove"; project: string; userId: string }) => Promise<void>;
   error: string | null;
   selectedConversation: string | null;
   onSelectConversation: (id: string | null) => void;
@@ -105,7 +138,11 @@ export function PolyforgeMessages({
   capable,
   reason,
   conversations,
-  contacts,
+  contacts: configuredContacts,
+  groups,
+  membershipAdmin,
+  users,
+  onChangeMembership,
   error,
   selectedConversation,
   onSelectConversation,
@@ -124,6 +161,11 @@ export function PolyforgeMessages({
 }: PolyforgeMessagesProps) {
   const { t } = useI18n();
   const isMobile = useIsMobile();
+  const { collapsed, toggleProject } = usePolyforgeMessagesCollapse();
+  // The whole Messages surface measures the panel the list's bounds derive
+  // from (the dock drag moves this width without a window resize).
+  const messagesPanelRef = useRef<HTMLDivElement | null>(null);
+  const listWidthRef = useRef(0);
   const historyRef = useRef<HTMLDivElement | null>(null);
   const stickToBottomRef = useRef(true);
   // A programmatic scrollTop write also fires onScroll; only a real user
@@ -140,6 +182,52 @@ export function PolyforgeMessages({
   const [draftAnchor, setDraftAnchor] = useState("");
   const [sendError, setSendError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
+  // the group whose add picker is open, the one membership
+  // change in flight, and the last refused change's text (shown in its group).
+  const [addingTo, setAddingTo] = useState<string | null>(null);
+  const [membershipBusy, setMembershipBusy] = useState(false);
+  const [membershipError, setMembershipError] = useState<{ project: string; text: string } | null>(null);
+
+  const messagesPanelWidth = useCallback(
+    () => messagesPanelRef.current?.getBoundingClientRect().width ?? 0,
+    [],
+  );
+  const listDefaultWidth = useCallback(() => {
+    const panelWidth = messagesPanelWidth();
+    return panelWidth > 0 ? getPolyforgeMessagesListDefaultWidth(panelWidth) : POLYFORGE_MESSAGES_LIST_MIN_WIDTH;
+  }, [messagesPanelWidth]);
+  const listMaxWidth = useCallback(() => {
+    const panelWidth = messagesPanelWidth();
+    return panelWidth > 0 ? getPolyforgeMessagesListMaxWidth(panelWidth) : POLYFORGE_MESSAGES_LIST_MAX_WIDTH;
+  }, [messagesPanelWidth]);
+  // desktop only. persistClamp stays off so a dock narrowed
+  // past the stored width only shrinks what is shown, never the saved value.
+  const listResizer = useResizablePanel({
+    ariaLabel: t("polyforge.messages.resizeList"),
+    cssVariable: "--pf-messages-list-width",
+    defaultWidth: POLYFORGE_MESSAGES_LIST_MIN_WIDTH,
+    getDefaultWidth: listDefaultWidth,
+    getMaxWidth: listMaxWidth,
+    growthDirection: "left",
+    maxWidth: POLYFORGE_MESSAGES_LIST_MAX_WIDTH,
+    minWidth: POLYFORGE_MESSAGES_LIST_MIN_WIDTH,
+    persistClamp: false,
+    storageKey: "pi-web:polyforge-messages-list-width",
+    widthRef: listWidthRef,
+  });
+  const reclampListWidth = listResizer.reclampWidth;
+
+  // The hook refits on window resize only; a dock drag (or a sheet change)
+  // changes this surface's own width, so re-fit from its box as well.
+  useEffect(() => {
+    const element = messagesPanelRef.current;
+    if (!element || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => { reclampListWidth(); });
+    observer.observe(element);
+    return () => observer.disconnect();
+    // The unavailable/capable branches and the list share this ref; when the
+    // rendered branch changes, observe the element that is actually there.
+  }, [reclampListWidth, pfPresent, capable]);
 
   const selectedRow = selectedConversation
     ? conversations.find((conversation) => conversation.id === selectedConversation)
@@ -231,6 +319,29 @@ export function PolyforgeMessages({
     }
   }, [analyzing, onAnalyze]);
 
+  // One membership change, behind a confirmation naming the project and the
+  // display name (or the placeholder). Cancelling returns before any request.
+  // The groups change only through the hook's awaited re-read; a refusal
+  // shows pf's text in that group and changes nothing shown.
+  const changeMembership = useCallback(async (action: "add" | "remove", project: string, user: PolyforgeContact) => {
+    setAddingTo(null);
+    if (membershipBusy) return;
+    const name = user.display_name.trim() || t("polyforge.messages.unknownUser");
+    const question = action === "add"
+      ? t("polyforge.messages.confirmAddMember", { name, project })
+      : t("polyforge.messages.confirmRemoveMember", { name, project });
+    if (!window.confirm(question)) return;
+    setMembershipBusy(true);
+    setMembershipError(null);
+    try {
+      await onChangeMembership({ action, project, userId: user.id });
+    } catch (changeError) {
+      setMembershipError({ project, text: changeError instanceof Error ? changeError.message : String(changeError) });
+    } finally {
+      setMembershipBusy(false);
+    }
+  }, [membershipBusy, onChangeMembership, t]);
+
   // The composer: it sends to the open conversation's peer or the open
   // silent contact (no recipient field — the header names the peer).
   const composer = (
@@ -259,26 +370,26 @@ export function PolyforgeMessages({
   );
 
   if (!pfPresent) {
-    return <div style={{ padding: 16, color: "var(--text-dim)", fontSize: 12 }}>{t("polyforge.unavailable")}</div>;
+    return <div ref={messagesPanelRef} style={{ padding: 16, color: "var(--text-dim)", fontSize: 12 }}>{t("polyforge.unavailable")}</div>;
   }
   if (!capable) {
     return (
-      <div style={{ padding: 16, display: "flex", flexDirection: "column", gap: 6, fontSize: 12 }}>
+      <div ref={messagesPanelRef} style={{ padding: 16, display: "flex", flexDirection: "column", gap: 6, fontSize: 12 }}>
         <span style={{ color: "var(--text)" }}>{t("polyforge.messages.upgrade")}</span>
         <span style={{ color: "var(--text-dim)" }}>{reason ?? t("polyforge.messages.upgradeReason")}</span>
       </div>
     );
   }
 
+  // One tree and one two-pane layout for desktop and mobile:
+  // the list column and the chat pane are always side by side.
   const chatOpen = selectedConversation !== null || selectedContact !== null;
-  // One tree for desktop and mobile: mobile shows one view at a time (the
-  // list while nothing is open, the chat while a conversation or contact is
-  // open); the ack and scroll refs survive the switch because nothing
-  // remounts.
-  const showListColumn = !isMobile || !chatOpen;
-  const showChatPane = !isMobile || chatOpen;
 
   const sections = groupConversations(conversations);
+  // a contact listed in a project group lives there; the
+  // direct area keeps its conversation rows and only the ungrouped silent
+  // contacts (all of them when no group renders).
+  const contacts = contactsOutsideGroups(configuredContacts, groups);
   const direct = directRows(conversations, contacts);
 
   const renderRow = (conversation: PolyforgeConversation) => {
@@ -336,37 +447,213 @@ export function PolyforgeMessages({
     );
   };
 
+  // A project group's contact row: the display name (or the
+  // placeholder) and no unread badge. A contact with a direct conversation
+  // opens it; one without opens the empty pane — nothing is created or
+  // acknowledged. Re-clicking what is already open is a no-op.
+  const renderGroupContact = (project: string, contact: PolyforgeContact) => {
+    const name = contact.display_name.trim();
+    const existing = conversationForContact(conversations, contact.id);
+    const open = existing
+      ? existing.id === selectedConversation
+      : selectedConversation === null && selectedContact?.id === contact.id;
+    return (
+      <div key={`group:${project}:${contact.id}`} style={{ display: "flex", alignItems: "center" }}>
+        <button
+          type="button"
+          onClick={() => {
+            if (open) return;
+            if (existing) onSelectConversation(existing.id);
+            else onSelectContact(contact);
+          }}
+          style={{
+            display: "flex", alignItems: "center", gap: 6, padding: "6px 8px 6px 16px", flex: 1, minWidth: 0,
+            background: open ? "var(--bg-selected)" : "none",
+            border: "none", cursor: "pointer", textAlign: "left", font: "inherit",
+          }}
+        >
+          <Avatar seed={contact.id} name={name} />
+          <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 12, color: "var(--text)" }}>
+            {name || t("polyforge.messages.unknownUser")}
+          </span>
+        </button>
+        {membershipAdmin === true && (
+          <button
+            type="button"
+            disabled={membershipBusy}
+            onClick={() => void changeMembership("remove", project, contact)}
+            aria-label={t("polyforge.messages.removeMember", { name: name || t("polyforge.messages.unknownUser"), project })}
+            style={{ flexShrink: 0, background: "none", border: "none", color: "var(--text-muted)", cursor: membershipBusy ? "default" : "pointer", fontSize: 12, padding: "0 8px" }}
+          >
+            ×
+          </button>
+        )}
+      </div>
+    );
+  };
+
+  // The add picker: the human users not already in the group
+  // (machines never arrive; the caller is dropped server-side), by display
+  // name. Choosing one asks for the confirmation; there is no role choice.
+  const renderPicker = (group: PolyforgeProjectGroup) => {
+    const members = new Set(group.contacts.map((contact) => contact.id));
+    const candidates = users.filter((user) => !members.has(user.id)).sort(compareContactsByName);
+    return (
+      <div style={{ margin: "2px 8px 4px 16px", border: "1px solid var(--border)", borderRadius: 4, display: "flex", flexDirection: "column" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "4px 6px", fontSize: 11, color: "var(--text-dim)" }}>
+          <span style={{ flex: 1, minWidth: 0 }}>{t("polyforge.messages.pickMember")}</span>
+          <button type="button" onClick={() => setAddingTo(null)}
+            style={{ background: "none", border: "none", color: "var(--text-muted)", cursor: "pointer", fontSize: 11, padding: 0 }}>
+            {t("polyforge.messages.pickClose")}
+          </button>
+        </div>
+        {candidates.map((user) => {
+          const name = user.display_name.trim();
+          return (
+            <button
+              key={`pick:${group.project}:${user.id}`}
+              type="button"
+              onClick={() => void changeMembership("add", group.project, user)}
+              style={{ display: "flex", alignItems: "center", gap: 6, padding: "4px 6px", background: "none", border: "none", cursor: "pointer", textAlign: "left", font: "inherit" }}
+            >
+              <Avatar seed={user.id} name={name} />
+              <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 12, color: "var(--text)" }}>
+                {name || t("polyforge.messages.unknownUser")}
+              </span>
+            </button>
+          );
+        })}
+        {candidates.length === 0 && (
+          <div style={{ padding: "4px 6px", fontSize: 11, color: "var(--text-dim)" }}>{t("polyforge.messages.pickEmpty")}</div>
+        )}
+      </div>
+    );
+  };
+
+  // One project group: a header button (name, count, aria-expanded) that
+  // folds it — expanded unless this browser stored it collapsed — then its
+  // rows, its read-failure note, or the explicit empty placeholder. The
+  // count is the group's contact count whether or not it is folded.
+  const renderProjectGroup = (group: PolyforgeProjectGroup) => {
+    const expanded = !collapsed.has(group.project);
+    const bodyId = `pf-messages-group-${group.project}`;
+    return (
+      <div key={`project:${group.project}`}>
+        <div style={{ display: "flex", alignItems: "center" }}>
+          <button
+            type="button"
+            aria-expanded={expanded}
+            aria-controls={bodyId}
+            aria-label={t("polyforge.messages.projectGroupLabel", { project: group.project, count: group.contacts.length })}
+            onClick={() => toggleProject(group.project)}
+            style={{
+              display: "flex", alignItems: "center", gap: 4, padding: "4px 8px", flex: 1, minWidth: 0,
+              background: "none", border: "none", cursor: "pointer", textAlign: "left", font: "inherit",
+              fontSize: 11, color: "var(--text-muted)",
+            }}
+          >
+            <span aria-hidden="true" style={{ width: 10, flexShrink: 0 }}>{expanded ? "▾" : "▸"}</span>
+            <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{group.project}</span>
+            <span style={{ flexShrink: 0, color: "var(--text-dim)" }}>{group.contacts.length}</span>
+          </button>
+          {membershipAdmin === true && !group.error && (
+            <button
+              type="button"
+              disabled={membershipBusy}
+              onClick={() => { setMembershipError(null); setAddingTo(addingTo === group.project ? null : group.project); }}
+              aria-label={t("polyforge.messages.addMember", { project: group.project })}
+              style={{ flexShrink: 0, background: "none", border: "none", color: "var(--text-muted)", cursor: membershipBusy ? "default" : "pointer", fontSize: 13, padding: "0 8px" }}
+            >
+              +
+            </button>
+          )}
+        </div>
+        {addingTo === group.project && membershipAdmin === true && renderPicker(group)}
+        {membershipError?.project === group.project && (
+          <div role="alert" style={{ padding: "2px 8px 4px 16px", fontSize: 11, color: "#dc2626", overflowWrap: "anywhere" }}>
+            {t("polyforge.messages.membershipFailed")}: {membershipError.text}
+          </div>
+        )}
+        {expanded && (
+          <div id={bodyId}>
+            {group.error ? (
+              <div style={{ padding: "2px 8px 4px 16px", fontSize: 11, color: "#dc2626", overflowWrap: "anywhere" }}>
+                {t("polyforge.messages.groupReadFailed")}: {group.error}
+              </div>
+            ) : group.contacts.length === 0 ? (
+              <div data-empty-group={group.project} style={{ padding: "2px 8px 4px 16px", fontSize: 11, color: "var(--text-dim)" }}>
+                {t("polyforge.messages.groupEmpty")}
+              </div>
+            ) : (
+              group.contacts.map((contact) => renderGroupContact(group.project, contact))
+            )}
+          </div>
+        )}
+      </div>
+    );
+  };
+
   // The list column: the flat 单聊 area (conversation rows first, then the
   // silent contacts by display name, one row per peer) and the 群聊 section,
-  // each with its empty placeholder. On desktop the column is a fixed clamp
-  // of the panel width that never shrinks (the chat pane takes the rest); on
-  // mobile it is the single view while nothing is open, so it fills the
-  // sheet's full width with no desktop divider.
+  // each with its empty placeholder. On desktop its left divider is the
+  // resize separator; the stored width survives a narrow dock
+  // and the chat pane always keeps its 200px floor. Mobile keeps the fixed
+  // clamp with no handle.
   const listColumn = (
     <div
+      ref={listResizer.panelRef}
       style={{
-        width: isMobile ? "100%" : "clamp(120px, 35%, 220px)",
+        position: "relative",
+        width: isMobile ? "clamp(120px, 35%, 220px)" : "var(--pf-messages-list-width)",
         flexShrink: 0, minHeight: 0,
         display: "flex", flexDirection: "column",
-        borderLeft: isMobile ? "none" : "1px solid var(--border)",
-        overflowY: "auto",
-      }}
+        "--pf-messages-list-width": `${listResizer.width}px`,
+      } as React.CSSProperties}
     >
-      {error && <div style={{ padding: "6px 8px", color: "#dc2626", fontSize: 11, flexShrink: 0 }}>{error}</div>}
-      <div style={{ padding: "6px 8px 2px", fontSize: 11, color: "var(--text-dim)", flexShrink: 0 }}>
-        {t("polyforge.messages.sectionDirect")}
-      </div>
-      {direct.map((row) => (row.kind === "conversation" ? renderRow(row.conversation) : renderContact(row.contact)))}
-      {direct.length === 0 && (
-        <div style={{ padding: "4px 8px", fontSize: 11, color: "var(--text-dim)" }}>{t("polyforge.messages.empty")}</div>
+      {!isMobile && (
+        <div
+          {...listResizer.separatorProps}
+          aria-controls="pf-messages-list"
+          className={`pf-messages-resize-handle${listResizer.isResizing ? " is-resizing" : ""}`}
+          data-resize-handle="polyforge-messages-list"
+          title={`${t("polyforge.messages.resizeList")}: ${t("layout.resizeHint")}`}
+        />
       )}
-      <div style={{ padding: "6px 8px 2px", fontSize: 11, color: "var(--text-dim)", flexShrink: 0 }}>
-        {t("polyforge.messages.sectionGroups")}
+      <div
+        id="pf-messages-list"
+        style={{
+          flex: 1, minHeight: 0,
+          borderLeft: "1px solid var(--border)",
+          overflowY: "auto",
+        }}
+      >
+        {error && <div style={{ padding: "6px 8px", color: "#dc2626", fontSize: 11, flexShrink: 0 }}>{error}</div>}
+        <div style={{ padding: "6px 8px 2px", fontSize: 11, color: "var(--text-dim)", flexShrink: 0 }}>
+          {t("polyforge.messages.sectionDirect")}
+        </div>
+        {direct.map((row) => (row.kind === "conversation" ? renderRow(row.conversation) : renderContact(row.contact)))}
+        {direct.length === 0 && (
+          <div style={{ padding: "4px 8px", fontSize: 11, color: "var(--text-dim)" }}>{t("polyforge.messages.empty")}</div>
+        )}
+        {groups.length > 0 && (
+          <div style={{ padding: "6px 8px 2px", fontSize: 11, color: "var(--text-dim)", flexShrink: 0 }}>
+            {t("polyforge.messages.sectionProjects")}
+          </div>
+        )}
+        {groups.length > 0 && membershipAdmin === false && (
+          <div style={{ padding: "2px 8px 4px", fontSize: 11, color: "var(--text-muted)" }}>
+            {t("polyforge.messages.membershipNeedsAdmin")}
+          </div>
+        )}
+        {groups.map(renderProjectGroup)}
+        <div style={{ padding: "6px 8px 2px", fontSize: 11, color: "var(--text-dim)", flexShrink: 0 }}>
+          {t("polyforge.messages.sectionGroups")}
+        </div>
+        {sections.groups.map(renderRow)}
+        {sections.groups.length === 0 && (
+          <div style={{ padding: "4px 8px", fontSize: 11, color: "var(--text-dim)" }}>{t("polyforge.messages.noGroups")}</div>
+        )}
       </div>
-      {sections.groups.map(renderRow)}
-      {sections.groups.length === 0 && (
-        <div style={{ padding: "4px 8px", fontSize: 11, color: "var(--text-dim)" }}>{t("polyforge.messages.noGroups")}</div>
-      )}
     </div>
   );
 
@@ -473,9 +760,9 @@ export function PolyforgeMessages({
   // row-reverse keeps the column flush right while it stays first in DOM
   // order (the layout's own oracle).
   return (
-    <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "row-reverse" }}>
-      {showListColumn && listColumn}
-      {showChatPane && chatPane}
+    <div ref={messagesPanelRef} style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "row-reverse" }}>
+      {listColumn}
+      {chatPane}
     </div>
   );
 }

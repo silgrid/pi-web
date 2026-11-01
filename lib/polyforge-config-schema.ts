@@ -67,3 +67,41 @@ export function configValueError(key: string, value: unknown, schema: PolyforgeC
   if (typeof value !== "string" || value.trim() === "") return "a value is required";
   return null;
 }
+
+/** The workspace step keys the panel writes:
+ *  `steps.<project>.<step-id>.models` (a candidate list) and
+ *  `steps.<project>.<step-id>.attrs.<name>` (an integer attr — the only attr
+ *  kind the panel edits). Shared by the client form and the write route, so
+ *  the allowlist and the guard are one fact. */
+export type StepWriteKey = { project: string; step: string; attr?: string };
+
+const STEP_SEGMENT = /^[A-Za-z0-9_-]+$/;
+
+export function parseStepWriteKey(key: string): StepWriteKey | null {
+  const parts = key.split(".");
+  if (parts[0] !== "steps" || !parts.slice(1).every((part) => STEP_SEGMENT.test(part))) return null;
+  if (parts.length === 4 && parts[3] === "models") return { project: parts[1], step: parts[2] };
+  if (parts.length === 5 && parts[3] === "attrs") return { project: parts[1], step: parts[2], attr: parts[4] };
+  return null;
+}
+
+export function stepWriteKey(project: string, step: string, attr?: string): string {
+  return attr ? `steps.${project}.${step}.attrs.${attr}` : `steps.${project}.${step}.models`;
+}
+
+/** The form-side guard of a step-key value: a models list of non-empty
+ *  candidate strings (pf alone judges the candidate format), or an integer
+ *  attr ≥ 0. A guard, not a validator — pf stays the authority. */
+export function stepValueError(key: string, value: unknown): string | null {
+  const parsed = parseStepWriteKey(key);
+  if (!parsed) return "not a writable step key";
+  if (!parsed.attr) {
+    if (!Array.isArray(value) || value.length === 0) return "at least one model candidate is required";
+    if (value.some((item) => typeof item !== "string" || item.trim() === "")) return "model candidates must be non-empty strings";
+    return null;
+  }
+  const n = typeof value === "number" ? value : Number(String(value).trim());
+  if (!Number.isInteger(n) || String(value).trim() === "") return "an integer is required";
+  if (n < 0) return "must be at least 0";
+  return null;
+}

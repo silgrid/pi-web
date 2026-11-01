@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useI18n } from "@/hooks/useI18n";
 import { MEMORY_COLLAPSE_BYTES, isMemoryBodyTruncated } from "@/lib/polyforge-memory-pure";
 import {
+  TASK_REPORTER_MACHINE,
   TASK_STATE_FILTERS,
   filterTaskRows,
   formatTaskAge,
@@ -12,6 +13,7 @@ import {
   taskDurationSeconds,
   taskEndedAgo,
   taskProjectOptions,
+  taskReporterOptions,
   type PolyforgeTaskDetail,
   type PolyforgeTaskRow,
   type PolyforgeTaskStateFilter,
@@ -30,7 +32,9 @@ import { MarkdownBody } from "./MarkdownBody";
  * list read each time the tab is opened (this component mounts), one detail
  * read per selection, plus one list re-read when the status snapshot's task
  * counts change while the tab is open; searching, filtering
- * and going back read nothing. No poll, no
+ * and going back read nothing. adds the third list read: the
+ * ↻ button on the search row re-reads the list on each click (the only way
+ * to refresh while the count key holds). No poll, no
  * storage, and no spawn or cancel control: the tab is a read surface.
  *
  * the list is a responsive grid of discrete blocks (state
@@ -38,6 +42,20 @@ import { MarkdownBody } from "./MarkdownBody";
  * block's duration counts from `started_at` on a local 1 s render clock —
  * a clock, not a poll: it reads `Date.now()` and fetches nothing, and it
  * runs only while a running task is listed.
+ *
+ * below the prompt summary each block shows pf's
+ * `report_tail` as plain text (React-escaped, so Markdown stays literal),
+ * clipped to two lines by CSS only — the client never cuts it or appends an
+ * ellipsis (pf already bounded it). The placeholder is keyed on state, never
+ * on an empty tail: a running block always shows the dim 生成中…
+ * (`polyforge.tasks.tailRunning`), even with a stale non-empty tail; any
+ * other block whose tail is empty, whitespace-only or absent shows the dim
+ * 暂无报告 (`polyforge.tasks.tailEmpty`). The tail rides the one list read:
+ * no extra read. A third select filters by reporter: 全部发起人, the human
+ * display names ascending, then 机器发起 (`machine`) last — options from the
+ * whole loaded list (`taskReporterOptions`, never cascading), composed with
+ * search/project/state in the one `filterTaskRows`; a change only sets
+ * component state (no read, no storage, no URL — a reload resets it).
  */
 
 interface ListResponse {
@@ -94,6 +112,13 @@ export function PolyforgeTasks({
   // memory only (a reload resets them), never a read.
   const [projectFilter, setProjectFilter] = useState("");
   const [stateFilter, setStateFilter] = useState<PolyforgeTaskStateFilter>("all");
+  // the reporter filter — null = 全部发起人; component memory
+  // only, like the other two.
+  const [reporterFilter, setReporterFilter] = useState<string | null>(null);
+  // the refresh button's busy state. Its one source is the
+  // newest list read still in flight — however it started (the mount read,
+  // a count change or the button). Only that newest read clears it.
+  const [listRefreshing, setListRefreshing] = useState(false);
 
   const [selected, setSelected] = useState<string | null>(null);
   const [detail, setDetail] = useState<PolyforgeTaskDetail | null>(null);
@@ -103,18 +128,23 @@ export function PolyforgeTasks({
   // never overwrites a later selection's answer).
   const detailSeqRef = useRef(0);
 
-  // The list read: once when the sub-tab opens (the component mounts), and
-  // once more per status task-count change while it stays mounted — never
+  // The list read: once when the sub-tab opens (the component mounts), once
+  // more per status task-count change while it stays mounted
+  // and once per click of the search row's ↻ button never
   // on a timer, a search, a filter, a detail or a back. Only the newest read
-  // may write the list.
+  // may write the list, and only it clears the refreshing state: a stale read
+  // that lands late neither writes nor ends the newer one's spin.
   const listSeqRef = useRef(0);
   const readList = useCallback(() => {
     const seq = ++listSeqRef.current;
+    setListRefreshing(true);
     fetch("/api/polyforge/tasks")
       .then(async (response) => {
         const body = await response.json() as ListResponse;
         if (seq !== listSeqRef.current) return;
+        setListRefreshing(false);
         if (!response.ok) {
+          // Keep the list already on screen; the red listError sits above it.
           setListError(body.error ?? t("polyforge.tasks.error"));
           return;
         }
@@ -122,7 +152,9 @@ export function PolyforgeTasks({
         setListError(body.error ?? null);
       })
       .catch(() => {
-        if (seq === listSeqRef.current) setListError(t("polyforge.tasks.error"));
+        if (seq !== listSeqRef.current) return;
+        setListRefreshing(false);
+        setListError(t("polyforge.tasks.error"));
       });
   }, [t]);
   // The mount read. The ref keeps it to exactly one read per mounted tab
@@ -260,8 +292,9 @@ export function PolyforgeTasks({
   }
 
   const rows = Array.isArray(list.tasks) ? list.tasks : [];
-  const sections = splitTaskSections(filterTaskRows(rows, { search, project: projectFilter, state: stateFilter }));
+  const sections = splitTaskSections(filterTaskRows(rows, { search, project: projectFilter, state: stateFilter, reporter: reporterFilter }));
   const projects = taskProjectOptions(rows);
+  const reporters = taskReporterOptions(rows);
   const stateLabel = (state: string) => (TASK_STATE_KEYS.has(state) ? t(`polyforge.tasks.state.${state}`) : state);
   const renderRow = (row: PolyforgeTaskRow) => {
     const duration = taskDurationSeconds(row, now);
@@ -282,6 +315,13 @@ export function PolyforgeTasks({
         </span>
         <span style={{ fontSize: 11, color: "var(--text-dim)", fontFamily: "var(--font-mono)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{row.project || "—"}</span>
         <span style={{ display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden", lineHeight: "16px", overflowWrap: "anywhere" }}>{row.prompt_summary}</span>
+        {row.state === "running" ? (
+          <span style={{ fontSize: 11, color: "var(--text-dim)" }}>{t("polyforge.tasks.tailRunning")}</span>
+        ) : row.report_tail?.trim() ? (
+          <span style={{ display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden", lineHeight: "16px", overflowWrap: "anywhere", fontSize: 11, color: "var(--text-muted)" }}>{row.report_tail}</span>
+        ) : (
+          <span style={{ fontSize: 11, color: "var(--text-dim)" }}>{t("polyforge.tasks.tailEmpty")}</span>
+        )}
         <span style={{ display: "flex", gap: 6, minWidth: 0, fontSize: 11, color: "var(--text-dim)" }}>
           <span style={{ fontFamily: "var(--font-mono)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>{row.id}</span>
           {endedAgo !== undefined && (
@@ -291,11 +331,12 @@ export function PolyforgeTasks({
       </button>
     );
   };
-  // One responsive grid per section (the job cards' column
-  // minimum): two blocks side by side already at the 375px sheet and the
-  // 340px dock, more as the main area widens, separated by the gap.
+  // One responsive grid per section with the 150px column minimum the Jobs
+  // cards share: two blocks side by side at the 460px dock and
+  // the 375px sheet (beside its 40px rail), one at the 340px dock, more as the
+  // main area widens, separated by the gap.
   const grid = (rowsInSection: PolyforgeTaskRow[]) => (
-    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(112px, 1fr))", gap: 8, padding: 8, flexShrink: 0 }}>
+    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 8, padding: 8, flexShrink: 0 }}>
       {rowsInSection.map(renderRow)}
     </div>
   );
@@ -305,14 +346,35 @@ export function PolyforgeTasks({
   return (
     <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
       <div style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", flexShrink: 0 }}>
-        <input
-          type="search"
-          value={search}
-          onChange={(event) => setSearch(event.target.value)}
-          placeholder={t("polyforge.tasks.searchPlaceholder")}
-          aria-label={t("polyforge.tasks.searchPlaceholder")}
-          style={{ width: "100%", boxSizing: "border-box", background: "var(--bg)", color: "var(--text)", border: "1px solid var(--border)", borderRadius: 4, padding: "4px 6px", fontSize: 12 }}
-        />
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <input
+            type="search"
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+            placeholder={t("polyforge.tasks.searchPlaceholder")}
+            aria-label={t("polyforge.tasks.searchPlaceholder")}
+            style={{ flex: 1, minWidth: 0, boxSizing: "border-box", background: "var(--bg)", color: "var(--text)", border: "1px solid var(--border)", borderRadius: 4, padding: "4px 6px", fontSize: 12 }}
+          />
+          {/* the one manual list re-read. It spins, disables
+              and reports busy while the newest read is in flight (the count
+              key's re-read included); disabled keeps a click from stacking
+              a second read. Only the list view renders it. */}
+          <button
+            type="button"
+            data-pf-tasks-refresh=""
+            onClick={() => { readList(); }}
+            disabled={listRefreshing}
+            aria-busy={listRefreshing}
+            title={listRefreshing ? t("polyforge.refreshing") : t("polyforge.refresh")}
+            aria-label={listRefreshing ? t("polyforge.refreshing") : t("polyforge.refresh")}
+            style={{ width: 26, height: 26, flexShrink: 0, boxSizing: "border-box", display: "flex", alignItems: "center", justifyContent: "center", padding: 0, background: "var(--bg-hover)", color: "var(--text-muted)", border: "1px solid var(--border)", borderRadius: 4, cursor: listRefreshing ? "default" : "pointer" }}
+          >
+            <svg className={listRefreshing ? "animate-spin" : undefined} width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M21 12a9 9 0 1 1-2.64-6.36L21 8" />
+              <path d="M21 3v5h-5" />
+            </svg>
+          </button>
+        </div>
         <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
           <select value={projectFilter} onChange={(event) => setProjectFilter(event.target.value)}
             aria-label={t("polyforge.tasks.filterProject")} title={t("polyforge.tasks.filterProject")}
@@ -326,6 +388,13 @@ export function PolyforgeTasks({
             {TASK_STATE_FILTERS.map((state) => (
               <option key={state} value={state}>{state === "all" ? t("polyforge.tasks.all") : t(`polyforge.tasks.state.${state}`)}</option>
             ))}
+          </select>
+          <select value={reporterFilter ?? ""} onChange={(event) => setReporterFilter(event.target.value || null)}
+            aria-label={t("polyforge.tasks.filterReporter")} title={t("polyforge.tasks.filterReporter")}
+            style={{ flex: 1, minWidth: 0, background: "var(--bg)", color: "var(--text)", border: "1px solid var(--border)", borderRadius: 4, padding: "3px 4px", fontSize: 12 }}>
+            <option value="">{t("polyforge.tasks.filterAllReporters")}</option>
+            {reporters.humans.map((reporter) => <option key={reporter} value={reporter}>{reporter}</option>)}
+            {reporters.machine && <option value={TASK_REPORTER_MACHINE}>{t("polyforge.tasks.reporterMachine")}</option>}
           </select>
         </div>
       </div>

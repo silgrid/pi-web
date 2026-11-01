@@ -18,6 +18,8 @@
 //   - AC3: the deploy lane's ending fails when the configured service is not
 //     reachable, or when its unauthenticated API is not refused (401); a
 //     healthy service (GET /login 200, unauthenticated API 401) succeeds.
+//   - an authenticated GET / that answers 5xx fails the deploy
+//     even though /login stays 200 and the anonymous API stays 401.
 //   - deploy.env values may carry an unquoted trailing
 //     ` # comment`; a deploy.env that is not 0600 deploys with one named
 //     `warn:` line; a probe failure after the swap reports state=changed; a
@@ -27,7 +29,10 @@
 //     --max-time) and no warning is printed; with the edge refusing, exactly
 //     one `warn: TLS edge unreachable (<host>)` line is printed while the lane
 //     still exits 0 and reports state=deployed; with no PI_WEB_ALLOWED_HOSTS
-//     the edge probe is skipped with one line and no https request is made.
+//     the edge probe is skipped with exactly one `warn: TLS edge probe
+//     skipped: PI_WEB_ALLOWED_HOSTS is not set (no edge host to probe)` line
+//     naming the missing dependency and no https request is
+//     made.
 //
 // Fully offline: PATH stubs stand in for gh/npm/pi-web, a curl stub answers
 // every https:// request (plain http goes to the real curl), HOME is a scratch
@@ -87,6 +92,7 @@ const sessions = [
   `piweb-shape-mode644-${process.pid}`,
   `piweb-shape-nocurl-probe-${process.pid}`,
   `piweb-shape-nocurl-edge-${process.pid}`,
+  `piweb-shape-ac3-login500-${process.pid}`,
 ];
 
 // ---------------------------------------------------------------------------
@@ -172,14 +178,33 @@ const piwebStub = [
   '      response.end("login");',
   "      return;",
   "    }",
+  '    const cookie = request.headers.cookie ?? "";',
+  '    const authorization = request.headers.authorization ?? "";',
+  '    const basic = authorization.startsWith("Basic ") ? Buffer.from(authorization.slice(6), "base64").toString("utf8") : "";',
+  '    const authenticatedRequest = cookie.includes("pi_web_session=") || (basic.startsWith("pi:") && basic.slice(3) === (process.env.PI_WEB_PASSWORD ?? ""));',
   '    if (request.url === "/api/web-auth") {',
+  '      if (request.method === "POST") {',
+  '        response.writeHead(200, { "Content-Type": "application/json", "Set-Cookie": "pi_web_session=stub; Path=/; HttpOnly" });',
+  '        response.end(JSON.stringify({ ok: true }));',
+  "        return;",
+  "      }",
   '      response.writeHead(200, { "Content-Type": "application/json" });',
-  '      response.end(JSON.stringify({ enabled: true }));',
+  '      response.end(JSON.stringify({ enabled: true, authenticated: authenticatedRequest }));',
   "      return;",
   "    }",
   '    if (request.url.startsWith("/api/")) {',
   '      response.writeHead(401, { "WWW-Authenticate": \'Basic realm="Pi Web"\' });',
   '      response.end("Authentication required");',
+  "      return;",
+  "    }",
+  '    if (!authenticatedRequest) {',
+  '      response.writeHead(307, { Location: "/login" });',
+  "      response.end();",
+  "      return;",
+  "    }",
+  '    if (mode === "authenticated-500") {',
+  '      response.writeHead(500, { "Content-Type": "text/html" });',
+  '      response.end("broken authenticated page");',
   "      return;",
   "    }",
   '    response.writeHead(307, { Location: "/login" });',
@@ -388,6 +413,7 @@ const recordFiles = [
   "edge-reach.jsonl",
   "edge-refuse.jsonl",
   "edge-none.jsonl",
+  "ac3-authenticated-500.jsonl",
 ];
 
 // Each scenario starts from no scratch service at all, so a late process
@@ -579,7 +605,13 @@ try {
       rmSync(record, { force: true });
       rmSync(npmLog, { force: true });
       rmSync(ghLog, { force: true });
-      const session = sessions[5 + ["healthy", "unreachable", "open"].indexOf(mode)];
+      const session = {
+        healthy: sessions[5],
+        unreachable: sessions[6],
+        open: sessions[7],
+        "authenticated-500": sessions[15],
+      }[mode];
+      assert.ok(session, `fixture sanity: no scratch session for mode ${mode}`);
       writeStubConfig(record, mode === "healthy" ? "serve" : mode);
       const env = baseEnv(session, {
         PIWEB_HOST: "127.0.0.1",
@@ -635,6 +667,24 @@ try {
         `a deploy whose API answers without authentication must fail (configured password; observed at ${port})\n${output(result)}`,
       );
       assert.doesNotMatch(output(result), /^state=deployed$/m, "an unauthenticated service must not be reported as deployed");
+    },
+  });
+
+  await ac3({
+    title: "AC3/a login-page 200 hides an authenticated / that answers 500; the deploy fails",
+    mode: "authenticated-500",
+    check: async ({ result, port }) => {
+      // /login stays 200 and the anonymous API stays 401, exactly the shape
+      // that let the v0.1.7 incident pass a deploy while every logged-in page
+      // was a 500. Only an authenticated GET / exposes it.
+      await waitForStatus(`http://127.0.0.1:${port}/login`, 200);
+      assert.equal(await httpStatus(`http://127.0.0.1:${port}/api/sessions`), 401);
+      assert.notEqual(
+        result.status,
+        0,
+        `a deploy whose authenticated / answers 5xx must fail (observed at ${port})\n${output(result)}`,
+      );
+      assert.doesNotMatch(output(result), /^state=deployed$/m, "a service with a broken authenticated page must not be reported as deployed");
     },
   });
 
@@ -807,7 +857,7 @@ try {
   });
 
   await edge({
-    title: "no PI_WEB_ALLOWED_HOSTS skips the TLS edge probe with one line",
+    title: "/#193: no PI_WEB_ALLOWED_HOSTS skips the TLS edge probe with one line naming it",
     kind: "none",
     httpsMode: "reach",
     allowedHosts: undefined,
@@ -816,9 +866,9 @@ try {
       assert.equal(result.status, 0, `a deploy without allowed hosts must succeed\n${report}`);
       assert.match(result.stdout, /^state=deployed$/m, "a deploy without allowed hosts must report state=deployed");
       assert.equal(
-        (result.stdout.match(/^==> PI_WEB_ALLOWED_HOSTS is empty; skipping the TLS edge probe\.$/gm) ?? []).length,
+        (result.stdout.match(/^warn: TLS edge probe skipped: PI_WEB_ALLOWED_HOSTS is not set \(no edge host to probe\)$/gm) ?? []).length,
         1,
-        `the skip must be announced with exactly one line\n${report}`,
+        `the skip must be announced with exactly one warning naming PI_WEB_ALLOWED_HOSTS\n${report}`,
       );
       assert.doesNotMatch(report, /warn: TLS edge unreachable/, `a skipped edge probe must not warn\n${report}`);
       assert.equal(httpsRequests().length, 0, `no https request may be made; observed ${JSON.stringify(httpsRequests())}`);

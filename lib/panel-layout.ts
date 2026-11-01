@@ -17,19 +17,50 @@ export const POLYFORGE_DOCK_DEFAULT_WIDTH = 460;
 export const POLYFORGE_DOCK_MIN_WIDTH = 340;
 export const POLYFORGE_DOCK_MAX_WIDTH = 6912;
 
+// The Messages tab's list column: desktop only and resizable
+// from its left divider. The default stays the pre-#222 35% clamp; the live
+// cap leaves the chat pane at least 200px and never exceeds 480px.
+export const POLYFORGE_MESSAGES_LIST_MIN_WIDTH = 120;
+export const POLYFORGE_MESSAGES_LIST_MAX_WIDTH = 480;
+export const POLYFORGE_MESSAGES_LIST_CHAT_MIN_WIDTH = 200;
+export const POLYFORGE_MESSAGES_LIST_DEFAULT_MIN_WIDTH = 120;
+export const POLYFORGE_MESSAGES_LIST_DEFAULT_MAX_WIDTH = 220;
+
 /** The one block treatment of the Polyforge Work tab: the
  *  job card and the task block share it. Existing CSS variables only; the
- *  spacing between blocks is the container's `gap`. */
+ *  spacing between blocks is the container's `gap`. owner 有意变更
+ *  the shared padding is 6px 8px (was 8px 10px), so the Jobs
+ *  cards and the Tasks blocks both get denser — one block treatment kept. */
 export const POLYFORGE_BLOCK_STYLE = {
   background: "none",
   border: "1px solid var(--border)",
   borderRadius: 6,
-  padding: "8px 10px",
+  padding: "6px 8px",
   boxSizing: "border-box",
 } as const;
 
 export function getPolyforgeDockMaxWidth(viewportWidth: number): number {
   return Math.round(viewportWidth * 0.9);
+}
+
+/** The Messages list's live cap: min(480px, panel width − 200px), so the
+ *  chat pane keeps at least its 200px floor; the hook raises a cap below the
+ *  120px minimum back to 120 (the minimum wins). */
+export function getPolyforgeMessagesListMaxWidth(panelWidth: number): number {
+  return Math.min(
+    POLYFORGE_MESSAGES_LIST_MAX_WIDTH,
+    Math.round(panelWidth - POLYFORGE_MESSAGES_LIST_CHAT_MIN_WIDTH),
+  );
+}
+
+/** The Messages list's default at a given panel width: 35% clamped to
+ *  120–220px, identical to the pre-#222 fixed clamp. */
+export function getPolyforgeMessagesListDefaultWidth(panelWidth: number): number {
+  return clampPanelWidth(
+    panelWidth * 0.35,
+    POLYFORGE_MESSAGES_LIST_DEFAULT_MIN_WIDTH,
+    POLYFORGE_MESSAGES_LIST_DEFAULT_MAX_WIDTH,
+  );
 }
 
 // Mobile sheet heights (pi#120): the bottom sheets (Polyforge, bg-tasks)

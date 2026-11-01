@@ -21,6 +21,11 @@
 //
 //   node e2e/session-stall-recovery.mjs
 //   npm run test:e2e:all -- session-stall-recovery.mjs
+//
+// e2e/all: isolated — BOUND_MS is a wall-clock responsiveness assertion, so
+// the parallel browser pool must not share the host with it: under that pool a
+// loaded box observed 20167ms against the 10000ms bound, while the suite alone
+// passes ( full-bar run).
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer as createHttpServer } from "node:http";

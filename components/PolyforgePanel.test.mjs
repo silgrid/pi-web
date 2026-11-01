@@ -5,6 +5,7 @@ import { stripTypeScriptTypes } from "node:module";
 import vm from "node:vm";
 
 const source = await readFile(new URL("./PolyforgePanel.tsx", import.meta.url), "utf8");
+const panelLayoutSource = await readFile(new URL("../lib/panel-layout.ts", import.meta.url), "utf8");
 const enSource = await readFile(new URL("../lib/i18n/messages/en.ts", import.meta.url), "utf8");
 const zhCNSource = await readFile(new URL("../lib/i18n/messages/zh-CN.ts", import.meta.url), "utf8");
 const zhTWSource = await readFile(new URL("../lib/i18n/messages/zh-TW.ts", import.meta.url), "utf8");
@@ -62,7 +63,8 @@ test("job rows show slug and status label; candidate and ages live in the detail
   assert.ok(cardStart >= 0, "the card component exists");
   const cardSource = source.slice(cardStart, source.indexOf("export function PolyforgePanel("));
   assert.doesNotMatch(cardSource, /owner/, "a card never filters by owner");
-  assert.match(cardSource, /const statusLabel = jobStatusLabel\(job\.status\);/);
+  assert.match(cardSource, /const baseStatusLabel = jobStatusLabel\(job\.status\);/);
+  assert.match(cardSource, /runningMinutes === null \? baseStatusLabel : `\$\{baseStatusLabel\} \$\{runningMinutes\}m`/, "the running age rides the same label");
 });
 
 test("the detail shows the flow graph, event tail, and status-only blocked rendering, with no step-chip block", () => {
@@ -73,19 +75,27 @@ test("the detail shows the flow graph, event tail, and status-only blocked rende
   assert.match(source, /role="listitem"/, "nodes are display-only list items");
   assert.match(source, /aria-label=\{\`\$\{node\.id\} · \$\{stepStatusLabel\(node\.status\)\}\`\}/, "accessible label carries full name + status");
   assert.match(source, /\{shortenCandidate\(node\.id\)\}/, "visible node text is the 24-char cut");
-  // the state is visible text on the node too (skipped reads 已跳过), not only a tooltip.
-  assert.match(source, /\{shortenCandidate\(node\.id\)\}\s*(?:\{\/\*[^*]*\*\/\}\s*)?<span style=\{\{ color: "var\(--text-muted\)" \}\}>\{stepStatusLabel\(node\.status\)\}<\/span>/, "the node shows its localized state label");
+  // owner 有意变更: the node shows the name and the
+  // dot only — the localized state is in title and aria-label (both pinned),
+  // never a visible span; skipped is a hollow gray ring, every other status
+  // keeps the filled stepNodeColor dot (pending stays filled gray).
+  // owner 有意变更 the title also carries the step's start time when it has one.
+  assert.match(source, /title=\{\`\$\{node\.id\} · \$\{stepStatusLabel\(node\.status\)\}\$\{timing \? \` · \$\{formatEventTime\(timing\.startedAt\)\}\` : ""\}\`\}/, "title carries full name + status (+ start time)");
+  assert.match(source, /\{shortenCandidate\(node\.id\)\}\s*<\/span>/, "the node's visible content ends with the shortened name");
+  assert.doesNotMatch(source, /<span[^>]*>\{stepStatusLabel\(node\.status\)\}<\/span>/, "no visible localized state label on the node");
+  assert.match(source, /style=\{node\.status === "skipped"\s*(?:\/\/[^\n]*\n\s*)?\? \{ width: 7, height: 7, borderRadius: 4, flexShrink: 0, boxSizing: "border-box", background: "transparent", border: "1\.5px solid var\(--text-dim\)" \}\s*: \{ width: 7, height: 7, borderRadius: 4, flexShrink: 0, background: stepNodeColor\(node\.status\) \}\}/, "skipped is a hollow gray ring; every other status keeps the filled stepNodeColor dot");
+  assert.match(source, /pending: "var\(--text-dim\)",/, "pending stays the filled gray dot");
   assert.match(source, /className=\{node\.status === "in_progress" \? "pf-step-node-pulse" : undefined\}/, "only in_progress pulses");
   // Sequence connectors between consecutive nodes; dashed rewind chips below.
   assert.match(source, /graph\.rewindEdges\.map\(\(\[gate, target\]\) =>/, "rewind chips render from the model");
   // pi#116: the pre-graph per-step name+status chip block is gone — the
   // graph nodes are the only step STATUS display in every event mode.
-  // (pi#117 adds per-step TIMING rows: name + started_at + duration, never
-  // a status label — see the buildStepTimings test below.)
-  const timingStart = source.indexOf("watchStatus.steps.map((step) =>");
-  assert.ok(timingStart >= 0, "the per-step timing rows exist (pi#117)");
-  const timingBlock = source.slice(timingStart, source.indexOf("\n                              })}\n", timingStart));
-  assert.doesNotMatch(timingBlock, /stepStatusLabel|STEP_STATUS_KEYS|role="listitem"/, "timing rows must not render step status labels or nodes");
+  // (pi#117 per-step TIMING — owner 有意变更 now a line under
+  // each node — shows duration and ×N, never a status label.)
+  const timingStart = source.indexOf("data-pf-step-timing={node.id}");
+  assert.ok(timingStart >= 0, "the per-step timing lines exist (pi#117, under the nodes since)");
+  const timingLine = source.slice(timingStart, source.indexOf("</span>", timingStart));
+  assert.doesNotMatch(timingLine, /stepStatusLabel|STEP_STATUS_KEYS|role="listitem"|title=/, "timing lines must not render step status labels, nodes or a title");
   assert.match(source, /watchStatus\.events\.map\(\(event, index\) =>/);
   assert.match(source, /eventKindLabel\(event\.kind\)/);
   assert.match(source, /workflowStatusLabel\(watchStatus\.workflowStatus\)/, "a blocked WI shows its status");
@@ -107,9 +117,16 @@ test("the selected detail carries an explicit deselect control (AC6 once the job
   // watch snapshot still loading (header hoisted over the watchStatus split).
   assert.match(source, /onClick=\{\(\) => onSelect\(null\)\}/, "detail must have a deselect gesture outside the job rows");
   assert.match(source, /aria-label=\{t\("polyforge\.deselect"\)\}/, "accessible name via polyforge.deselect");
-  // The header shows the selected ref even while the snapshot loads, so the
-  // stale detail is always dismissable without a reload.
-  assert.match(source, /\{watchStatus\?\.slug \?\? selectedWi\}/);
+  // owner 有意变更 the old detail header became the title row;
+  // it still shows the selected ref while the snapshot loads (the slug falls
+  // back to the selected job's, then the selection ref) and sits above the
+  // watchStatus split, so the stale detail is always dismissable.
+  assert.match(source, /const detailSlug = watchStatus\?\.slug \?\? selectedJob\?\.slug \?\? selectedWi;/);
+  const titleRow = source.indexOf("data-pf-detail-title");
+  assert.ok(titleRow >= 0 && titleRow < source.indexOf("{graph ? (", titleRow), "the title row precedes the watch-gated detail");
+  const row = source.slice(titleRow, source.indexOf("\n                          </div>\n", titleRow));
+  assert.match(row, /onClick=\{\(\) => onSelect\(null\)\}/, "the deselect control sits in the title row");
+  assert.match(row, /\{detailSlug\}/);
   // The key is translated in all three locales (fallback would be a raw key).
   for (const [name, localeSource] of [["en", enSource], ["zh-CN", zhCNSource], ["zh-TW", zhTWSource]]) {
     assert.match(localeSource, /"polyforge\.deselect": "\S/, `${name} must translate polyforge.deselect`);
@@ -118,6 +135,21 @@ test("the selected detail carries an explicit deselect control (AC6 once the job
   // name carries "Polyforge" (see e2e/polyforge.mjs pfButton).
   const enMatch = enSource.match(/"polyforge\.deselect": "([^"]+)"/);
   assert.ok(enMatch && !/polyforge/i.test(enMatch[1]), "deselect label must not contain Polyforge");
+});
+
+test("the title row shows deselect, slug, the short title (one ellipsized line) and the job status; the rest is on hover", () => {
+  const start = source.indexOf("data-pf-detail-title");
+  const row = source.slice(start, source.indexOf("\n                          </div>\n", start));
+  const order = ["onSelect(null)", "{detailSlug}", "{detailShortTitle}", "{detailStatus}"].map((needle) => row.indexOf(needle));
+  assert.ok(order.every((index, i) => index >= 0 && (i === 0 || index > order[i - 1])), `one line in order: ${order}`);
+  assert.match(row, /title=\{detailTitleHover \|\| undefined\}/, "the hover carries the facts");
+  assert.match(row, /\{detailShortTitle && \(\s*<span style=\{\{ flex: "1 1 0", minWidth: 0, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis"/, "the short title is one ellipsized line, absent without a goal");
+  assert.match(source, /const detailShortTitle = shortJobTitle\(detailGoal\);/, "the pure first-clause heuristic, no model");
+  assert.match(source, /const detailStatus = selectedJob\s*\? jobStatusLabel\(selectedJob\.status\)\s*: watchStatus \? workflowStatusLabel\(watchStatus\.workflowStatus\) : null;/);
+  const hover = source.slice(source.indexOf("const detailTitleHover = ["), source.indexOf('].filter(Boolean).join("\\n");'));
+  for (const fact of ["detailGoal", "workflowStatusLabel(watchStatus.workflowStatus)", 't("polyforge.updatedAt")', 't("polyforge.currentStep")']) {
+    assert.ok(hover.includes(fact), `the hover carries ${fact}`);
+  }
 });
 
 test("every user-facing string goes through i18n, with raw fallback for unknown values", () => {
@@ -512,9 +544,11 @@ test("pi#117: detail rows render command+age, tool calls, recent files, timing a
 
 test("pi#117: new detail labels are translated in all three locales", () => {
   for (const [name, localeSource] of [["en", enSource], ["zh-CN", zhCNSource], ["zh-TW", zhTWSource]]) {
-    for (const key of ["polyforge.command", "polyforge.toolCalls", "polyforge.recentFiles", "polyforge.stepTiming", "polyforge.origin"]) {
+    for (const key of ["polyforge.command", "polyforge.toolCalls", "polyforge.recentFiles", "polyforge.origin"]) {
       assert.match(localeSource, new RegExp(`"${key.replace(/\./g, "\\.")}": "\\S`), `${name} must translate ${key}`);
     }
+    // owner 有意变更 the step-timing block left the detail rows for the DAG, so its label is dead.
+    assert.ok(!localeSource.includes("polyforge.stepTiming"), `${name} drops the dead polyforge.stepTiming key`);
   }
 });
 
@@ -616,38 +650,87 @@ test("/#163/#173: each card has a stable key and test identity, toggles the exis
   assert.match(card, /tabIndex=\{0\}/);
   assert.match(card, /const toggle = \(\) => onSelect\(selected \? null : job\.slug\);/, "a second activation deselects");
   assert.match(card, /event\.key === "Enter" \|\| event\.key === " "/);
+  // a pending stand-in has no select handler and takes no
+  // pointer (the first card read may reorder it); a real card keeps both.
+  assert.match(card, /onClick=\{pending \? undefined : toggle\}/, "a real card selects; a stand-in has no click handler");
+  assert.match(card, /onKeyDown=\{pending \? undefined : \(event\) => \{/, "a real card selects by key; a stand-in has no key handler");
+  assert.match(card, /aria-disabled=\{pending \|\| undefined\}/);
+  assert.match(card, /cursor: pending \? "default" : "pointer", pointerEvents: pending \? "none" : undefined,/);
+  assert.doesNotMatch(card, /onClick=\{toggle\}/, "no unconditional click handler remains");
   assert.match(source, /selected=\{selectedWi === card\.job\.slug \|\| selectedWi === card\.job\.wi\}/, "selection is the slug ref, or the wi id an anchor names");
-  // one block style, cells of a side-by-side grid (two columns
-  // already at the 340px dock), never a full-width row.
+  // one block style, cards side by side, never a full-width
+  // row. owner 有意变更（重立于 #213）：the Jobs cards are one
+  // horizontally scrolling row of fixed 150px cards — the Tasks blocks' column
+  // minimum (#213), no longer a wrapping grid whose tracks stretch.
   assert.match(source, /import \{ POLYFORGE_BLOCK_STYLE \} from "@\/lib\/panel-layout";/);
-  assert.match(card, /\.\.\.POLYFORGE_BLOCK_STYLE,\s*display: "flex", flexDirection: "column", gap: 6, minWidth: 0,/);
-  assert.doesNotMatch(card, /width: "100%"/, "a card is a grid cell, not a full-width block");
-  assert.match(source, /<div style=\{\{ display: "grid", gridTemplateColumns: "repeat\(auto-fill, minmax\(112px, 1fr\)\)", gap: 8, padding: 8, alignContent: "start" \}\}>\s*\{shownCards\.map/);
-  // Title (s14#2): the slug on its own wrapping line, the truncated goal
-  // under it clamped to 2 lines (full goal on hover), the status label on
-  // its own row — never one nowrap row squeezing slug + goal against the label.
-  assert.match(card, /<div style=\{\{[^}]*overflowWrap: "anywhere"[^}]*\}\}>\{job\.slug\}<\/div>/);
-  assert.match(card, /<span title=\{goal\} style=\{\{[^}]*WebkitLineClamp: 2[^}]*\}\}>\{truncateCardTitle\(goal, titleLength\)\}<\/span>/);
-  assert.doesNotMatch(card, /flexShrink: 0[^}]*\}\}>\{statusLabel\}/, "the status label no longer squeezes the title");
-  assert.match(card, /\{!needsInput && \(\s*<div style=\{\{[^}]*\}\}>\{statusLabel\}<\/div>/, "the status label is a row of its own");
+  // owner 有意变更 the card's outer column gap is 4 (was 6).
+  assert.match(card, /display: "flex", flexDirection: "column", gap: 4, minWidth: 0,/, "the card column gap is 4");
+  assert.doesNotMatch(card, /width: "100%"/, "a card is a fixed-width item, not a full-width block");
+  assert.match(source, /const JOB_CARD_WIDTH = 150;/, "the fixed card width is the 150px the Tasks tracks share (/#220)");
+  assert.match(card, /flex: `0 0 \$\{JOB_CARD_WIDTH\}px`/, "the card width is a non-shrinking 150px flex basis");
+  assert.match(source, /<div style=\{\{ display: "flex", flexWrap: "nowrap", gap: 8, padding: 8, overflowX: "auto", scrollbarWidth: "thin" \}\}>\s*\{shownCards\.map/,
+    "the Jobs stream is one row that scrolls horizontally, gap and padding unchanged");
+  assert.match(source, /scrollbarWidth: "thin"/, "the scrollbar stays visible but thin");
+  assert.doesNotMatch(source, /gridTemplateColumns: "repeat\(auto-fill, minmax\(\d+px, 1fr\)\)"/, "the Jobs stream is no longer a wrapping grid");
+  // Title (s14#2,): the slug (wrapping) and the status at the
+  // right end of the same row, the truncated goal under them clamped to 2
+  // lines (full goal on hover). The status may ellipsize (flex 0 1 auto,
+  // at most 60%) but never squeezes the slug (flex 1 1 0, wraps anywhere).
+  const titleRow = card.slice(card.indexOf('<div style={{ display: "flex", alignItems: "flex-start", gap: 6, minWidth: 0 }}>'), card.indexOf("{goal && ("));
+  assert.ok(titleRow.length > 0, "one title row holds slug and status");
+  assert.match(titleRow, /<div style=\{\{ flex: "1 1 0", minWidth: 0, [^}]*overflowWrap: "anywhere"[^}]*\}\}>\{job\.slug\}<\/div>/);
+  assert.match(titleRow, /\{needsInput \? \(\s*<div data-pf-needs-input=""/, "the needs-input marker sits on the slug's row");
+  assert.match(titleRow, /\) : \(\s*<div style=\{\{ flex: "0 1 auto", minWidth: 0, maxWidth: "60%"[^}]*\}\}>\{statusLabel\}<\/div>/, "the dim status label sits on the slug's row");
+  assert.match(card, /<span title=\{goal\} style=\{\{[^}]*lineHeight: "16px"[^}]*WebkitLineClamp: 2[^}]*\}\}>\{truncateCardTitle\(goal, titleLength\)\}<\/span>/);
+  // the explicit 16px card lines — the slug row and the goal
+  // span, so the inherited 18px (line-height 1.5 at 12px) no longer inflates
+  // the card; the needs-input badge fits a 16px row (14px line + 1px border)
+  // and the dim status label stays 16px.
+  assert.match(titleRow, /<div style=\{\{ flex: "1 1 0", minWidth: 0, [^}]*lineHeight: "16px"[^}]*\}\}>\{job\.slug\}<\/div>/, "the slug row is a 16px line");
+  assert.match(titleRow, /data-pf-needs-input="" style=\{\{[^}]*padding: "0 5px"[^}]*lineHeight: "14px"[^}]*\}\}/, "the needs-input badge is padding 0 5px / line-height 14px, so its row is 16px with the border");
+  assert.match(titleRow, /\) : \(\s*<div style=\{\{ flex: "0 1 auto", minWidth: 0, maxWidth: "60%", fontSize: 11, lineHeight: "16px", color: "var\(--text-dim\)"/, "the dim status label is on a 16px line");
+  assert.ok(card.indexOf("{goal && (") > card.indexOf("{statusLabel}</div>"), "the goal comes below the slug/status row");
+  assert.doesNotMatch(card, /\{!needsInput && \(/, "no separate status row any more");
   assert.match(source, /const \{ titleLength \} = usePolyforgePanelPreferences\(\);/, "the length is the browser-stored preference");
-  // Needs input: the status itself as an emphasized marker row (amber, bold,
-  // framed), replacing the dim label — from the card's status, no new read.
+  // Needs input: the status itself as an emphasized marker (amber, bold,
+  // framed), replacing the dim label on the title row — from the card's
+  // status, no new read.
   assert.match(card, /const needsInput = job\.status === "needs_input";/);
-  assert.match(card, /\{!needsInput && \(\s*<div[^>]*color: "var\(--text-dim\)"[^>]*>\{statusLabel\}<\/div>/, "a running card keeps the dim label and no marker");
-  assert.match(card, /\{needsInput && \(\s*<div data-pf-needs-input="" style=\{\{[^}]*color: "#d97706", fontWeight: 600[^}]*\}\}>\s*\{statusLabel\}\s*<\/div>/);
+  assert.match(titleRow, /\) : \(\s*<div[^>]*color: "var\(--text-dim\)"[^>]*>\{statusLabel\}<\/div>/, "a running card keeps the dim label and no marker");
+  assert.match(titleRow, /\{needsInput \? \(\s*<div data-pf-needs-input="" style=\{\{[^}]*color: "#d97706", fontWeight: 600[^}]*\}\}>\s*\{statusLabel\}\s*<\/div>/);
   // No step information on the card: the DAG, durations and reruns live in the detail.
   assert.doesNotMatch(card, /steps\.map|data-pf-step-phase|STEP_PHASE_STYLES|cardStepPhase|step\.runs|currentStep|formatCardDuration/, "no step segment, rerun or duration on the card");
   assert.doesNotMatch(card, /polyforge\.card\.(?:unknownDuration|notStarted|skipped)/, "no unstarted/unknown/skipped step text on the card");
   assert.doesNotMatch(source, /STEP_PHASE_STYLES|cardStepPhase/, "the segment-bar styling is gone");
   assert.doesNotMatch(card, /candidate|stepAge|idleAge/, "model and step/idle age stay off the card");
-  // Narration only, a fixed ~3-line scroller (a long narration never grows the card), the unavailable and the no-progress states.
-  assert.match(source, /const CARD_PROGRESS_HEIGHT = 48;/);
-  assert.match(card, /height: CARD_PROGRESS_HEIGHT, overflowY: "auto"/);
-  assert.match(card, /t\("polyforge\.card\.progressUnavailable"\)/);
-  assert.match(card, /pending \? null : <div style=\{\{ color: "var\(--text-dim\)" \}\}>\{t\("polyforge\.card\.noProgress"\)\}<\/div>/);
-  assert.match(card, /key=\{entry\.id\}/);
-  assert.doesNotMatch(card, /entry\.kind|entry\.tool/, "no tool render branch");
+  // owner 有意变更 (reverses the 32px narration):
+  // the card renders no narration at all — no fixed-height self-scrolling area,
+  // no entry list, no placeholders — so it holds only the slug/status row and
+  // the goal. The job detail's progress and summary blocks are untouched.
+  assert.doesNotMatch(source, /CARD_PROGRESS_HEIGHT/, "the card progress-area height constant is gone");
+  assert.doesNotMatch(card, /progressRef|stickToBottom|overflowY: "auto"/, "no card-owned scroll region remains");
+  assert.doesNotMatch(card, /const \{ job, goal, progress \} = card;/, "the card no longer reads progress off the card");
+  assert.doesNotMatch(card, /progress\.(?:entries|available)|entry\.id/, "no narration entry render on the card");
+  assert.doesNotMatch(card, /polyforge\.card\.(?:noProgress|progressUnavailable)/, "the card's narration placeholders are gone");
+  // the card-only compaction — vertical padding 4px (the shared
+  // POLYFORGE_BLOCK_STYLE keeps 6px, so the Tasks blocks stay as they are) and
+  // no gap between the slug/status row and the goal.
+  assert.match(card, /padding: "4px 8px"/, "the card's own vertical padding is 4px, horizontal 8px");
+  assert.match(card, /display: "flex", flexDirection: "column", gap: 0, minWidth: 0/, "the slug/goal gap is 0");
+  assert.doesNotMatch(source, /POLYFORGE_BLOCK_STYLE = \{/, "the shared block style is defined elsewhere, not redefined by the card");
+  assert.match(panelLayoutSource, /padding: "6px 8px"/, "the shared POLYFORGE_BLOCK_STYLE keeps its 6px 8px padding, so the Tasks blocks are unchanged");
+  // a running job's dim status label carries the job's age in
+  // whole minutes in the same element and colour, from the card's existing
+  // earliest job_started and a local render clock (no request); a missing
+  // startedAt or any other status keeps the bare label.
+  assert.match(source, /import \{[\s\S]*?\bcardRunningMinutes,/, "the age comes from the pure cards helper");
+  assert.match(card, /const runningMinutes = running \? cardRunningMinutes\(card\.startedAt, now\) : null;/, "only a running card reads an age, from startedAt");
+  assert.match(card, /const statusLabel = runningMinutes === null \? baseStatusLabel : `\$\{baseStatusLabel\} \$\{runningMinutes\}m`;/, "the label is `<label> <n>m`, bare without a readable age");
+  assert.match(card, /const \[now, setNow\] = useState\(\(\) => Date\.now\(\)\);/);
+  assert.match(card, /if \(!running\) return;\s*const clock = setInterval\(\(\) => setNow\(Date\.now\(\)\), 30_000\);\s*return \(\) => clearInterval\(clock\);/, "a 30s local render clock, never a poll");
+  for (const [name, localeSource] of [["en", enSource], ["zh-CN", zhCNSource], ["zh-TW", zhTWSource]]) {
+    assert.doesNotMatch(localeSource, /"polyforge\.card\.(?:noProgress|progressUnavailable)":/, `${name} drops the card-only narration placeholders`);
+  }
   // Before the first good card read the status jobs render as status-only
   // stand-ins (same key, no card identity). With a known snapshot of no job
   // the empty state shows at once — never a Loading… flash.
@@ -657,10 +740,8 @@ test("/#163/#173: each card has a stable key and test identity, toggles the exis
   assert.match(source, /\{shownCards\.length === 0 \? \(\s*<div[^>]*>\{t\("polyforge\.empty"\)\}<\/div>/);
   assert.doesNotMatch(source, /cardsError \? t\("polyforge\.unavailable"\) : t\("polyforge\.loading"\)/, "no Loading… while the status snapshot is known");
   for (const [name, localeSource] of [["en", enSource], ["zh-CN", zhCNSource], ["zh-TW", zhTWSource]]) {
-    assert.match(localeSource, /"polyforge\.card\.noProgress": "\S/, `${name} translates the no-progress placeholder`);
     assert.match(localeSource, /"polyforge\.candidate": "\S/, `${name} labels the detail's model`);
   }
-  assert.match(zhCNSource, /"polyforge\.card\.noProgress": "暂无进度消息"/);
   assert.match(zhCNSource, /"polyforge\.empty": "暂无在跑作业"/);
   assert.doesNotMatch(zhCNSource, /"polyforge\.(?:empty|deselect|selectJob|eventKind\.job_\w+)": "[^"]*任务/, "zh-CN no longer calls jobs 任务");
   assert.doesNotMatch(zhTWSource, /"polyforge\.(?:empty|deselect|selectJob|eventKind\.job_\w+)": "[^"]*工作[^流]/, "zh-TW no longer calls jobs 工作");
@@ -669,23 +750,30 @@ test("/#163/#173: each card has a stable key and test identity, toggles the exis
 test("the detail carries the selected job's model and step/idle age even before its watch read", () => {
   assert.match(source, /const selectedCard = selectedWi\s*\? shownCards\.find\(\(card\) => card\.job\.slug === selectedWi \|\| card\.job\.wi === selectedWi\)/);
   assert.match(source, /const selectedJob = selectedWi\s*\? \(selectedCard\?\.job \?\? opsStatus\?\.jobs\.find/);
+  // owner 有意变更 the facts row now follows the DAG and the progress
+  // section, still outside the watch gate (it shows while the watch read loads).
   const factsStart = source.indexOf("{selectedJob && (");
-  assert.ok(factsStart >= 0 && factsStart < source.indexOf("{watchStatus ? (", factsStart), "the facts row precedes the watch-gated detail");
-  const facts = source.slice(factsStart, source.indexOf("{watchStatus ? (", factsStart));
+  assert.ok(factsStart >= 0 && factsStart < source.indexOf("{watchStatus && (", factsStart), "the facts row precedes the watch-gated detail");
+  const facts = source.slice(factsStart, source.indexOf("{watchStatus && (", factsStart));
   assert.match(facts, /t\("polyforge\.candidate"\)/);
   assert.match(facts, /t\("polyforge\.stepAge"\)/);
   assert.match(facts, /t\("polyforge\.idleAge"\)/);
 });
 
-test("the detail's timing rows carry the selected card's ×N reruns and read as one line each", () => {
+test("/#210: the DAG timing line carries the live +duration and the selected card's ×N reruns, one line under each node", () => {
   // The rerun count comes from the selected card's own read — no new request.
   assert.match(source, /const stepRuns = new Map\(\(selectedCard\?\.steps \?\? \[\]\)\.map\(\(step\) => \[step\.id, step\.runs\]\)\);/);
-  const timingStart = source.indexOf("watchStatus.steps.map((step) =>");
-  const timing = source.slice(timingStart, source.indexOf("\n                                    })}\n", timingStart));
-  assert.match(timing, /const runs = stepRuns\.get\(step\.name\) \?\? 0;/);
-  assert.match(timing, /\{runs > 1 && <span[^>]*>\{`×\$\{runs\}`\}<\/span>\}/, "×N only for a rerun step");
-  assert.match(timing, /\+\{formatAge\(timing\.durationSec\)\}/, "the live +duration stays on the row");
-  assert.doesNotMatch(timing, /display: "flex"/, "inline spans, so name, start, duration and ×N are one text line");
+  // owner 有意变更 the timing row moved from the detail rows to a line under its DAG node.
+  const nodes = source.slice(source.indexOf("graph.nodes.map((node, index) => {"), source.indexOf("graph.rewindEdges.length > 0 &&"));
+  assert.match(nodes, /const timing = stepTimings\?\.get\(node\.id\);/);
+  assert.match(nodes, /const runs = stepRuns\.get\(node\.id\) \?\? 0;/);
+  assert.match(nodes, /timing && timing\.durationSec != null \? `\+\$\{formatCardDuration\(timing\.durationSec\)\}` : ""/, "the live +duration in the `+3m 05s` form; no duration → nothing");
+  assert.match(nodes, /runs > 1 \? `×\$\{runs\}` : ""/, "×N only for a rerun step");
+  assert.match(nodes, /<span data-pf-step-timing=\{node\.id\} style=\{\{ height: 14, lineHeight: "14px"[^}]*whiteSpace: "nowrap" \}\}>\{timingText\}<\/span>/, "one fixed-height line, empty when there is no timing, so the nodes stay aligned");
+  const item = nodes.indexOf('role="listitem"');
+  const line = nodes.indexOf("data-pf-step-timing");
+  assert.ok(item >= 0 && line > nodes.indexOf("{shortenCandidate(node.id)}", item), "the timing line is the listitem's sibling, after its name — never inside it");
+  assert.doesNotMatch(source, /t\("polyforge\.stepTiming"\)/, "the old detail timing block is gone");
 });
 
 test("the tab strip gains a third Memory tab and the body renders the memory surface", () => {
@@ -710,20 +798,37 @@ test("the top strip orders Work, Memory, Messages (owner 2026-10-30); Work hosts
   const messagesTab = strip.slice(strip.indexOf('aria-selected={activeTab === "messages"}'));
   assert.match(messagesTab, /t\("polyforge\.messages\.tab"\)\}\s*\{messagesSurface\.unreadTotal > 0 && \(/, "the dot follows the Messages label");
   // Work: the main area renders only the selected sub-tab's surface.
-  assert.match(source, /\{workTab === "tasks" \? \(\s*(?:\/\/[^\n]*\n\s*)*<PolyforgeTasks/, "the Tasks sub-tab renders the tasks surface");
+  assert.match(source, /\) : workTab === "tasks" \? \(\s*(?:\/\/[^\n]*\n\s*)*<PolyforgeTasks/, "the Tasks sub-tab renders the tasks surface");
+  // (intentional 2026-10-31 third-segment change): 工单列表 renders only the work-item surface.
+  assert.match(source, /\{workTab === "items" \? \(\s*(?:\/\/[^\n]*\n\s*)*<PolyforgeWorkItems itemCountKey=\{itemCountKey\} onRunningCount=\{onWorkItemsRunningChange\} \/>/,
+    "the 工单列表 sub-tab renders the work-item surface with the count key and the badge reporter");
   assert.match(source, /<PolyforgeTasks taskCountKey=\{opsStatus \? `\$\{opsStatus\.tasks\?\.running \?\? 0\}:\$\{opsStatus\.tasks\?\.completed \?\? 0\}` : null\} \/>/,
     "the Tasks surface re-reads on the status snapshot's running:completed key (null without a snapshot)");
   // The sub-tab controls: their own named tablist, after the main area.
   const work = source.slice(source.indexOf('role="tablist"\n              data-pf-tabstrip="work"'));
-  assert.ok(source.indexOf('data-pf-tabstrip="work"') > source.indexOf("{workTab === \"tasks\" ? ("), "the sub-tab controls follow the main area in the DOM");
-  assert.match(work, /\(\["jobs", "tasks"\] as const\)\.map\(\(tab\) =>/);
+  assert.ok(source.indexOf('data-pf-tabstrip="work"') > source.indexOf(") : workTab === \"tasks\" ? ("), "the sub-tab controls follow the main area in the DOM");
+  // (intentional 2026-10-31 third-segment change): jobs, tasks, items in that order.
+  assert.match(work, /\(\["jobs", "tasks", "items"\] as const\)\.map\(\(tab\) =>/);
   assert.match(work, /role="tab" aria-selected=\{active\}\s*onClick=\{\(\) => onWorkTab\(tab\)\}/);
-  assert.match(work, /tab === "jobs" \? t\("polyforge\.messages\.jobsTab"\) : t\("polyforge\.tasks\.tab"\)/);
-  // Desktop: a ~72px right rail; ≤640px: a two-segment bar above the main area.
+  assert.match(work, /const label = tab === "jobs" \? t\("polyforge\.messages\.jobsTab"\) : tab === "tasks" \? t\("polyforge\.tasks\.tab"\) : t\("polyforge\.work\.itemsTab"\);/,
+    "作业 / 任务 / 工单列表 labels ( adds the third)");
+  // owner 有意变更: desktop keeps the ~72px text rail;
+  // ≤640px is a 40px vertical icon rail on the right (was a three-segment bar
+  // above the main area). One row at every width, main area first in the DOM.
   assert.match(source, /const isMobile = useIsMobile\(\);/);
-  assert.match(source, /flexDirection: isMobile \? "column-reverse" : "row"/, "the bar is lifted above the main area on mobile, the rail sits right on desktop");
-  assert.match(work, /\{ flex: "0 0 72px", width: 72, display: "flex", flexDirection: "column", borderLeft: "1px solid var\(--border\)"/);
-  assert.match(work, /\{ display: "flex", flexShrink: 0, borderBottom: "1px solid var\(--border\)" \}/);
+  assert.match(source, /<div style=\{\{ flex: 1, minHeight: 0, display: "flex", flexDirection: "row" \}\}>\s*<div style=\{\{ flex: 1, minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden" \}\}>\s*\{workTab === "items"/, "one row at every width: the main area first, the rail beside it on the right");
+  assert.doesNotMatch(source, /column-reverse/, "no bar lifted above the main area any more");
+  assert.match(work, /aria-orientation="vertical"/, "the rail is vertical at every width");
+  assert.doesNotMatch(work, /aria-orientation=\{isMobile/, "no horizontal orientation on mobile");
+  assert.match(work, /\? \{ flex: "0 0 40px", width: 40, display: "flex", flexDirection: "column", borderLeft: "1px solid var\(--border\)", overflowY: "auto" \}\s*: \{ flex: "0 0 72px", width: 72, display: "flex", flexDirection: "column", borderLeft: "1px solid var\(--border\)", overflowY: "auto" \}/, "mobile 40px rail, desktop 72px rail, both on the right");
+  assert.doesNotMatch(work, /borderBottom: "1px solid var\(--border\)"/, "no horizontal bar border");
+  // Icon-only on mobile, named by the existing tab copy; desktop keeps the visible label.
+  assert.match(work, /aria-label=\{isMobile \? label : undefined\}\s*title=\{isMobile \? label : undefined\}/, "the icon-only button is named by its tab copy");
+  assert.match(work, /\{isMobile \? WORK_TAB_ICONS\[tab\] : <span>\{label\}<\/span>\}/, "icon on mobile, visible label on desktop");
+  assert.match(work, /\.\.\.\(isMobile \? \{ width: "100%", height: 40, padding: 0 \} : \{ padding: "10px 4px" \}\)/, "about 40×40 mobile buttons");
+  assert.match(work, /display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center"/, "the badge sits under the icon/label");
+  assert.match(source, /const workTabIcon = \(paths: ReactNode\) => \(\s*<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">/, "16px icons in the panel's 24-viewBox stroke style");
+  for (const tab of ["jobs", "tasks", "items"]) assert.match(source, new RegExp(`\\n  ${tab}: workTabIcon\\(`), `${tab} has a rail icon`);
   assert.match(work, /background: active \? "var\(--bg-selected\)" : "none"/);
   for (const [name, localeSource] of [["en", enSource], ["zh-CN", zhCNSource], ["zh-TW", zhTWSource]]) {
     assert.match(localeSource, /"polyforge\.tasks\.tab": "\S/, `${name} translates the Tasks label`);
@@ -741,16 +846,23 @@ test("the top strip orders Work, Memory, Messages (owner 2026-10-30); Work hosts
 
 test("the sub-tab badges show running counts from the one status snapshot; zero greyed, none on Work", () => {
   const work = source.slice(source.indexOf('data-pf-tabstrip="work"'));
-  assert.match(work, /const count = opsStatus \? \(tab === "jobs" \? opsStatus\.queue\.running : \(opsStatus\.tasks\?\.running \?\? 0\)\) : null;/, "queue.running on Jobs, tasks.running on Tasks, no badge without a snapshot");
+  // (intentional 2026-10-31 third-segment change): the items badge is the last list read's count.
+  assert.match(work, /const count = tab === "items" \? workItemsRunning\s*: opsStatus \? \(tab === "jobs" \? opsStatus\.queue\.running : \(opsStatus\.tasks\?\.running \?\? 0\)\) : null;/,
+    "queue.running on Jobs, tasks.running on Tasks, no badge without a snapshot; the items badge from the last list read (absent before it)");
   assert.match(work, /\{count !== null && \(/);
   assert.match(work, /color: count > 0 \? "var\(--accent\)" : "var\(--text-dim\)"/, "zero renders greyed, never hidden");
-  assert.match(work, /t\(tab === "jobs" \? "polyforge\.work\.jobsRunning" : "polyforge\.work\.tasksRunning", \{ count \}\)/, "the badge has an accessible name");
+  assert.match(work, /aria-label=\{t\(WORK_TAB_BADGES\[tab\], \{ count \}\)\}/, "the badge has an accessible name");
+  assert.match(source, /const WORK_TAB_BADGES = \{ jobs: "polyforge\.work\.jobsRunning", tasks: "polyforge\.work\.tasksRunning", items: "polyforge\.work\.itemsRunning" \} as const;/);
   const strip = source.slice(source.indexOf('role="tablist" data-pf-tabstrip="top"'), source.indexOf("{/* Body */}"));
   const workTab = strip.slice(strip.indexOf('aria-selected={activeTab === "work"}'));
   assert.doesNotMatch(workTab, /count|running/, "the top-level Work tab carries no count");
-  assert.doesNotMatch(source, /fetch\(|setInterval\(/, "the panel adds no read and no timer for the badges");
+  assert.doesNotMatch(source, /fetch\(/, "the panel adds no read for the badges");
+  // the panel's one timer is the card's local age clock (it
+  // reads Date.now() and fetches nothing); the badge path adds none.
+  assert.deepEqual(source.match(/setInterval\(/g) ?? ["x"], ["setInterval("], "the only panel timer is the card's running-age clock");
+  assert.match(source, /const clock = setInterval\(\(\) => setNow\(Date\.now\(\)\), 30_000\);/, "the one timer is the card clock");
   for (const [name, localeSource] of [["en", enSource], ["zh-CN", zhCNSource], ["zh-TW", zhTWSource]]) {
-    for (const key of ["polyforge.work.jobsRunning", "polyforge.work.tasksRunning"]) {
+    for (const key of ["polyforge.work.jobsRunning", "polyforge.work.tasksRunning", "polyforge.work.itemsRunning"]) {
       assert.match(localeSource, new RegExp(`"${key.replaceAll(".", "\\.")}": "[^"]*\\{count\\}`), `${name} names the ${key} badge with its count`);
     }
   }
@@ -764,6 +876,55 @@ test("the header carries a pressed-state pin control only when showPin", () => {
   for (const [name, localeSource] of [["en", enSource], ["zh-CN", zhCNSource], ["zh-TW", zhTWSource]]) {
     for (const key of ["polyforge.dock.pin", "polyforge.dock.unpin"]) {
       assert.match(localeSource, new RegExp(`"${key.replace(/\./g, "\\.")}": "\\S`), `${name} translates ${key}`);
+    }
+  }
+});
+
+test("the 工单列表 count key is queue.running plus the terminal-job count, null without a snapshot; the panel adds no read", () => {
+  const start = source.indexOf("export function workItemCountKey(");
+  assert.ok(start >= 0, "one pure key helper");
+  const body = source.slice(start, source.indexOf("export function PolyforgePanel(", start));
+  assert.match(body, /if \(!opsStatus\) return null;/, "no snapshot, no key (no re-read)");
+  assert.match(body, /job\.status === "completed" \|\| job\.status === "failed" \|\| job\.status === "cancelled"/, "terminal jobs only");
+  assert.match(body, /return `\$\{opsStatus\.queue\.running\}:\$\{terminal\}`;/);
+  assert.match(source, /const itemCountKey = workItemCountKey\(opsStatus\);/);
+  assert.match(source, /workItemsRunning: number \| null;\s*onWorkItemsRunningChange: \(count: number\) => void;/);
+  assert.doesNotMatch(source, /\/api\/polyforge\/work-items/, "the panel never reads the work-item list itself");
+});
+
+test("the detail order is title row → DAG with timing → execution progress → every existing block in its original relative order", () => {
+  const detail = source.slice(source.indexOf("{/* Detail for the selected work item */}"), source.indexOf("{t(\"polyforge.selectJob\")}"));
+  const marks = [
+    "data-pf-detail-title",
+    "{graph ? (",
+    "<PolyforgeDetailProgress wi={selectedJob?.wi ?? null} running={selectedJob?.status === \"running\"} />",
+    "{selectedJob && (",
+    "{watchStatus && (",
+    "{/* pi#119 summary block",
+    "{/* pi#117 detail rows",
+    "onClick={toggleEventMode}",
+    "{/* Event tail (newest last): the rows are plain",
+  ].map((needle) => detail.indexOf(needle));
+  assert.ok(marks.every((index, i) => index >= 0 && (i === 0 || index > marks[i - 1])), `detail order: ${marks}`);
+  // The progress read is keyed on the selected job's wi (a card click stores
+  // the slug as the selection ref), never on selectedWi.
+  assert.doesNotMatch(source, /usePolyforgeProgress\(selectedWi/);
+});
+
+test("the progress section renders each entry inline as one ellipsized line with hover text, its states localized, no nested scroller", () => {
+  const start = source.indexOf("function PolyforgeDetailProgress(");
+  const block = source.slice(start, source.indexOf("\n}\n", start));
+  assert.match(block, /const tail = usePolyforgeProgress\(wi, running\);/);
+  assert.match(block, /data-pf-progress=""/);
+  assert.match(block, /t\("polyforge\.progress\.title"\)/);
+  assert.match(block, /!wi \|\| tail\?\.available === false \? t\("polyforge\.progress\.unavailable"\)/, "no readable transcript: the unavailable state, no fabricated line");
+  assert.match(block, /tail\.entries\.length === 0 \? t\("polyforge\.progress\.empty"\)/);
+  assert.match(block, /tail\.entries\.map\(\(entry\) => \(\s*<div\s*key=\{entry\.id\}\s*data-pf-progress-kind=\{entry\.kind\}\s*title=\{entry\.text\}\s*style=\{\{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis"/, "one line per entry, full text on hover");
+  assert.doesNotMatch(block, /overflowY|maxHeight|scrollTop/, "no nested vertical scroller (pi#120)");
+  assert.doesNotMatch(block, /error|failed/i, "no error readout");
+  for (const [name, localeSource] of [["en", enSource], ["zh-CN", zhCNSource], ["zh-TW", zhTWSource]]) {
+    for (const key of ["polyforge.progress.title", "polyforge.progress.empty", "polyforge.progress.unavailable"]) {
+      assert.match(localeSource, new RegExp(`"${key.replace(/\./g, "\\.")}": "\\S`), `${name} must translate ${key}`);
     }
   }
 });

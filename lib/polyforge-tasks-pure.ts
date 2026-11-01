@@ -1,8 +1,12 @@
 /**
  * Client-safe pure model for the dock's read-only Tasks tab:
- * the list-row and detail wire types, the task id validator, the
- * running-on-top section split, the client-side search and the block
- * timing helpers. The report's
+ * the list-row and detail wire types (the row type names exactly the nine
+ * keys the server passport forwards, report_tail/reporter included —
+ *), the task id validator, the
+ * running-on-top section split, the client-side search, the project/state
+ * filters and the block timing helpers, and the reporter
+ * filter's options and term (全部发起人, human display names
+ * ascending, then `machine` last — from the whole loaded list). The report's
  * collapse threshold and truncation test are the Memory tab's own
  * (`MEMORY_COLLAPSE_BYTES`, `isMemoryBodyTruncated` in
  * `lib/polyforge-memory-pure.ts`) — one rule, one place. No Node import
@@ -22,6 +26,13 @@ export interface PolyforgeTaskRow {
   started_at?: string;
   ended_at?: string;
   wall_consumed_ns?: number;
+  /** pf's bounded last non-empty report line (≤200 code
+   *  points, an over-long line already `…`-prefixed by pf; `""` while
+   *  running) — shown as sent, never re-cut. Absent from a pf that predates it. */
+  report_tail?: string;
+  /** the spawn-time human display name, or `machine`.
+   *  Absent from a pf that predates it. */
+  reporter?: string;
 }
 
 /** One `pf task show` read: status, candidates, budget, times, prompt and
@@ -82,16 +93,35 @@ export function taskProjectOptions(rows: PolyforgeTaskRow[]): string[] {
   return [...new Set(rows.map((row) => row.project).filter(Boolean))].sort();
 }
 
+/** pf's `reporter` sentinel for a task no human spawned. */
+export const TASK_REPORTER_MACHINE = "machine";
+
+/** The reporter filter's options, from the whole loaded list
+ *  (never the filtered rows, so they do not cascade): the distinct non-empty
+ *  human display names sorted ascending, and whether any row is `machine`
+ *  (offered last). A row without the field (a pre-field pf) adds nothing. Pure. */
+export function taskReporterOptions(rows: PolyforgeTaskRow[]): { humans: string[]; machine: boolean } {
+  const reporters = rows.map((row) => row.reporter ?? "");
+  return {
+    humans: [...new Set(reporters.filter((reporter) => reporter !== "" && reporter !== TASK_REPORTER_MACHINE))].sort(),
+    machine: reporters.includes(TASK_REPORTER_MACHINE),
+  };
+}
+
 /** The one client-side filter over the already-read list: the search
- *  (`taskMatches`), then the project (`""` = every project) and the state
- *  (`"all"` = every state). Pure: filtering never reads. */
+ *  (`taskMatches`), then the project (`""` = every project), the state
+ *  (`"all"` = every state) and the reporter (`null` or absent
+ *  = every reporter, else an exact `row.reporter` match). Pure: filtering
+ *  never reads. */
 export function filterTaskRows(
   rows: PolyforgeTaskRow[],
-  filter: { search: string; project: string; state: PolyforgeTaskStateFilter },
+  filter: { search: string; project: string; state: PolyforgeTaskStateFilter; reporter?: string | null },
 ): PolyforgeTaskRow[] {
+  const reporter = filter.reporter ?? null;
   return rows.filter((row) => taskMatches(row, filter.search)
     && (filter.project === "" || row.project === filter.project)
-    && (filter.state === "all" || row.state === filter.state));
+    && (filter.state === "all" || row.state === filter.state)
+    && (reporter === null || row.reporter === reporter));
 }
 
 // ---- block timing ----

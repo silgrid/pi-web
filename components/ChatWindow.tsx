@@ -88,10 +88,6 @@ interface Props {
   /** Signal from AppShell that the session with this id was written by
    *  another pi process; a new `key` triggers one disk reload. */
   externalSessionChange?: { sessionId: string; key: number } | null;
-  /** The toolbar's ↻: each new value starts one manual fetch in the focused pane. */
-  manualFetchKey?: number;
-  /** Whether this chat offers the manual fetch (a saved session) and whether one is under way; null on unmount. */
-  onManualFetchStateChange?: (state: { available: boolean; inProgress: boolean } | null) => void;
   onOpenFile?: (filePath: string, page?: number) => void;
   /** Files dropped onto the chat were written into the working directory. */
   onFilesUploaded?: () => void;
@@ -276,7 +272,7 @@ function ProcessDetailsGroup({ messageCount, toolCallCount, durationMs, cacheMis
   );
 }
 
-export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initialScrollPosition, onScrollPositionChange, sessionRunning, isActivePane = true, newSessionCwd, newSessionDraftKey, initialNewSessionChoices, onNewSessionChoicesChange, onAgentEnd, onToolEnd, onAttentionNeeded, onBackgroundTasksEvent, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemToolsChange, onSystemInfoLoaderChange, onSessionStatsChange, onSessionStatsPanelOpen, onDebugSnapshotReaderChange, onOpenSettings, onContextUsageChange, externalSessionChange, manualFetchKey, onManualFetchStateChange, onOpenFile, onFilesUploaded, onOpenSubagent, onAskInNewChat, quoteSelectionEnabled = false, initialPrompt, onInitialPromptConsumed, soundEnabled = true, onSoundToggle, playDoneSound = () => {}, unlockAudio, holdAudio }: Props) {
+export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initialScrollPosition, onScrollPositionChange, sessionRunning, isActivePane = true, newSessionCwd, newSessionDraftKey, initialNewSessionChoices, onNewSessionChoicesChange, onAgentEnd, onToolEnd, onAttentionNeeded, onBackgroundTasksEvent, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemToolsChange, onSystemInfoLoaderChange, onSessionStatsChange, onSessionStatsPanelOpen, onDebugSnapshotReaderChange, onOpenSettings, onContextUsageChange, externalSessionChange, onOpenFile, onFilesUploaded, onOpenSubagent, onAskInNewChat, quoteSelectionEnabled = false, initialPrompt, onInitialPromptConsumed, soundEnabled = true, onSoundToggle, playDoneSound = () => {}, unlockAudio, holdAudio }: Props) {
   const { t } = useI18n();
   const isMobile = useIsMobile();
   const completionNotificationsEnabled = session?.relation?.kind !== "subagent";
@@ -353,9 +349,10 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
     if (externalSessionChange.sessionId !== session?.id) return;
     void refreshFromDisk(externalSessionChange.sessionId);
   }, [externalSessionChange, session?.id, refreshFromDisk]);
-  // The manual fetch, from the toolbar's ↻ or the bottom
-  // pull-up: a reader at the bottom stays at the bottom with the newest content;
-  // anywhere else no scroll command is issued, so that content stays in place.
+  // The manual fetch, from the floating button's ↻ form at the
+  // tail (; the toolbar no longer has one) or the bottom pull-up: a
+  // reader at the bottom stays at the bottom with the newest content; anywhere
+  // else no scroll command is issued, so that content stays in place.
   const runManualFetch = useCallback(() => {
     const container = scrollContainerRef.current;
     const atTail = Boolean(container && isScrollAtTail(container.scrollTop, container.clientHeight, container.scrollHeight));
@@ -363,44 +360,45 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
       if (atTail) requestAnimationFrame(() => scrollToBottom("instant"));
     });
   }, [manualFetch, scrollContainerRef, scrollToBottom]);
-  const runManualFetchRef = useRef(runManualFetch);
-  runManualFetchRef.current = runManualFetch;
-  const manualFetchKeyRef = useRef(manualFetchKey);
-  useEffect(() => {
-    // The mount's value is no trigger; an unfocused pane only follows the key.
-    if (manualFetchKeyRef.current === manualFetchKey) return;
-    manualFetchKeyRef.current = manualFetchKey;
-    if (isActivePane) runManualFetchRef.current();
-  }, [manualFetchKey, isActivePane]);
-  useEffect(() => {
-    onManualFetchStateChange?.({ available: manualFetchAvailable, inProgress: manualFetching });
-  }, [manualFetchAvailable, manualFetching, onManualFetchStateChange]);
-  useEffect(() => () => { onManualFetchStateChange?.(null); }, [onManualFetchStateChange]);
+  // The floating button's form: ↓ while scrolled up, ↻ at the tail of a saved
+  // session, none otherwise (an unsaved session's tail, a pending restore).
+  const floatingForm: "scroll" | "refresh" | null = pendingScrollRestore ? null
+    : showScrollToBottom ? "scroll"
+      : manualFetchAvailable ? "refresh" : null;
+  const floatingLabel = floatingForm === "refresh"
+    ? t(manualFetching ? "chat.manualFetchBusy" : "chat.manualFetch")
+    : t("chat.scrollToLatest");
   // The bottom pull-up (touch only): a touch that starts with the list already
   // at its bottom and is released past PULL_FETCH_THRESHOLD_PX upward starts the
   // same manual fetch. A touch starting in earlier history, a downward drag (the
   // top stays with the "load earlier" sentinel) and a mouse or trackpad never do.
+  // The floating ↻ sits over the list's bottom at the tail, so it carries the same
+  // handlers: a pull-up that starts on it still arms (always against the list).
   const pullFetchRef = useRef<{ startY: number; lastY: number } | null>(null);
-  const handlePullTouchStart = useCallback((event: React.TouchEvent<HTMLDivElement>) => {
-    const container = event.currentTarget;
+  const handlePullTouchStart = useCallback((event: React.TouchEvent<HTMLElement>) => {
+    const container = scrollContainerRef.current;
     const touch = event.touches.length === 1 ? event.touches[0] : undefined;
-    pullFetchRef.current = touch && manualFetchAvailable && shouldArmPullFetch({
+    pullFetchRef.current = container && touch && manualFetchAvailable && shouldArmPullFetch({
       touch: true,
       scrollTop: container.scrollTop,
       clientHeight: container.clientHeight,
       scrollHeight: container.scrollHeight,
     }) ? { startY: touch.clientY, lastY: touch.clientY } : null;
-  }, [manualFetchAvailable]);
-  const handlePullTouchMove = useCallback((event: React.TouchEvent<HTMLDivElement>) => {
+  }, [manualFetchAvailable, scrollContainerRef]);
+  const handlePullTouchMove = useCallback((event: React.TouchEvent<HTMLElement>) => {
     const pull = pullFetchRef.current;
     const touch = event.touches[0];
     if (pull && touch) pull.lastY = touch.clientY;
   }, []);
-  const handlePullTouchEnd = useCallback((event: React.TouchEvent<HTMLDivElement>) => {
+  const handlePullTouchEnd = useCallback((event: React.TouchEvent<HTMLElement>) => {
     const pull = pullFetchRef.current;
     pullFetchRef.current = null;
     const endY = event.changedTouches[0]?.clientY ?? pull?.lastY;
-    if (pull && endY !== undefined && manualFetchAvailable && isPullFetchTriggered(pull.startY, endY)) runManualFetch();
+    if (pull && endY !== undefined && manualFetchAvailable && isPullFetchTriggered(pull.startY, endY)) {
+      // A pull that started on the floating ↻ must not also click it: one gesture, one fetch.
+      if (event.cancelable) event.preventDefault();
+      runManualFetch();
+    }
   }, [manualFetchAvailable, runManualFetch]);
   const handlePullTouchCancel = useCallback(() => {
     pullFetchRef.current = null;
@@ -1711,16 +1709,30 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
               zIndex: 20,
             }}
           >
+            {/* One floating button, two forms by scroll position, one element so
+                focus stays on it when the form changes: scrolled up it is ↓ (scroll to the latest,
+                no fetch); at the tail of a saved session it is the manual fetch's ↻ (this pane's
+                own fetch: spins and is aria-busy while one runs, a second click joins it). A
+                session not saved yet has no ↻, so at its tail the button stays hidden, as before. */}
             <button
               type="button"
-              className={`chat-scroll-to-bottom${showScrollToBottom && !pendingScrollRestore ? " is-visible" : ""}`}
-              title={t("chat.scrollToLatest")}
-              aria-label={t("chat.scrollToLatest")}
-              onClick={() => scrollToBottom("smooth")}
+              className={`chat-scroll-to-bottom${floatingForm ? " is-visible" : ""}`}
+              title={floatingLabel}
+              aria-label={floatingLabel}
+              aria-busy={floatingForm === "refresh" ? manualFetching : undefined}
+              onClick={floatingForm === "refresh" ? runManualFetch : () => scrollToBottom("smooth")}
+              onTouchStart={floatingForm === "refresh" ? handlePullTouchStart : undefined}
+              onTouchMove={floatingForm === "refresh" ? handlePullTouchMove : undefined}
+              onTouchEnd={floatingForm === "refresh" ? handlePullTouchEnd : undefined}
+              onTouchCancel={floatingForm === "refresh" ? handlePullTouchCancel : undefined}
             >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                <path d="M12 5v14M5 12l7 7 7-7" />
-              </svg>
+              {floatingForm === "refresh" ? (
+                <span aria-hidden="true" style={{ display: "inline-block", fontSize: 15, lineHeight: 1, animation: manualFetching ? "spin 0.8s linear infinite" : undefined }}>↻</span>
+              ) : (
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M12 5v14M5 12l7 7 7-7" />
+                </svg>
+              )}
             </button>
           </div>
         )}

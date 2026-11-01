@@ -120,7 +120,8 @@ test("task-42: a send's answer opens the conversation it names, not a raced list
 
 test("the top-level tabs are memory, messages, work; Messages refresh stays gated on messages", () => {
   assert.match(source, /export type PolyforgeTab = "memory" \| "messages" \| "work";/);
-  assert.match(source, /export type PolyforgeWorkTab = "jobs" \| "tasks";/);
+  // (intentional 2026-10-31 third-segment change): 工单列表 joins the sub-tabs.
+  assert.match(source, /export type PolyforgeWorkTab = "jobs" \| "tasks" \| "items";/);
   const start = source.indexOf("const setActiveTab = useCallback");
   const end = source.indexOf("}, [refreshMessages]);", start);
   const body = source.slice(start, end);
@@ -135,6 +136,12 @@ test("the dock opens on Work › Jobs and the sub-tab lives in page memory only"
   assert.doesNotMatch(source, /(?:localStorage|sessionStorage)\.|setItem\(/, "no storage key for workTab (a reload resets it)");
   assert.doesNotMatch(source, /pi-web:polyforge-work/, "no storage key name for the sub-tab");
   assert.match(source, /\n    workTab,\n    setWorkTab,\n/, "the sub-tab state is exposed to the shell");
+});
+
+test("the 工单列表 badge count is page memory, null until the first list read, and the hook reads nothing for it", () => {
+  assert.match(source, /const \[workItemsRunning, setWorkItemsRunning\] = useState<number \| null>\(null\);/);
+  assert.match(source, /\n    workItemsRunning,\n    setWorkItemsRunning,\n/, "the badge state and its setter are exposed to the shell");
+  assert.doesNotMatch(source, /\/api\/polyforge\/work-items/, "the hook never reads the work-item list");
 });
 
 test("a work-item anchor lands on Work › Jobs with the item selected", () => {
@@ -200,6 +207,39 @@ test("task-42: every refreshMessages call starts its own read — no in-flight s
   const start = source.indexOf("const refreshMessages = useCallback");
   const end = source.indexOf("}, []);", start);
   const body = source.slice(start, end);
-  assert.match(body, /return fetch\("\/api\/polyforge\/messages"\)/, "each call fetches on its own");
+  assert.match(body, /return fetch\(withGroups \? "\/api\/polyforge\/messages" : "\/api\/polyforge\/messages\?groups=0"\)/, "each call fetches on its own");
   assert.doesNotMatch(body, /\.finally\(/, "no slot to clear on settle");
+});
+
+test("the project groups ride the one list read — no timer, no storage", () => {
+  const start = source.indexOf("const refreshMessages = useCallback");
+  const body = source.slice(start, source.indexOf("}, []);", start));
+  assert.match(body, /const withGroups = messagesVisibleRef\.current;/, "only a read made while Messages is shown asks for the groups");
+  assert.match(body, /if \(withGroups\) setGroups\(Array\.isArray\(body\.groups\) \? body\.groups : \[\]\);/, "such an answer replaces the groups; others keep them");
+  assert.match(source, /messagesVisibleRef\.current = messagesVisible;\s*if \(probed && !pfPresent\) return;\s*refreshMessages\(\);/, "showing Messages reads the list at once");
+  assert.match(source, /\n    groups,\n/, "the groups are exposed to the shell");
+  assert.equal((source.match(/setInterval\(/g) ?? []).length, 5, "status, cards, messages, watch and the open conversation: no new interval");
+});
+
+test("the users read runs only on showing Messages, landing-ordered, with no timer", () => {
+  assert.match(source, /return fetch\("\/api\/polyforge\/users"\)/);
+  assert.match(source, /if \(seq <= usersLandedSeq\.current\) return;/, "a late older read never overwrites a landed one");
+  assert.doesNotMatch(source, /useEffect\(\(\) => \{\s*void refreshUsers\(\);\s*\}, \[refreshUsers\]\);/, "no read at mount");
+  assert.equal((source.match(/void refreshUsers\(\)/g) ?? []).length, 1, "one read site: the Messages-visible effect");
+  assert.match(source, /const messagesVisible = panelOpen && activeTab === "messages";/);
+  assert.match(source, /if \(!messagesVisible \|\| \(probed && !pfPresent\)\) return;\s*void refreshUsers\(\);/, "only when the open dock shows Messages");
+  assert.doesNotMatch(source, /setInterval\(refreshUsers/, "no timer of its own");
+  assert.match(source, /setMembershipAdmin\(body\.admin === true\);/);
+  assert.match(source, /useState<boolean \| null>\(null\)/, "unknown until the probe answers");
+});
+
+test("a membership change posts once and awaits the list re-read before resolving", () => {
+  const start = source.indexOf("const changeMembership = useCallback");
+  const body = source.slice(start, source.indexOf("}, [refreshMessages]);", start));
+  assert.ok(start > 0);
+  assert.match(body, /fetch\("\/api\/polyforge\/projects\/members", \{\s*method: "POST",/);
+  assert.match(body, /JSON\.stringify\(\{ action: input\.action, project: input\.project, user_id: input\.userId \}\)/, "no role in the body: add is writer server-side");
+  assert.match(body, /throw new Error\(body\.error \?\? "the membership change was refused"\);/, "a refusal throws pf's text");
+  assert.ok(body.indexOf("throw new Error") < body.indexOf("await refreshMessages();"), "only a success re-reads");
+  assert.match(body, /await refreshMessages\(\);\s*$/, "resolves after the immediate re-read");
 });

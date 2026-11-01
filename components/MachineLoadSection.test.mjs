@@ -16,6 +16,7 @@ const { zhTWLocale } = await jiti.import("../lib/i18n/messages/zh-TW.ts");
 
 const appShell = await readFile(new URL("./AppShell.tsx", import.meta.url), "utf8");
 const agentPanel = await readFile(new URL("./AgentSessionPanel.tsx", import.meta.url), "utf8");
+const debugPanel = await readFile(new URL("./DebugPanel.tsx", import.meta.url), "utf8");
 
 const KEYS = [
   "session.machineLoad",
@@ -56,12 +57,8 @@ test("all three locales resolve every section key", () => {
   assert.notEqual(zhTWLocale.messages["session.machineLoad"], zhCNLocale.messages["session.machineLoad"]);
 });
 
-test("AppShell mounts it only inside the Session-info popover; the Agents dropdown is untouched", () => {
-  assert.equal((appShell.match(/<MachineLoadSection /g) || []).length, 1);
-  const sessionBlock = appShell.indexOf('activeTopPanel === "session" && (');
-  const debugBlock = appShell.indexOf('activeTopPanel === "debug" && (', sessionBlock);
-  const mount = appShell.indexOf("<MachineLoadSection translate={translate} />");
-  assert.ok(sessionBlock >= 0 && sessionBlock < mount && mount < debugBlock, "mounted in the session popover block");
-  assert.ok(appShell.lastIndexOf('className="session-info-popover"', mount) > sessionBlock);
+test("only the Debug panel mounts it: not the Session-info popover, not the Agents dropdown", () => {
+  assert.doesNotMatch(appShell, /MachineLoadSection|machine-load/, "AppShell (the Session-info popover) mounts no section and polls nothing");
+  assert.equal((debugPanel.match(/<MachineLoadSection /g) || []).length, 1);
   assert.doesNotMatch(agentPanel, /MachineLoad|machine-load/);
 });

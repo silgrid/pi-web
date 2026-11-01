@@ -4,7 +4,9 @@ import type { PolyforgeJob } from "./polyforge-status";
  * Client-safe model of the Polyforge Jobs-tab card stream:
  * the wire types `GET /api/polyforge/cards` answers with, its bounds, the
  * opaque progress cursor, title truncation, step-duration text and the two
- * client merges (progress entries, last-good snapshot). No Node import may
+ * client merges (progress entries, last-good snapshot); plus the job
+ * detail's short title and execution-progress wire types, bounds and
+ * last-good merge. No Node import may
  * enter this file: the panel and the hook load it in the browser.
  */
 
@@ -21,6 +23,11 @@ export const CARD_RESPONSE_MAX_BYTES = 128 * 1024;
 export const CARD_CLIENT_MAX_ENTRIES = 200;
 /** Cards a request may carry cursors for. */
 export const CARD_CURSORS_MAX = 200;
+
+/** The job detail's execution-progress face: the newest
+ *  entries one response carries, and its entry-JSON byte bound. */
+export const PROGRESS_MAX_ENTRIES = 50;
+export const PROGRESS_MAX_BYTES = 32 * 1024;
 
 /** `c1.<16 hex transcript identity>.<byte offset>` — opaque, never a path. */
 const CURSOR_PATTERN = /^c1\.([0-9a-f]{16})\.(\d{1,15})$/;
@@ -117,6 +124,25 @@ export interface PolyforgeCard {
   progress: PolyforgeCardProgress;
 }
 
+/** One execution-progress entry: the assistant's narration
+ *  (`narration`, as on the card) or one tool call reduced to
+ *  `<name>: <primary argument>` (`tool`), credential-masked and capped. A
+ *  tool result, thinking or a user/system prompt never becomes an entry. */
+export interface PolyforgeProgressEntry {
+  /** Unique within its transcript; never a path. */
+  id: string;
+  kind: "narration" | "tool";
+  text: string;
+}
+
+/** `GET /api/polyforge/progress?wi=` — the current step's newest tail; a
+ *  fresh page each time, so it replaces what the client holds wholesale. */
+export interface PolyforgeProgressTail {
+  /** False: no readable/recognised transcript for the current step. */
+  available: boolean;
+  entries: PolyforgeProgressEntry[];
+}
+
 export interface PolyforgeCardsResponse {
   pfPresent?: boolean;
   /** Null on a degraded read (pf absent, daemon down): keep the last cards. */
@@ -164,6 +190,18 @@ export function truncateCardTitle(goal: string, length: number): string {
   return `${points.slice(0, Math.max(0, length)).join("")}…`;
 }
 
+/** A running job's card-label suffix: the job's age in whole
+ *  minutes since its earliest `job_started` —
+ *  floor((now − startedAt) / 60s), never hours (`125m`). `0m` under a minute
+ *  and for a negative age (clock skew); a missing or unparsable `startedAt`
+ *  yields null, so the caller shows the bare status label. */
+export function cardRunningMinutes(startedAt: string | undefined, now: number): number | null {
+  if (!startedAt) return null;
+  const startedMs = Date.parse(startedAt);
+  if (!Number.isFinite(startedMs)) return null;
+  return Math.max(0, Math.floor((now - startedMs) / 60_000));
+}
+
 /** Truncate to `max` code points (no ellipsis; the server-side entry cap). */
 export function capCodePoints(value: string, max: number): string {
   const points = Array.from(value);
@@ -182,6 +220,24 @@ export function formatCardDuration(seconds: number): string {
   if (h > 0) return `${h}h ${pad(m)}m ${pad(s)}s`;
   if (m > 0) return `${m}m ${pad(s)}s`;
   return `${s}s`;
+}
+
+/** A conventional-commit `type(scope)!:` prefix (`feat:`, `fix(ui)!:`). */
+const COMMIT_PREFIX = /^[A-Za-z]+(?:\([^)\n]*\))?!?:\s*/;
+/** The first clause boundary: `——`, ` — `, `：`, `:`, `。` or a newline. */
+const CLAUSE_BOUNDARY = /——| — |：|:|。|\n/;
+
+/** The job detail's short title: a pure first-clause
+ *  heuristic over the goal — strip a conventional-commit prefix, cut at the
+ *  first clause boundary, trim. No model, no server title; the one-line fit
+ *  is CSS ellipsis. Undefined when nothing readable remains (the title row
+ *  then shows the slug alone, never an invented title). */
+export function shortJobTitle(goal: string | null | undefined): string | undefined {
+  if (typeof goal !== "string") return undefined;
+  const body = goal.trim().replace(COMMIT_PREFIX, "");
+  const cut = CLAUSE_BOUNDARY.exec(body);
+  const title = (cut ? body.slice(0, cut.index) : body).trim();
+  return title || undefined;
 }
 
 // ---- client merges ----
@@ -223,6 +279,31 @@ export function nextCardSnapshot(
     const entries = mergeCardProgress(before?.progress.entries ?? [], card.progress);
     return { ...card, progress: { ...card.progress, entries, reset: undefined } };
   });
+}
+
+function isProgressEntry(value: unknown): value is PolyforgeProgressEntry {
+  if (!value || typeof value !== "object") return false;
+  const entry = value as Record<string, unknown>;
+  return typeof entry.id === "string" && typeof entry.text === "string"
+    && (entry.kind === "narration" || entry.kind === "tool");
+}
+
+/** The progress tail to render after a read. A failed
+ *  request (`body` not a tail), a degraded body (`available: false`) or a
+ *  malformed one keeps the previous tail — no flash, no error readout; a
+ *  usable body replaces it wholesale (a step change never splices). With
+ *  nothing held yet, a degraded body is the unavailable state. Pure. */
+export function nextProgressTail(
+  previous: PolyforgeProgressTail | null,
+  body: unknown,
+): PolyforgeProgressTail | null {
+  if (!body || typeof body !== "object") return previous;
+  const tail = body as Record<string, unknown>;
+  if (typeof tail.available !== "boolean" || !Array.isArray(tail.entries)) return previous;
+  if (!tail.available) return previous ?? { available: false, entries: [] };
+  if (!tail.entries.every(isProgressEntry)) return previous;
+  const entries = tail.entries.slice(-PROGRESS_MAX_ENTRIES).map(({ id, kind, text }) => ({ id, kind, text }));
+  return { available: true, entries };
 }
 
 /** The cursor map the next request sends (wi → cursor). */

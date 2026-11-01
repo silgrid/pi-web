@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { isPolyforgeVersionBelowMinimum } from "./polyforge-detect";
+import { polyforgePfBin } from "./polyforge-pf-bin";
 import type { PolyforgeConfigSchema } from "./polyforge-config-schema";
 import {
   probePolyforgeVersion,
@@ -39,11 +40,40 @@ export interface PolyforgeConfigItem {
   stale_reason?: string;
 }
 
+export interface PolyforgeConfigStepAttr {
+  value?: string | number;
+  declared: boolean;
+  source: string;
+  class: string;
+  default?: string | number;
+  schema?: PolyforgeConfigSchema;
+}
+
 export interface PolyforgeConfigStep {
   project?: string;
   step: string;
   declared: boolean;
   models: string[] | null;
+  /** `file` | `default`; absent from an older pf. */
+  source?: string;
+  /** pf's reload class of the step key (`live`); absent from an older pf. */
+  class?: string;
+  attrs?: Record<string, PolyforgeConfigStepAttr>;
+}
+
+export interface PolyforgeMemoryPolicyEntry {
+  record: string[];
+  skip: string[];
+  declared: boolean;
+}
+
+/** The workspace yaml's memory_policy block (read-only). */
+export interface PolyforgeMemoryPolicy {
+  source: string;
+  class: string;
+  appendToDefault: boolean;
+  default: PolyforgeMemoryPolicyEntry;
+  projects: Record<string, PolyforgeMemoryPolicyEntry>;
 }
 
 export interface PolyforgeConfigReload {
@@ -66,6 +96,7 @@ export interface PolyforgeConfigRead {
   steps_complete?: boolean;
   summarize?: Record<string, { value: unknown; source: string; class?: string; schema?: PolyforgeConfigSchema }>;
   workspaceFile?: { sha256: string | null; exists: boolean };
+  memoryPolicy?: PolyforgeMemoryPolicy;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -82,7 +113,7 @@ function finite(value: unknown): number | undefined {
 
 function runPf(argv: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
-    const child = spawn("pf", argv, { shell: false, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(polyforgePfBin(), argv, { shell: false, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
     const timer = setTimeout(() => {
@@ -192,12 +223,74 @@ function daemonValueFor(key: string, doc: Record<string, unknown>): { value: str
   return undefined;
 }
 
-function sanitizeWorkspace(raw: unknown): {
+function stringList(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
+}
+
+function sanitizePolicyEntry(raw: unknown): PolyforgeMemoryPolicyEntry {
+  const entry = isRecord(raw) ? raw : {};
+  return { record: stringList(entry.record), skip: stringList(entry.skip), declared: entry.declared === true };
+}
+
+/** pf's memory_policy block → the read shape; null when pf reported none. */
+export function sanitizeMemoryPolicy(raw: unknown): PolyforgeMemoryPolicy | null {
+  if (!isRecord(raw)) return null;
+  const projects: Record<string, PolyforgeMemoryPolicyEntry> = {};
+  if (isRecord(raw.projects)) {
+    for (const [project, entry] of Object.entries(raw.projects)) projects[project] = sanitizePolicyEntry(entry);
+  }
+  return {
+    source: str(raw.source) || "default",
+    class: str(raw.class),
+    appendToDefault: raw.append_to_default === true,
+    default: sanitizePolicyEntry(raw.default),
+    projects,
+  };
+}
+
+function scalarValue(value: unknown): string | number | undefined {
+  return typeof value === "string" || (typeof value === "number" && Number.isFinite(value)) ? value : undefined;
+}
+
+/** One `steps.<project>.<id>` entry of pf's workspace read, sanitized. */
+export function sanitizeStepEntry(project: string | undefined, step: string, entry: Record<string, unknown>): PolyforgeConfigStep {
+  const out: PolyforgeConfigStep = {
+    ...(project !== undefined ? { project } : {}),
+    step,
+    declared: entry.declared === true,
+    models: Array.isArray(entry.models) ? stringList(entry.models) : null,
+  };
+  const source = str(entry.source);
+  if (source) out.source = source;
+  const cls = str(entry.class);
+  if (cls) out.class = cls;
+  if (isRecord(entry.attrs)) {
+    const attrs: Record<string, PolyforgeConfigStepAttr> = {};
+    for (const [name, raw] of Object.entries(entry.attrs)) {
+      if (!isRecord(raw)) continue;
+      const value = scalarValue(raw.value);
+      const fallback = scalarValue(raw.default);
+      attrs[name] = {
+        declared: raw.declared === true,
+        source: str(raw.source) || "default",
+        class: str(raw.class),
+        ...(value !== undefined ? { value } : {}),
+        ...(fallback !== undefined ? { default: fallback } : {}),
+        ...(isRecord(raw.schema) && typeof raw.schema.kind === "string" ? { schema: raw.schema as PolyforgeConfigSchema } : {}),
+      };
+    }
+    out.attrs = attrs;
+  }
+  return out;
+}
+
+export function sanitizeWorkspace(raw: unknown): {
   mapped: boolean;
   summarize?: Record<string, { value: unknown; source: string; class?: string; schema?: PolyforgeConfigSchema }>;
   steps?: PolyforgeConfigStep[];
   steps_complete?: boolean;
   workspaceFile?: { sha256: string | null; exists: boolean };
+  memoryPolicy?: PolyforgeMemoryPolicy;
 } {
   if (!isRecord(raw)) return { mapped: false };
   if (raw.mapped !== true) return { mapped: false };
@@ -227,31 +320,25 @@ function sanitizeWorkspace(raw: unknown): {
     for (const [outer, value] of Object.entries(raw.steps)) {
       if (!isRecord(value)) continue;
       if (typeof value.declared === "boolean") {
-        steps.push({
-          step: outer,
-          declared: value.declared,
-          models: Array.isArray(value.models) ? value.models.filter((m): m is string => typeof m === "string") : null,
-        });
+        steps.push(sanitizeStepEntry(undefined, outer, value));
         continue;
       }
-      // Real pf groups candidates per project.
+      // Real pf groups candidates per project; every mapped project carries
+      // a `default` and a `task` entry besides the step ids.
       for (const [step, entry] of Object.entries(value)) {
         if (!isRecord(entry) || typeof entry.declared !== "boolean") continue;
-        steps.push({
-          project: outer,
-          step,
-          declared: entry.declared,
-          models: Array.isArray(entry.models) ? entry.models.filter((m): m is string => typeof m === "string") : null,
-        });
+        steps.push(sanitizeStepEntry(outer, step, entry));
       }
     }
   }
+  const memoryPolicy = sanitizeMemoryPolicy(raw.memory_policy);
   return {
     mapped: true,
     summarize,
     steps,
     steps_complete: raw.steps_complete !== false,
     ...(yaml ? { workspaceFile: yaml } : {}),
+    ...(memoryPolicy ? { memoryPolicy } : {}),
   };
 }
 
@@ -332,6 +419,7 @@ export async function readPolyforgeConfig(cwd: string): Promise<PolyforgeConfigR
   let steps: PolyforgeConfigStep[] | undefined;
   let stepsComplete: boolean | undefined;
   let workspaceFile: PolyforgeConfigRead["workspaceFile"];
+  let memoryPolicy: PolyforgeMemoryPolicy | undefined;
   if (cwd) {
     try {
       const ws = sanitizeWorkspace(await runPfJson(["--json", "config", "workspace", "--cwd", cwd]));
@@ -340,6 +428,7 @@ export async function readPolyforgeConfig(cwd: string): Promise<PolyforgeConfigR
       steps = ws.steps;
       stepsComplete = ws.steps_complete;
       workspaceFile = ws.workspaceFile;
+      memoryPolicy = ws.memoryPolicy;
       if (ws.mapped && ws.summarize) {
         for (const name of ["models", "language", "interval_sec"] as const) {
           const entry = ws.summarize[name];
@@ -392,5 +481,6 @@ export async function readPolyforgeConfig(cwd: string): Promise<PolyforgeConfigR
     ...(steps ? { steps } : {}),
     ...(stepsComplete !== undefined ? { steps_complete: stepsComplete } : {}),
     ...(workspaceFile ? { workspaceFile } : {}),
+    ...(memoryPolicy ? { memoryPolicy } : {}),
   };
 }

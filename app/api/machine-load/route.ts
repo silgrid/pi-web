@@ -6,8 +6,8 @@ import type { MachineLoadMetrics } from "@/lib/machine-load-view";
 export const dynamic = "force-dynamic";
 
 /**
- * GET /api/machine-load — the host's aggregate load for the Session-info
- * popover: exactly `{ metrics: { cpuPercent, coreCount,
+ * GET /api/machine-load — the host's aggregate load for the Debug panel
+ * (#168; its only consumer since): exactly `{ metrics: { cpuPercent, coreCount,
  * loadavg, memoryUsedBytes, memoryTotalBytes } }`, sampled on demand and
  * shared across clients for 2 s (lib/machine-load.ts). Degradation-first like
  * /api/polyforge/status: a failed sample answers 200 `{ metrics: null }`;
