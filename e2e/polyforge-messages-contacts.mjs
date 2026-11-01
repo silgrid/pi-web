@@ -1,3 +1,4 @@
+// carries: components/Polyforge*, components/polyforge-*, hooks/usePolyforge*, lib/polyforge*, app/api/polyforge/*
 // — pi-web Messages contact-list acceptance e2e (authored before code).
 //
 // Drives the spec's contact-list behaviour through the real panel against a

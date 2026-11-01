@@ -1,3 +1,5 @@
+// carries: components/Polyforge*, components/polyforge-*, hooks/usePolyforge*, lib/polyforge*, app/api/polyforge/*
+// carries: components/AppShell*, lib/i18n/*
 // — Polyforge panel UI revision (re-filed from).
 //
 // Authored pre-code against artifacts/spec.md (the owner-confirmed acceptance
@@ -14,6 +16,11 @@
 //   - mobile Messages is a single-view switch with no side-by-side pane.
 //
 //   node e2e/polyforge-panel-213.mjs
+//
+// e2e/all: isolated — a precaution: names this suite, and it
+// shares work-tab-163's openDock() click path, whose 8 s click timed out in
+// the parallel bar. S213-12's own red runs (#236) were a
+// context-read race, fixed by mocking the live status read, not by isolation.
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -22,7 +29,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
 import { startNextServer } from "./next-server.mjs";
-import { NAV_MS } from "./timeouts.mjs";
+import { ACTION_MS, NAV_MS } from "./timeouts.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const distDir = process.env.PI_WEB_DIST_DIR || ".next/e2e/polyforge-panel-213";
@@ -95,6 +102,11 @@ async function check(id, fn) {
 const errors = [];
 let browser; let base; let stop = async () => {};
 const json = (route, body) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) });
+// the session's context usage is one fact, served by two route
+// faces: the mount's /api/sessions/<id>/state read and the connect-time
+// /api/agent/<id>?systemPrompt=0 status read. Both mocks answer from this
+// constant so a lost request-order race cannot make the two faces disagree.
+const CONTEXT_USAGE = { percent: 42, contextWindow: 200_000, tokens: 84_000 };
 async function openPage({ viewport = { width: 1280, height: 800 }, storage = {} } = {}) {
   const context = await browser.newContext({ viewport, locale: "zh-CN" });
   await context.addInitScript(({ prefs }) => {
@@ -105,7 +117,7 @@ async function openPage({ viewport = { width: 1280, height: 800 }, storage = {} 
     } catch { /* storage unavailable */ }
   }, { prefs: storage });
   const page = await context.newPage();
-  page.setDefaultTimeout(10_000);
+  page.setDefaultTimeout(ACTION_MS);
   await page.route((url) => url.pathname.startsWith("/api/polyforge/"), (route) => {
     const path = new URL(route.request().url()).pathname;
     if (path === "/api/polyforge/status") return json(route, status);
@@ -122,10 +134,20 @@ async function openPage({ viewport = { width: 1280, height: 800 }, storage = {} 
   page.on("console", (event) => { if (event.type() === "error") errors.push(event.text()); });
   // the stats strip's context reading comes from the mount's
   // state read, and the chat-id suffix from its own route.
+  // / #236: the page's live status read (GET /api/agent/<id>,
+  // issued once the event stream opens) also applies a context reading, and
+  // the newer of the two reads wins; unmocked it reports the real wrapper's
+  // usage of this fixture (1469%), so it answers the same state as the
+  // mount's read. Leave POST (and every other /api/agent path) to the server.
   await page.route("**/api/sessions/*/state", (route) => json(route, {
     running: false,
-    state: { contextUsage: { percent: 42, contextWindow: 200_000, tokens: 84_000 } },
+    state: { contextUsage: CONTEXT_USAGE },
   }));
+  await page.route((url) => url.pathname === `/api/agent/${SESSION}`, (route) => (
+    route.request().method() === "GET"
+      ? json(route, { running: false, state: { contextUsage: CONTEXT_USAGE } })
+      : route.fallback()
+  ));
   await page.route("**/api/sessions/*/chat-id", (route) => json(route, { chatId: "chat_e2e213_0123456789abcdef" }));
   await page.goto(`${base}/?session=${SESSION}`, { waitUntil: "domcontentloaded", timeout: NAV_MS });
   await page.getByText("E2E pf panel 213 host session").first().waitFor({ state: "attached", timeout: NAV_MS });
@@ -142,8 +164,16 @@ const card = (page, wi) => dock(page).locator(`[data-pf-card-wi="${wi}"]`);
 const cardsOn = (page) => dock(page).locator("[data-pf-card-wi]");
 const taskBlocks = (page) => dock(page).locator("[data-pf-task]");
 async function openDock(page) {
+  // the toggle renders only after the mount-time status probe
+  // (`pfPresent`) and, since, is resident at ≤480px / inline
+  // wider. Never open ⋯ to reveal it: ⋯'s overlay covers that slot and
+  // intercepts the click. Wait for the toggle, close ⋯ if it is open, click.
   const more = page.locator('[data-mobile-toolbar-more="true"]');
-  if ((await pfButton(page).count()) === 0 && (await more.count()) > 0 && (await more.getAttribute("aria-expanded")) !== "true") await more.click();
+  await waitFor(async () => (await pfButton(page).count()) > 0, "the Polyforge toggle renders", 20_000);
+  if ((await more.count()) > 0 && (await more.getAttribute("aria-expanded")) === "true") {
+    await more.click();
+    await page.locator('[data-mobile-toolbar-actions="true"]').waitFor({ state: "hidden", timeout: 10_000 });
+  }
   await pfButton(page).click(); await dock(page).waitFor({ timeout: 20_000 }); return dock(page);
 }
 async function openWork(page, sub) {
@@ -493,7 +523,8 @@ try {
             || node.classList.contains("mobile-session-stat-cost")
             || (node.children.length === 0 && !node.closest("svg"))
           )).length);
-          return text.includes("12.3M") && text.includes("$12.34") && text.includes("42%") && count === 5;
+          if (text.includes("12.3M") && text.includes("$12.34") && text.includes("42%") && count === 5) return true;
+          throw new Error(`${count} items, ${JSON.stringify(text)}`);
         }, `${width}px: all five stats items render`, 30_000);
         await setStatsScroll(page, stats, 0);
         const start = await statsSnapshot(stats);

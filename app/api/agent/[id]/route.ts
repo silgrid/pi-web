@@ -2,6 +2,8 @@ import { NextResponse } from "next/server";
 import { resolveSessionPath } from "@/lib/session-reader";
 import { getRpcSession, isSessionReloadedFromDiskError, setRpcSessionTools, startRpcSession } from "@/lib/rpc-manager";
 import { cwdMissingBody, missingCwdFromBody } from "@/lib/missing-cwd";
+import { getClaudeSessionRecord } from "@/lib/claude-index";
+import { CLAUDE_SESSION_COMMANDS, getClaudeSession, startClaudeSession } from "@/lib/claude-session";
 
 // POST /api/agent/[id] - Send a command to an existing session
 export async function POST(
@@ -23,6 +25,19 @@ export async function POST(
       throw new Error("toolNames must be an array of strings");
     }
     const toolNames = requestedToolNames as string[] | undefined;
+
+    // A claude session: its own child, started (`--resume`) for a command
+    // when none is alive. pi-only commands are refused, never routed to a pi wrapper.
+    const claudeRecord = getClaudeSessionRecord(id);
+    if (claudeRecord) {
+      if (!commandType || !CLAUDE_SESSION_COMMANDS.has(commandType)) {
+        return NextResponse.json({ error: `${String(commandType)} is not available for claude sessions` }, { status: 400 });
+      }
+      const claudeSession = getClaudeSession(id) ?? startClaudeSession(claudeRecord);
+      const result = await claudeSession.send(body);
+      promptAccepted = body.type === "prompt";
+      return NextResponse.json({ success: true, data: result });
+    }
 
     // Fast path: already-running session
     const existing = getRpcSession(id);
@@ -99,6 +114,8 @@ export async function GET(
   const { id } = await params;
 
   try {
+    const claudeSession = getClaudeSession(id);
+    if (claudeSession) return NextResponse.json({ running: true, state: await claudeSession.send({ type: "get_state" }) });
     const session = getRpcSession(id);
     if (!session || !session.isAlive()) {
       return NextResponse.json({ running: false });

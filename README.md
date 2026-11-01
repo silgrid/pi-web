@@ -28,6 +28,8 @@ Update one row per upstream merge so the table stays the mapping between the for
 - **Two ways to branch**: **New session** creates an independent session file from an earlier message; **Edit from here** creates a branch inside the current session.
 - **Project file tools**: browse and upload files, inspect Git diffs, and preview source, Markdown, images, audio, PDFs, and DOCX files with automatic refresh.
 - **Web-based configuration**: manage provider login and API keys, models, model tests, plugin packages, and skills without leaving Pi Web.
+- **Polyforge panel**: with a local `pf` on the machine, a topbar button opens a dock panel (a bottom sheet on phones) for Polyforge: Jobs cards and a job detail with its step graph and whole-job execution progress, Tasks, the 工单列表 work item list, project Memory, and Messages with project-grouped contacts and member management. See [docs/agents/polyforge-panel.md](docs/agents/polyforge-panel.md).
+- **claude sessions**: a fresh composer picks the pi or the claude harness; a claude session keeps a fixed model alias and a `read-only` or `writable` tool preset for its life, and runs claude with its own config dir, `<pi agent dir>/claude`. See [docs/agents/claude-sessions.md](docs/agents/claude-sessions.md).
 - **English, Simplified Chinese, and Traditional Chinese UI**: Pi Web follows the browser language initially and provides a language switcher in the top bar.
 
 ## Quick Start

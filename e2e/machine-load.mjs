@@ -1,3 +1,4 @@
+// carries: components/MachineLoadSection*, components/DebugPanel*, components/debug-panel-state*, hooks/useMachineLoad*, lib/machine-load*, app/api/machine-load/*
 // (wi_p2nDPX2BoBAp) — pi-web machine load, since
 // in the Debug panel only (the last full-width row of its `.debug-cols` grid);
 // the Session-info popover no longer carries it (ML01 pins both halves).

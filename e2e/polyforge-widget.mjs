@@ -1,3 +1,5 @@
+// carries: components/Polyforge*, components/polyforge-*, hooks/usePolyforge*, lib/polyforge*, app/api/polyforge/*
+// carries: components/ExtensionStatusBar*, components/ExtensionWidgets*, lib/extension-widgets*, hooks/useAgentSession*
 // pi#111 (wi_1L8cqUGexPVb) — the pf-chat `polyforge` widget never renders in
 // the chat pane's bottom extension shelf (the dock panel and topbar badge
 // carry that progress; see e2e/polyforge.mjs for those). Standalone, like

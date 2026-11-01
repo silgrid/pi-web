@@ -13,6 +13,8 @@
 - **两种分支方式**：**新会话**会从较早的消息创建独立会话文件；**从此处编辑**会在当前会话内创建分支。
 - **项目文件工具**：浏览和上传文件、查看 Git Diff，并预览源码、Markdown、图片、音频、PDF 和 DOCX；文件变化后会自动刷新。
 - **网页配置**：无需离开 Pi Web，即可管理 Provider 登录和 API Key、模型、模型测试、插件包及技能。
+- **Polyforge 面板**：本机装有 `pf` 时，顶部栏按钮会打开 Polyforge 停靠面板（手机上为底部抽屉）：Jobs 卡片与作业详情（步骤图和整个作业的执行进度）、Tasks、工单列表、项目 Memory，以及按项目分组联系人并可管理成员的 Messages。详见 [agents/polyforge-panel.md](./agents/polyforge-panel.md)。
+- **claude 会话**：新建会话时可在 pi 与 claude 两种 harness 之间选择；claude 会话在整个生命周期内固定模型别名和 `read-only` / `writable` 工具预设，并使用专用配置目录 `<pi agent dir>/claude` 运行 claude。详见 [agents/claude-sessions.md](./agents/claude-sessions.md)。
 - **英文、简体中文和繁体中文界面**：Pi Web 首次打开时跟随浏览器语言，也可从顶部栏切换语言。
 
 ## 快速开始

@@ -1806,6 +1806,9 @@ export function AppShell() {
     });
   }, [fileTabs, terminalTabs, agentTabs]);
 
+  // a claude session has no HTML export, background tasks or subagents.
+  const selectedIsClaude = selectedSession?.harness === "claude";
+
   const handleViewFullHistory = useCallback(() => {
     if (!selectedSession) return;
     // Render the export snapshot inside the right panel instead of a contextless
@@ -2284,7 +2287,7 @@ export function AppShell() {
       <div style={{ display: "flex", alignItems: "stretch", height: "100%" }}>
         {includePolyforge && renderPolyforgeButton(mobile)}
         {showChatActions && (<>
-        <button
+        {!selectedIsClaude && <button
           type="button"
           onClick={() => {
             setBgPanelOpen((open) => {
@@ -2343,8 +2346,18 @@ export function AppShell() {
               {bgRunningCount > 9 ? "9+" : bgRunningCount}
             </span>
           )}
-        </button>
-        <button
+        </button>}
+        {selectedIsClaude ? (
+          // HTML export is pi's: unavailable, said in visible text (hidden on a phone's icon row).
+          !mobile && (
+            <span
+              className="claude-export-unavailable"
+              style={{ display: "flex", alignItems: "center", padding: "0 12px", borderRight: "1px solid var(--border)", color: "var(--text-dim)", fontSize: 11, whiteSpace: "nowrap", flexShrink: 0 }}
+            >
+              {translate("claude.exportUnavailable")}
+            </span>
+          )
+        ) : <button
           type="button"
           onClick={() => {
             handleViewFullHistory();
@@ -2404,8 +2417,8 @@ export function AppShell() {
             <path d="M12 7v5l3 2" />
           </svg>
           {!mobile && <span>{translate("history.label")}</span>}
-        </button>
-        {(() => {
+        </button>}
+        {!selectedIsClaude && (() => {
           // 上下文压缩后当前消息可能不再包含 user 消息，需同时参考会话文件的消息总数。
           const hasMessages = Boolean(
             selectedSession
@@ -2483,7 +2496,7 @@ export function AppShell() {
             </button>
           );
         })()}
-        {hasSubagentSessions && agentsBadge && (
+        {!selectedIsClaude && hasSubagentSessions && agentsBadge && (
           <button
             type="button"
             onClick={() => toggleTopPanel("agents", mobile)}

@@ -1,3 +1,4 @@
+// carries: components/Polyforge*, components/polyforge-*, hooks/usePolyforge*, lib/polyforge*, app/api/polyforge/*
 // — pi-web dock panels: browse-by-default Memory, read-only
 // Tasks tab, tab reorder, persisted desktop pin, and the mermaid contract.
 //

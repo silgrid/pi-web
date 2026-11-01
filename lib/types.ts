@@ -407,6 +407,13 @@ export interface SessionInfo {
   /** True while the runtime session exists only in memory and its JSONL file
    *  has not been created yet. Disk-backed actions must wait until this clears. */
   transient?: boolean;
+  /** The agent the session runs on; absent means pi. "claude" rows come from
+   *  pi-web's claude index, never from a pi session file. */
+  harness?: "pi" | "claude";
+  /** A claude session's fixed model alias and tool preset (claude rows only). */
+  claude?: { modelAlias: string; preset: string };
+  /** Archived in pi-web's claude index (claude rows only; pi rows keep the browser's archive set). */
+  archived?: boolean;
 }
 
 export interface SessionContext {

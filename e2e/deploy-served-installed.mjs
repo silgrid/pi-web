@@ -1,3 +1,4 @@
+// carries: deploy-piweb.sh, bin/pi-web-deploy.js, bin/pi-web.js
 // Served == installed deploy contract (re-pinned by
 //).
 //

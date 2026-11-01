@@ -1,3 +1,4 @@
+// carries: deploy-piweb.sh, bin/pi-web-deploy.js
 // pi#107 repro e2e: deploy-piweb.sh must be tunnel-idempotent (pi#38 followup).
 //
 // Claim under test: `deploy-piweb.sh` with PIWEB_EXPOSE=cloudflare /

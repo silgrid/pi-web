@@ -1,14 +1,18 @@
 "use client";
 
-import { memo, useCallback, useEffect, useState, type ReactNode } from "react";
-import type { PolyforgeEvent, PolyforgeJob, PolyforgeOpsStatus, PolyforgeWatchStatus } from "@/lib/polyforge-status";
+import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from "react";
+import type { PolyforgeJob, PolyforgeOpsStatus, PolyforgeWatchStatus } from "@/lib/polyforge-status";
 import {
   cardRunningMinutes,
   formatCardDuration,
+  formatProgressClock,
+  isProgressPinnedToBottom,
   polyforgeCardKey,
   shortJobTitle,
   truncateCardTitle,
   type PolyforgeCard,
+  type PolyforgeProgressLine,
+  type PolyforgeProgressTone,
 } from "@/lib/polyforge-cards-pure";
 import { POLYFORGE_BLOCK_STYLE } from "@/lib/panel-layout";
 import { usePolyforgePanelPreferences } from "@/hooks/usePolyforgePanelPreferences";
@@ -55,102 +59,6 @@ export function formatAge(seconds: number): string {
 const JOB_STATUS_KEYS = new Set(["running", "needs_input", "paused", "queued", "completed", "failed", "cancelled"]);
 const STEP_STATUS_KEYS = new Set(["done", "in_progress", "pending", "failed", "blocked", "cancelled", "skipped"]);
 const WORKFLOW_STATUS_KEYS = new Set(["running", "needs_input", "queued", "completed", "blocked", "failed", "cancelled", "done"]);
-const EVENT_KIND_KEYS = new Set([
-  "published", "transcript_missing", "exec_init", "step_started", "step_done",
-  "step_failed", "step_dead", "candidate_switched", "needs_input", "answered",
-  "gate_verdict", "rewind", "envelope_rejected", "needs_recovery", "push_failed",
-  "job_started", "job_stopped", "terminal", "authored_tests_rebaselined",
-]);
-const EVENT_ARROW_KINDS = new Set(["candidate_switched", "rewind"]);
-
-/** Severity colours (pi#112): amber needs_input; red failure kinds; green
- *  terminal completed; terminal cancelled and everything else neutral. */
-const EVENT_SEVERITY_COLORS: Record<string, string> = {
-  amber: "#d97706",
-  red: "#dc2626",
-  green: "#16a34a",
-};
-
-/** Global (browser-wide) storage key for the event tail display mode. */
-const EVENT_MODE_STORAGE_KEY = "pi-web:polyforge-event-mode";
-
-type EventMode = "simple" | "verbose";
-
-export type PolyforgeTailRow =
-  | { noise: true; count: number }
-  | { noise: false; event: PolyforgeEvent };
-
-const EVENT_NOISE_KINDS = new Set(["published", "transcript_missing", "exec_init"]);
-
-/** Collapse each consecutive run of noise events into a single
- *  `{ noise: true, count }` marker (N≥1 uniform). Meaningful events are
- *  never collapsed. Pure helper, no I/O. */
-export function collapseNoiseRuns(events: PolyforgeEvent[]): PolyforgeTailRow[] {
-  const noise = EVENT_NOISE_KINDS;
-  const rows: PolyforgeTailRow[] = [];
-  for (const event of events) {
-    const last = rows[rows.length - 1];
-    if (noise.has(event.kind)) {
-      if (last && last.noise) last.count += 1;
-      else rows.push({ noise: true, count: 1 });
-    } else {
-      rows.push({ noise: false, event });
-    }
-  }
-  return rows;
-}
-
-/** Severity emphasis per kind (pi#112): amber needs_input; red failure kinds;
- *  green terminal completed; terminal cancelled and everything else neutral. */
-export function eventSeverity(event: { kind: string; status?: string }): "amber" | "red" | "green" | null {
-  if (event.kind === "needs_input") return "amber";
-  if (event.kind === "terminal") {
-    if (event.status === "completed") return "green";
-    if (event.status === "failed") return "red";
-    return null;
-  }
-  if (
-    event.kind === "step_failed"
-    || event.kind === "step_dead"
-    || event.kind === "push_failed"
-    || event.kind === "envelope_rejected"
-    || event.kind === "needs_recovery"
-  ) {
-    return "red";
-  }
-  return null;
-}
-
-/** Whitelisted field values of an event, in display order (untruncated). */
-export function eventValueParts(event: PolyforgeEvent): (string | undefined)[] {
-  switch (event.kind) {
-    case "step_started":
-      return [event.step, event.model];
-    case "candidate_switched":
-      return [event.step, event.from, event.to];
-    case "step_failed":
-    case "step_dead":
-      return [event.step, event.cause];
-    case "rewind":
-      return [event.gate, event.target];
-    case "terminal":
-      return [event.status];
-    default:
-      return [event.step];
-  }
-}
-
-/** Row display text: whitelisted values, each ellipsized at 24 chars. Arrow
- *  kinds pair their last two fields with `→` (`from → to`, `gate → target`);
- *  any leading field (`candidate_switched`'s step) joins with `·`, e.g.
- *  `alpha-plan · pi:old → claude:new`. */
-export function formatEventValues(event: PolyforgeEvent): string {
-  const shown = eventValueParts(event).filter((v): v is string => !!v).map(shortenCandidate);
-  if (!EVENT_ARROW_KINDS.has(event.kind)) return shown.join(" · ");
-  const head = shown.slice(0, -2).join(" · ");
-  const tail = shown.slice(-2).join(" → ");
-  return head ? `${head} · ${tail}` : tail;
-}
 
 /** Node colour for the step flow graph (pi#114, R6): status colour from the
  *  explicit map; unknown statuses read gray, never a missing entry. */
@@ -280,6 +188,13 @@ function liveStepTimings(steps: { name: string; status: string; startedAt?: stri
   return buildStepTimings(steps, Date.now());
 }
 
+/** The job's total elapsed time at render, the
+ *  liveStepTimings clock-at-render pattern: the 3 s watch poll re-renders the
+ *  panel, so it stays live without a dedicated timer. */
+function liveElapsedSec(startMs: number): number {
+  return (Date.now() - startMs) / 1000;
+}
+
 /** A status job shown before the first card read: the slug and status
  *  from the status poll (the needs-input marker included), no goal, no
  *  steps, no narration (the card renders none), and whether
@@ -288,38 +203,87 @@ function statusOnlyCard(job: PolyforgeJob, available: boolean): PolyforgeCard {
   return { job, steps: [], progress: { available, entries: [] } };
 }
 
+/** Event-line colours: the ruled tones; absent = neutral. */
+const PROGRESS_TONE_COLORS: Record<PolyforgeProgressTone, string> = {
+  accent: "var(--accent)",
+  dim: "var(--text-dim)",
+  red: "#dc2626",
+  amber: "#d97706",
+  green: "#16a34a",
+};
+
+/** One stream line's style: narration in the text colour, a tool line mono
+ *  and dim, an event line in its tone (neutral `var(--text-muted)`). */
+function progressLineStyle(line: PolyforgeProgressLine): CSSProperties {
+  if (line.kind === "tool") return { color: "var(--text-dim)", fontFamily: "var(--font-mono, monospace)" };
+  if (line.kind === "event") return { color: line.tone ? PROGRESS_TONE_COLORS[line.tone] : "var(--text-muted)", fontFamily: "var(--font-mono, monospace)" };
+  return { color: "var(--text)" };
+}
+
 /**
- * The job detail's execution progress: a heading, then the
- * selected job's current-step tail — one nowrap/ellipsized line per entry,
- * newest last, the full text on hover — inline in the detail's one scroll
- * region (no overflowY of its own, pi#120). The localized loading, empty
- * and unavailable states; a failed or degraded read keeps the last good
- * tail without an error readout (usePolyforgeProgress). Mounted only while
- * the Jobs detail of a selected job renders, so deselecting or closing the
- * dock stops its reads.
+ * The job detail's execution progress (; whole-job since
+ *): a heading, the omitted-lines marker when the 2000-line
+ * bound left earlier lines out, then the selected job's stream — every
+ * spawn of every step, narration, one masked tool line per call and the
+ * lifecycle lines — one nowrap/ellipsized line each, oldest first, the full
+ * text (and an event line's raw kind) on hover, inline in the detail's one
+ * scroll region (no overflowY of its own, pi#120). The localized loading
+ * (only until the first read settles), empty and unavailable states; a
+ * failed or degraded later read keeps the last good snapshot without an
+ * error readout (usePolyforgeProgress). Mounted only while the Jobs detail
+ * of a selected job renders, so deselecting or closing the dock stops its
+ * reads.
+ *
+ * Follow: `scrollRef` is the detail's one scroll region. A
+ * passive scroll listener keeps `pinned` — whether the reader is at its
+ * bottom (isProgressPinnedToBottom); after a new snapshot renders, the
+ * region scrolls to its bottom only when it was pinned, otherwise it does
+ * not move. No control is added for it. Another job starts unpinned.
  */
-function PolyforgeDetailProgress({ wi, running }: { wi: string | null; running: boolean }) {
+function PolyforgeDetailProgress({ wi, running, scrollRef }: { wi: string | null; running: boolean; scrollRef: RefObject<HTMLDivElement | null> }) {
   const { t } = useI18n();
-  const tail = usePolyforgeProgress(wi, running);
-  const message = !wi || tail?.available === false ? t("polyforge.progress.unavailable")
-    : !tail ? t("polyforge.loading")
-      : tail.entries.length === 0 ? t("polyforge.progress.empty") : null;
+  const snapshot = usePolyforgeProgress(wi, running);
+  const pinned = useRef(false);
+  useEffect(() => {
+    pinned.current = false;
+  }, [wi]);
+  useEffect(() => {
+    const region = scrollRef.current;
+    if (!region) return;
+    const onScroll = () => { pinned.current = isProgressPinnedToBottom(region); };
+    region.addEventListener("scroll", onScroll, { passive: true });
+    return () => region.removeEventListener("scroll", onScroll);
+  }, [scrollRef]);
+  useLayoutEffect(() => {
+    const region = scrollRef.current;
+    if (region && pinned.current) region.scrollTop = region.scrollHeight;
+  }, [snapshot, scrollRef]);
+  const message = !wi || snapshot?.available === false ? t("polyforge.progress.unavailable")
+    : !snapshot ? t("polyforge.loading")
+      : snapshot.lines.length === 0 ? t("polyforge.progress.empty") : null;
   return (
     <div data-pf-progress="" style={{ padding: "6px 12px", borderBottom: "1px solid var(--border)", flexShrink: 0, display: "flex", flexDirection: "column", gap: 2, fontSize: 11, lineHeight: "16px", minWidth: 0 }}>
       <span style={{ color: "var(--text-dim)" }}>{t("polyforge.progress.title")}</span>
-      {!tail || message !== null ? (
+      {!snapshot || message !== null ? (
         <span style={{ color: "var(--text-dim)" }}>{message}</span>
-      ) : tail.entries.map((entry) => (
-        <div
-          key={entry.id}
-          data-pf-progress-kind={entry.kind}
-          title={entry.text}
-          style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", minWidth: 0,
-            ...(entry.kind === "tool" ? { color: "var(--text-dim)", fontFamily: "var(--font-mono, monospace)" } : { color: "var(--text)" }) }}
-        >
-          {entry.text}
-        </div>
-      ))}
+      ) : (
+        <>
+          {snapshot.omitted > 0 && (
+            <span data-pf-progress-omitted="" style={{ color: "var(--text-dim)" }}>{t("polyforge.progress.omitted", { count: snapshot.omitted })}</span>
+          )}
+          {snapshot.lines.map((line) => (
+            <div
+              key={line.id}
+              data-pf-progress-kind={line.kind}
+              data-pf-progress-tone={line.kind === "event" ? (line.tone ?? "neutral") : undefined}
+              title={line.event ? `${line.event}\n${line.text}` : line.text}
+              style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", minWidth: 0, ...progressLineStyle(line) }}
+            >
+              {line.text}
+            </div>
+          ))}
+        </>
+      )}
     </div>
   );
 }
@@ -561,28 +525,6 @@ export function PolyforgePanel({
   const isMobile = useIsMobile();
   const itemCountKey = workItemCountKey(opsStatus);
 
-  // Event tail display mode (pi#112): defaults to simple; the stored global
-  // preference is read in a mount effect because window is unavailable at
-  // first render (client components still SSR).
-  const [eventMode, setEventMode] = useState<EventMode>("simple");
-  useEffect(() => {
-    try {
-      if (window.localStorage.getItem(EVENT_MODE_STORAGE_KEY) === "verbose") setEventMode("verbose");
-    } catch {
-      // storage unavailable — keep the default
-    }
-  }, []);
-  // Client-side only: no fetch/network I/O on toggle.
-  const toggleEventMode = useCallback(() => {
-    const next: EventMode = eventMode === "simple" ? "verbose" : "simple";
-    setEventMode(next);
-    try {
-      window.localStorage.setItem(EVENT_MODE_STORAGE_KEY, next);
-    } catch {
-      // best effort persistence
-    }
-  }, [eventMode]);
-
   // Manual-refresh in-flight feedback (pi#113): the icon spins and the button
   // disables until the status fetch settles, floored at ~400 ms so a fast
   // response still reads as feedback (an explicit UX floor, not
@@ -607,10 +549,6 @@ export function PolyforgePanel({
   const stepStatusLabel = useCallback((status: string) => (
     STEP_STATUS_KEYS.has(status) ? t(`polyforge.stepStatus.${status}`) : status
   ), [t]);
-  const eventKindLabel = useCallback((kind: string) => (
-    EVENT_KIND_KEYS.has(kind) ? t(`polyforge.eventKind.${kind}`) : kind
-  ), [t]);
-
   const formatEventTime = useCallback((at: string) => {
     const date = new Date(at);
     if (Number.isNaN(date.getTime())) return at;
@@ -621,44 +559,21 @@ export function PolyforgePanel({
     }
   }, [locale]);
 
-  const renderEventRow = useCallback((event: PolyforgeEvent, index: number) => {
-    const severity = eventSeverity(event);
-    const noise = EVENT_NOISE_KINDS.has(event.kind);
-    const parts = eventValueParts(event).filter((v): v is string => !!v);
-    const displayText = formatEventValues(event);
-    const titleText = [event.kind, ...parts].join(" ");
-    return (
-      <div
-        key={`${event.at}-${event.kind}-${index}`}
-        title={titleText}
-        style={{ display: "flex", gap: 8, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", color: severity ? EVENT_SEVERITY_COLORS[severity] : noise ? "var(--text-dim)" : "var(--text-muted)" }}
-      >
-        <span style={{ color: "var(--text-dim)", flexShrink: 0 }}>{formatEventTime(event.at)}</span>
-        <span style={{ flexShrink: 0 }}>{eventKindLabel(event.kind)}</span>
-        {displayText && <span style={{ overflow: "hidden", textOverflow: "ellipsis", color: !severity && !noise ? "var(--text)" : undefined }}>{displayText}</span>}
-        {eventMode === "verbose" && EVENT_KIND_KEYS.has(event.kind) && (
-          <span style={{ color: "var(--text-dim)", flexShrink: 0 }}>{event.kind}</span>
-        )}
-      </div>
-    );
-  }, [eventMode, formatEventTime, eventKindLabel]);
-
   // Step flow graph (pi#114): derived from the sanitized watch snapshot.
   // Null exactly when watchStatus is null (the detail section's loading state).
   const graph = watchStatus
     ? buildStepGraph(watchStatus.steps, watchStatus.declared_steps, watchStatus.events)
     : null;
 
-  // pi#117 detail rows: live progress and the chat origin (the per-step
-  // timing is the DAG's timing line since) —
-  // display-only, each absent piece renders nothing (no placeholder).
+  // pi#117 facts — the tool-call count, recent files and the chat origin —
+  // and the pi#119 summarize narration, all inside the summary block since
+  // (the command row is gone). Display-only, each absent piece
+  // renders nothing (no placeholder). Every field is already absent when
+  // missing or malformed server-side (the sanitizer guarantees it); the 3 s
+  // watch poll refreshes the summary age — no client-side ticking between
+  // polls (a non-goal).
   const progress = watchStatus?.progress;
   const origin = watchStatus?.origin;
-  // pi#119 summary block: the summarize lane's narration. Every field is
-  // already absent when missing or malformed server-side (the sanitizer
-  // guarantees it), so the block renders only when at least one is present;
-  // the 3s watch poll refreshes the age like command_age_sec — no
-  // client-side ticking between polls (a non-goal).
   const summary = watchStatus?.summary;
   const summaryAgeSec = watchStatus?.summary_age_sec;
   const summaryError = watchStatus?.summary_error;
@@ -669,8 +584,7 @@ export function PolyforgePanel({
   // age stays live without a dedicated timer.
   const stepTimings = watchStatus ? liveStepTimings(watchStatus.steps) : null;
   const originHasText = Boolean(origin?.chat_id || origin?.owner);
-  const detailInfoVisible = Boolean(progress?.command)
-    || progress?.tool_calls != null
+  const detailInfoVisible = progress?.tool_calls != null
     || Boolean(progress?.recent_files)
     || originHasText;
 
@@ -703,6 +617,20 @@ export function PolyforgePanel({
   const detailStatus = selectedJob
     ? jobStatusLabel(selectedJob.status)
     : watchStatus ? workflowStatusLabel(watchStatus.workflowStatus) : null;
+  // The detail's one scroll region: it opens at the top of
+  // the detail whenever another job is selected; the progress block follows
+  // new lines only for a reader already at the bottom.
+  const detailScrollRef = useRef<HTMLDivElement | null>(null);
+  useLayoutEffect(() => {
+    if (detailScrollRef.current) detailScrollRef.current.scrollTop = 0;
+  }, [selectedWi]);
+  // The goal's expanded state, for one selected job only: selecting another
+  // job folds it again without an effect.
+  const [goalExpandedFor, setGoalExpandedFor] = useState<string | null>(null);
+  const goalExpanded = goalExpandedFor !== null && goalExpandedFor === selectedWi;
+  const detailCurrentStep = watchStatus?.currentStep ?? selectedCard?.currentStep;
+  const jobStartParsed = selectedCard?.startedAt ? Date.parse(selectedCard.startedAt) : Number.NaN;
+  const jobStartMs = Number.isFinite(jobStartParsed) ? jobStartParsed : null;
   const detailTitleHover = [
     detailGoal,
     watchStatus ? workflowStatusLabel(watchStatus.workflowStatus) : undefined,
@@ -874,61 +802,192 @@ export function PolyforgePanel({
                     )}
                   </div>
                   {/* Detail for the selected work item */}
-                  {/* pi#120: with a job selected, the whole detail — header,
-                      graph, summary, detail rows, toggle and event tail — is ONE
-                      vertical scroll region (this container). No nested vertical
-                      scroller exists inside it, so every row is reachable by
-                      scrolling at any sheet height and in the desktop dock — the
-                      old layout stacked the blocks as non-shrinking children of
-                      an overflow-hidden column and clipped everything below the
-                      fold once the fixed blocks exceeded the leftover height
-                      (the tail collapsed to zero). */}
-                  <div style={{ flex: 1, minHeight: 0, overflowY: "auto", display: "flex", flexDirection: "column" }}>
+                  {/* pi#120: with a job selected, the whole detail — summary,
+                      graph and execution progress is ONE
+                      vertical scroll region (this container,
+                      [data-pf-detail-scroll]). No nested vertical scroller exists
+                      inside it, so every line is reachable by scrolling at any
+                      sheet height and in the desktop dock. */}
+                  <div ref={detailScrollRef} data-pf-detail-scroll="" style={{ flex: 1, minHeight: 0, overflowY: "auto", display: "flex", flexDirection: "column" }}>
                     {selectedWi ? (
                         <>
-                          {/* title row (was the detail header): the
-                              deselect control, the slug, the goal's short title
-                              (one line, ellipsized) and the job status on one line;
-                              the full goal, workflow status, update time and current
-                              step on hover. The deselect control is the only
-                              reliable gesture once the selected job has left the
-                              list (the row that could toggle it off is gone) or
-                              while its watch snapshot is still loading, so the row
-                              sits above the watchStatus split. */}
-                          <div
-                            data-pf-detail-title=""
-                            title={detailTitleHover || undefined}
-                            style={{ padding: "4px 12px", fontSize: 11, color: "var(--text-dim)", borderBottom: "1px solid var(--border)", flexShrink: 0, display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}
-                          >
-                            <button
-                              type="button"
-                              onClick={() => onSelect(null)}
-                              title={t("polyforge.deselect")}
-                              aria-label={t("polyforge.deselect")}
-                              style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 22, height: 22, padding: 0, background: "none", border: "1px solid var(--border)", borderRadius: 4, color: "var(--text-muted)", cursor: "pointer", flexShrink: 0 }}
+                          {/* order: ① summary → ② DAG → ③ execution
+                              progress last; no fourth block (the command row, the
+                              event-mode toggle and the standalone event tail are
+                              gone — lifecycle events are lines of the progress). */}
+                          {/* ① Summary: the title row, the goal folded to three
+                              lines with its expand control, the job facts, the
+                              summarize narration and the pi#117 facts. */}
+                          <div data-pf-detail-summary="" style={{ flexShrink: 0, display: "flex", flexDirection: "column", borderBottom: "1px solid var(--border)" }}>
+                            {/* title row (was the detail header): the
+                                deselect control, the slug, the goal's short title
+                                (one line, ellipsized) and the job status on one line;
+                                the full goal, workflow status, update time and current
+                                step on hover. The deselect control is the only
+                                reliable gesture once the selected job has left the
+                                list (the row that could toggle it off is gone) or
+                                while its watch snapshot is still loading, so the row
+                                sits above the watchStatus split. */}
+                            <div
+                              data-pf-detail-title=""
+                              title={detailTitleHover || undefined}
+                              style={{ padding: "4px 12px", fontSize: 11, color: "var(--text-dim)", borderBottom: "1px solid var(--border)", flexShrink: 0, display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}
                             >
-                              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                                <path d="M15 18l-6-6 6-6" />
-                              </svg>
-                            </button>
-                            <span style={{ flex: "0 0 auto", whiteSpace: "nowrap", fontWeight: 600, color: "var(--text)" }}>{detailSlug}</span>
-                            {detailShortTitle && (
-                              <span style={{ flex: "1 1 0", minWidth: 0, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", color: "var(--text-muted)" }}>{detailShortTitle}</span>
+                              <button
+                                type="button"
+                                onClick={() => onSelect(null)}
+                                title={t("polyforge.deselect")}
+                                aria-label={t("polyforge.deselect")}
+                                style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 22, height: 22, padding: 0, background: "none", border: "1px solid var(--border)", borderRadius: 4, color: "var(--text-muted)", cursor: "pointer", flexShrink: 0 }}
+                              >
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                                  <path d="M15 18l-6-6 6-6" />
+                                </svg>
+                              </button>
+                              <span style={{ flex: "0 0 auto", whiteSpace: "nowrap", fontWeight: 600, color: "var(--text)" }}>{detailSlug}</span>
+                              {detailShortTitle && (
+                                <span style={{ flex: "1 1 0", minWidth: 0, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", color: "var(--text-muted)" }}>{detailShortTitle}</span>
+                              )}
+                              {detailStatus && (
+                                <span style={{ flex: "0 0 auto", marginLeft: "auto", whiteSpace: "nowrap" }}>{detailStatus}</span>
+                              )}
+                            </div>
+                            {/* The full goal, folded to three lines (CSS
+                                line clamp, the whole text in the DOM and on
+                                hover), with a visible expand/collapse control;
+                                the expanded state resets per selected job. No
+                                readable goal: no goal line, never an invented one. */}
+                            {detailGoal && (
+                              <div style={{ padding: "4px 12px 0", display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 2, fontSize: 11 }}>
+                                <span
+                                  data-pf-summary-goal=""
+                                  title={detailGoal}
+                                  style={goalExpanded
+                                    ? { color: "var(--text)", whiteSpace: "pre-wrap", overflowWrap: "anywhere", lineHeight: "16px" }
+                                    : { color: "var(--text)", whiteSpace: "pre-wrap", overflowWrap: "anywhere", lineHeight: "16px", display: "-webkit-box", WebkitLineClamp: 3, WebkitBoxOrient: "vertical", overflow: "hidden" }}
+                                >
+                                  {detailGoal}
+                                </span>
+                                <button
+                                  type="button"
+                                  data-pf-goal-toggle=""
+                                  aria-expanded={goalExpanded}
+                                  onClick={() => setGoalExpandedFor(goalExpanded ? null : selectedWi)}
+                                  style={{ padding: 0, background: "none", border: "none", color: "var(--accent)", cursor: "pointer", fontSize: 11, lineHeight: "16px" }}
+                                >
+                                  {t(goalExpanded ? "polyforge.goal.collapse" : "polyforge.goal.expand")}
+                                </button>
+                              </div>
                             )}
-                            {detailStatus && (
-                              <span style={{ flex: "0 0 auto", marginLeft: "auto", whiteSpace: "nowrap" }}>{detailStatus}</span>
+                            {/* Job facts ( + #238): current step, the
+                                model (24 chars + …, full on hover) with the spawn
+                                number, step/idle age from the status snapshot (so
+                                they show while the watch read loads), the job start
+                                (the card's earliest job_started) and the total
+                                elapsed time, computed at render and refreshed by the
+                                3 s watch poll — no timer of its own. */}
+                            {(selectedJob || detailCurrentStep || jobStartMs !== null) && (
+                              <div style={{ padding: "4px 12px", display: "flex", flexWrap: "wrap", columnGap: 12, rowGap: 2, fontSize: 11 }}>
+                                {detailCurrentStep && (
+                                  <span style={{ display: "flex", gap: 6, minWidth: 0 }}>
+                                    <span style={{ color: "var(--text-dim)", flexShrink: 0 }}>{t("polyforge.currentStep")}</span>
+                                    <span style={{ color: "var(--text)", fontFamily: "var(--font-mono, monospace)", overflowWrap: "anywhere" }}>{detailCurrentStep}</span>
+                                  </span>
+                                )}
+                                {selectedJob && (
+                                  <>
+                                    <span style={{ display: "flex", gap: 6, minWidth: 0 }}>
+                                      <span style={{ color: "var(--text-dim)", flexShrink: 0 }}>{t("polyforge.candidate")}</span>
+                                      <span title={selectedJob.candidate} style={{ color: "var(--text)", fontFamily: "var(--font-mono, monospace)", overflowWrap: "anywhere" }}>{selectedJob.candidate ? shortenCandidate(selectedJob.candidate) : "—"}</span>
+                                      <span style={{ color: "var(--text-dim)", flexShrink: 0 }}>#{selectedJob.spawnN}</span>
+                                    </span>
+                                    <span style={{ display: "flex", gap: 6, whiteSpace: "nowrap" }}>
+                                      <span style={{ color: "var(--text-dim)" }}>{t("polyforge.stepAge")}</span>
+                                      <span style={{ color: "var(--text)" }}>{formatAge(selectedJob.stepAgeSec)}</span>
+                                      <span style={{ color: "var(--text-dim)" }}>{t("polyforge.idleAge")}</span>
+                                      <span style={{ color: "var(--text)" }}>{formatAge(selectedJob.idleAgeSec)}</span>
+                                    </span>
+                                  </>
+                                )}
+                                {jobStartMs !== null && (
+                                  <span style={{ display: "flex", gap: 6, whiteSpace: "nowrap" }}>
+                                    <span style={{ color: "var(--text-dim)" }}>{t("polyforge.jobStart")}</span>
+                                    <span style={{ color: "var(--text)" }}>{formatProgressClock(jobStartMs)}</span>
+                                    <span style={{ color: "var(--text-dim)" }}>{t("polyforge.elapsed")}</span>
+                                    <span style={{ color: "var(--text)" }}>{formatAge(liveElapsedSec(jobStartMs))}</span>
+                                  </span>
+                                )}
+                              </div>
+                            )}
+                            {/* pi#119 summarize narration: the line, its age, a
+                                cap-reached marker and the raw error line, which may
+                                show together with an older summary. Absent when the
+                                snapshot carries none of the four fields: no
+                                heading, placeholder or loading text. */}
+                            {summaryVisible && (
+                              <div style={{ padding: "4px 12px", display: "flex", flexDirection: "column", gap: 2, fontSize: 11 }}>
+                                {summary && (
+                                  <>
+                                    <span style={{ color: "var(--text-dim)" }}>
+                                      {t("polyforge.summary")}{summaryAgeSec != null ? ` · ${formatAge(summaryAgeSec)}` : ""}
+                                    </span>
+                                    <span style={{ color: "var(--text)", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{summary}</span>
+                                  </>
+                                )}
+                                {summaryCapped && (
+                                  <span style={{ color: "#d97706" }}>{t("polyforge.summaryCapped")}</span>
+                                )}
+                                {summaryError && (
+                                  <span style={{ color: "#dc2626", fontFamily: "var(--font-mono, monospace)", whiteSpace: "pre-wrap", wordBreak: "break-all" }}>{summaryError}</span>
+                                )}
+                              </div>
+                            )}
+                            {/* pi#117 facts, moved into the summary:
+                                tool calls, recent files, chat origin. Display-only;
+                                absent when the snapshot carries none of them. */}
+                            {detailInfoVisible && (
+                              <div style={{ padding: "4px 12px", display: "flex", flexDirection: "column", gap: 4, fontSize: 11 }}>
+                                {progress?.tool_calls != null && (
+                                  <div style={{ display: "flex", gap: 6 }}>
+                                    <span style={{ color: "var(--text-dim)" }}>{t("polyforge.toolCalls")}</span>
+                                    <span style={{ color: "var(--text)" }}>{progress.tool_calls}</span>
+                                  </div>
+                                )}
+                                {progress?.recent_files && (
+                                  <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                                    <span style={{ color: "var(--text-dim)" }}>{t("polyforge.recentFiles")}</span>
+                                    {progress.recent_files.map((file) => (
+                                      <span
+                                        key={file}
+                                        title={file}
+                                        style={{ color: "var(--text-dim)", fontFamily: "var(--font-mono, monospace)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                                      >
+                                        {file}
+                                      </span>
+                                    ))}
+                                  </div>
+                                )}
+                                {originHasText && origin && (
+                                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                                    <span style={{ color: "var(--text-dim)" }}>{t("polyforge.origin")}</span>
+                                    {origin.chat_id && (
+                                      <span title={origin.chat_id} style={{ color: "var(--text)", fontFamily: "var(--font-mono, monospace)" }}>
+                                        {shortenCandidate(origin.chat_id)}
+                                      </span>
+                                    )}
+                                    {origin.owner && <span style={{ color: "var(--text)" }}>{origin.owner}</span>}
+                                  </div>
+                                )}
+                              </div>
                             )}
                           </div>
-                          {/* order: title row → DAG with timing lines →
-                              execution progress → every existing block in its
-                              original relative order (facts row, summary, detail
-                              rows, event-mode toggle, event tail). */}
-                          {/* Step flow graph (pi#114): display-only nodes with
+                          {/* ② Step flow graph (pi#114; moved verbatim to the
+                              second block,): display-only nodes with
                               status dots, solid sequence connectors between
                               consecutive nodes, dashed rewind chips below.
                               Nodes wrap; the container never scrolls. */}
                           {graph ? (
-                          <div style={{ padding: "6px 12px", borderBottom: "1px solid var(--border)", flexShrink: 0, overflow: "hidden" }}>
+                          <div data-pf-detail-graph="" style={{ padding: "6px 12px", borderBottom: "1px solid var(--border)", flexShrink: 0, overflow: "hidden" }}>
                             <div role="list" style={{ display: "flex", flexWrap: "wrap", alignItems: "center", rowGap: 6 }}>
                               {graph.nodes.map((node, index) => {
                                 // the per-step timing lives under its
@@ -987,8 +1046,8 @@ export function PolyforgePanel({
                                 {graph.rewindEdges.map(([gate, target]) => (
                                   <span
                                     key={`${gate}->${target}`}
-                                    title={`${eventKindLabel("rewind")}: ${gate} → ${target}`}
-                                    aria-label={`${eventKindLabel("rewind")}: ${gate} → ${target}`}
+                                    title={`${t("polyforge.eventKind.rewind")}: ${gate} → ${target}`}
+                                    aria-label={`${t("polyforge.eventKind.rewind")}: ${gate} → ${target}`}
                                     style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "1px 6px", borderRadius: 6, border: "1px dashed var(--border)", fontSize: 10, color: "var(--text-dim)", fontFamily: "var(--font-mono, monospace)" }}
                                   >
                                     <span aria-hidden="true">⇢</span>
@@ -999,149 +1058,17 @@ export function PolyforgePanel({
                             )}
                           </div>
                           ) : (
-                            <div style={{ padding: 16, color: "var(--text-dim)", fontSize: 12 }}>{t("polyforge.loading")}</div>
+                            <div data-pf-detail-graph="" style={{ padding: 16, color: "var(--text-dim)", fontSize: 12, flexShrink: 0 }}>{t("polyforge.loading")}</div>
                           )}
-                          {/* execution progress: the selected job's
-                              current-step transcript tail (narration + one masked
-                              tool line per call), newest last, inline in this one
-                              scroll region — no nested scroller. Its own fixed 2 s
-                              read while running (usePolyforgeProgress). */}
-                          <PolyforgeDetailProgress wi={selectedJob?.wi ?? null} running={selectedJob?.status === "running"} />
-                          {/* the job's model (24 chars + … as before,
-                              full on hover), spawn number and step/idle age left
-                              the card; they live here, from the status snapshot,
-                              so they show even while the watch read is loading. */}
-                          {selectedJob && (
-                            <div style={{ padding: "4px 12px", borderBottom: "1px solid var(--border)", flexShrink: 0, display: "flex", flexWrap: "wrap", columnGap: 12, rowGap: 2, fontSize: 11 }}>
-                              <span style={{ display: "flex", gap: 6, minWidth: 0 }}>
-                                <span style={{ color: "var(--text-dim)", flexShrink: 0 }}>{t("polyforge.candidate")}</span>
-                                <span title={selectedJob.candidate} style={{ color: "var(--text)", fontFamily: "var(--font-mono, monospace)", overflowWrap: "anywhere" }}>{selectedJob.candidate ? shortenCandidate(selectedJob.candidate) : "—"}</span>
-                                <span style={{ color: "var(--text-dim)", flexShrink: 0 }}>#{selectedJob.spawnN}</span>
-                              </span>
-                              <span style={{ display: "flex", gap: 6, whiteSpace: "nowrap" }}>
-                                <span style={{ color: "var(--text-dim)" }}>{t("polyforge.stepAge")}</span>
-                                <span style={{ color: "var(--text)" }}>{formatAge(selectedJob.stepAgeSec)}</span>
-                                <span style={{ color: "var(--text-dim)" }}>{t("polyforge.idleAge")}</span>
-                                <span style={{ color: "var(--text)" }}>{formatAge(selectedJob.idleAgeSec)}</span>
-                              </span>
-                            </div>
-                          )}
-                          {watchStatus && (
-                            <>
-                              {/* pi#119 summary block: the summarize lane's
-                                  narration — the line, its age (formatted like
-                                  command_age_sec), a cap-reached marker and the
-                                  raw error line, which may show together with an
-                                  older summary. The whole block is absent when
-                                  the snapshot carries none of the four fields:
-                                  no heading, placeholder or loading text. */}
-                              {summaryVisible && (
-                              <div style={{ padding: "6px 12px", borderBottom: "1px solid var(--border)", flexShrink: 0, display: "flex", flexDirection: "column", gap: 2, fontSize: 11 }}>
-                                {summary && (
-                                  <>
-                                    <span style={{ color: "var(--text-dim)" }}>
-                                      {t("polyforge.summary")}{summaryAgeSec != null ? ` · ${formatAge(summaryAgeSec)}` : ""}
-                                    </span>
-                                    <span style={{ color: "var(--text)", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{summary}</span>
-                                  </>
-                                )}
-                                {summaryCapped && (
-                                  <span style={{ color: "#d97706" }}>{t("polyforge.summaryCapped")}</span>
-                                )}
-                                {summaryError && (
-                                  <span style={{ color: "#dc2626", fontFamily: "var(--font-mono, monospace)", whiteSpace: "pre-wrap", wordBreak: "break-all" }}>{summaryError}</span>
-                                )}
-                              </div>
-                              )}
-                              {/* pi#117 detail rows: command (+age), tool calls,
-                                  recent files, chat origin (the per-step timing
-                                  moved under the DAG nodes,).
-                                  Display-only; the whole block is absent when the
-                                  snapshot carries none of it. */}
-                              {detailInfoVisible && (
-                              <div style={{ padding: "6px 12px", borderBottom: "1px solid var(--border)", flexShrink: 0, display: "flex", flexDirection: "column", gap: 4, fontSize: 11 }}>
-                                {progress?.command && (
-                                  <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-                                    <span style={{ color: "var(--text-dim)" }}>
-                                      {t("polyforge.command")}{progress.command_age_sec != null ? ` · ${formatAge(progress.command_age_sec)}` : ""}
-                                    </span>
-                                    <span
-                                      title={progress.command}
-                                      style={{ color: "var(--text)", fontFamily: "var(--font-mono, monospace)", whiteSpace: "pre-wrap", wordBreak: "break-all" }}
-                                    >
-                                      {progress.command}
-                                    </span>
-                                  </div>
-                                )}
-                                {progress?.tool_calls != null && (
-                                  <div style={{ display: "flex", gap: 6 }}>
-                                    <span style={{ color: "var(--text-dim)" }}>{t("polyforge.toolCalls")}</span>
-                                    <span style={{ color: "var(--text)" }}>{progress.tool_calls}</span>
-                                  </div>
-                                )}
-                                {progress?.recent_files && (
-                                  <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-                                    <span style={{ color: "var(--text-dim)" }}>{t("polyforge.recentFiles")}</span>
-                                    {progress.recent_files.map((file) => (
-                                      <span
-                                        key={file}
-                                        title={file}
-                                        style={{ color: "var(--text-dim)", fontFamily: "var(--font-mono, monospace)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
-                                      >
-                                        {file}
-                                      </span>
-                                    ))}
-                                  </div>
-                                )}
-                                {originHasText && origin && (
-                                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                                    <span style={{ color: "var(--text-dim)" }}>{t("polyforge.origin")}</span>
-                                    {origin.chat_id && (
-                                      <span title={origin.chat_id} style={{ color: "var(--text)", fontFamily: "var(--font-mono, monospace)" }}>
-                                        {shortenCandidate(origin.chat_id)}
-                                      </span>
-                                    )}
-                                    {origin.owner && <span style={{ color: "var(--text)" }}>{origin.owner}</span>}
-                                  </div>
-                                )}
-                              </div>
-                              )}
-                              {/* Event tail (newest last) */}
-                              <div style={{ flexShrink: 0, display: "flex", justifyContent: "flex-end", padding: "2px 12px 0" }}>
-                                <button
-                                  type="button"
-                                  onClick={toggleEventMode}
-                                  style={{ display: "flex", alignItems: "center", background: "none", border: "1px solid var(--border)", borderRadius: 4, color: "var(--text-muted)", cursor: "pointer", fontSize: 11, padding: "2px 8px" }}
-                                >
-                                  {t(eventMode === "simple" ? "polyforge.eventMode.verbose" : "polyforge.eventMode.simple")}
-                                </button>
-                              </div>
-                              {/* Event tail (newest last): the rows are plain
-                                  blocks inside the detail's scroll region (pi#120),
-                                  not their own scroller. */}
-                              <div style={{ flexShrink: 0, padding: "6px 12px", fontSize: 11, lineHeight: 1.45, fontFamily: "var(--font-mono, monospace)" }}>
-                                {watchStatus.events.length === 0 && (
-                                  <div style={{ color: "var(--text-dim)", fontFamily: "var(--font-sans, sans-serif)" }}>{t("polyforge.emptyEvents")}</div>
-                                )}
-                                {eventMode === "verbose"
-                                  ? watchStatus.events.map((event, index) => renderEventRow(event, index))
-                                  : collapseNoiseRuns(watchStatus.events).map((row, index) =>
-                                      row.noise ? (
-                                        <div
-                                          key={`sync-${index}`}
-                                          style={{ display: "flex", gap: 8, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", color: "var(--text-dim)" }}
-                                        >
-                                          <span>
-                                            {t("polyforge.eventSync")} ×{row.count}
-                                          </span>
-                                        </div>
-                                      ) : (
-                                        renderEventRow(row.event, index)
-                                      ),
-                                    )}
-                              </div>
-                            </>
-                          )}
+                          {/* ③ Execution progress, the last block: the whole
+                              job's stream (every spawn, lifecycle lines included),
+                              inline in this one scroll region — no nested scroller.
+                              Its own fixed 2 s read while running
+                              (usePolyforgeProgress). The daemon drops a
+                              finished job from the status/cards lists, so the
+                              wi falls back to the selection's watch snapshot
+                              (reset per selection) and the last stream stays. */}
+                          <PolyforgeDetailProgress wi={selectedJob?.wi ?? watchStatus?.wi ?? null} running={selectedJob?.status === "running"} scrollRef={detailScrollRef} />
                         </>
                       ) : (
                       <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-dim)", fontSize: 12 }}>{t("polyforge.selectJob")}</div>

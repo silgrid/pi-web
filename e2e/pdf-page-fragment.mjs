@@ -1,3 +1,4 @@
+// carries: components/MarkdownBody*, components/FileViewer*, lib/file-links*, lib/file-viewer-state*, lib/markdown*, app/api/files/*
 // Focused e2e check for PDF `#page=` markdown links.
 //
 //   node e2e/pdf-page-fragment.mjs

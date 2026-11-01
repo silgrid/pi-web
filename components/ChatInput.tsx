@@ -33,6 +33,17 @@ import { useI18n } from "@/hooks/useI18n";
 import { useChatAppearance } from "@/hooks/useChatAppearance";
 import { useFontPreferences } from "@/hooks/useFontPreferences";
 import type { ToolPreset } from "@/lib/tool-presets";
+import {
+  CLAUDE_HARNESS,
+  CLAUDE_MODEL_ALIASES,
+  CLAUDE_TOOL_PRESETS,
+  PI_HARNESS,
+  isClaudeModelAlias,
+  isClaudeToolPreset,
+  type ClaudeModelAlias,
+  type ClaudeToolPreset,
+  type SessionHarness,
+} from "@/lib/claude-shared";
 import { SelectorRow } from "./SelectorRow";
 import { ModelSelector, type ModelSelectorOption } from "./ModelSelector";
 
@@ -102,6 +113,121 @@ interface Props {
   cwd?: string | null;
   /** Files picked with the attach button, handled like files dropped onto the chat. Without it the button takes images only. */
   onAttachFiles?: (files: File[]) => void;
+  /** The harness controls: a fresh composer's pi/claude choice, or a claude session's fixed line. */
+  claude?: ClaudeComposerState;
+}
+
+/**
+ * The composer's claude state. `choosing`: a fresh composer, where harness, alias and preset
+ * are picked; otherwise they are the session's, fixed for its life.
+ */
+export interface ClaudeComposerState {
+  choosing: boolean;
+  harness: SessionHarness;
+  modelAlias: ClaudeModelAlias;
+  preset: ClaudeToolPreset;
+  /** GET /api/claude's answer; null until it came (claude then stays unavailable). */
+  availability: { available: boolean; configDir: string } | null;
+  onHarnessChange?: (harness: SessionHarness) => void;
+  onModelAliasChange?: (alias: ClaudeModelAlias) => void;
+  onPresetChange?: (preset: ClaudeToolPreset) => void;
+}
+
+/** i18n key of a claude model alias's label. */
+export function claudeAliasLabelKey(alias: ClaudeModelAlias): string {
+  return alias === "claude-default" ? "claude.aliasDefault" : `claude.alias.${alias}`;
+}
+
+/** i18n key of what a preset does, including whether it loads the session folder's CLAUDE.md. */
+export function claudePresetTextKey(preset: ClaudeToolPreset): string {
+  return preset === "writable" ? "claude.presetWritableText" : "claude.presetReadOnlyText";
+}
+
+const claudeSelectStyle: React.CSSProperties = {
+  height: 28,
+  padding: "0 6px",
+  borderRadius: 7,
+  border: "1px solid var(--border)",
+  background: "var(--bg)",
+  color: "var(--text)",
+  fontSize: 12,
+};
+
+/**
+ * The harness picker of a fresh composer (pi default, claude with alias and preset) and,
+ * for claude, what is fixed and what the preset does — all visible text, never a tooltip.
+ */
+export function ClaudeComposerControls({ state, t }: { state: ClaudeComposerState; t: (key: string, params?: Record<string, string | number>) => string }) {
+  const claudeOn = state.harness === CLAUDE_HARNESS;
+  const available = state.availability?.available === true;
+  const presetLabel = t(state.preset === "writable" ? "claude.presetWritable" : "claude.presetReadOnly");
+  if (!state.choosing) {
+    if (!claudeOn) return null;
+    return (
+      <div className="claude-fixed-line" data-harness="claude" style={{ fontSize: 11, color: "var(--text-muted)", padding: "4px 2px 0" }}>
+        {t("claude.fixedLine", { model: t(claudeAliasLabelKey(state.modelAlias)), preset: presetLabel })}
+      </div>
+    );
+  }
+  return (
+    <div className="claude-composer-controls" style={{ display: "flex", flexDirection: "column", gap: 4, padding: "6px 2px 0", fontSize: 12, color: "var(--text-muted)" }}>
+      <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8 }}>
+        <label style={{ display: "flex", alignItems: "center", gap: 4 }}>
+          <span>{t("claude.harnessLabel")}</span>
+          <select
+            aria-label={t("claude.harnessLabel")}
+            value={state.harness}
+            onChange={(event) => state.onHarnessChange?.(event.target.value === CLAUDE_HARNESS && available ? CLAUDE_HARNESS : PI_HARNESS)}
+            style={claudeSelectStyle}
+          >
+            <option value={PI_HARNESS}>{t("claude.harnessPi")}</option>
+            <option value={CLAUDE_HARNESS} disabled={!available}>{t("claude.harnessClaude")}</option>
+          </select>
+        </label>
+        {claudeOn && (
+          <>
+            <label style={{ display: "flex", alignItems: "center", gap: 4 }}>
+              <span>{t("claude.modelAliasLabel")}</span>
+              <select
+                aria-label={t("claude.modelAliasLabel")}
+                value={state.modelAlias}
+                onChange={(event) => { if (isClaudeModelAlias(event.target.value)) state.onModelAliasChange?.(event.target.value); }}
+                style={claudeSelectStyle}
+              >
+                {CLAUDE_MODEL_ALIASES.map((alias) => <option key={alias} value={alias}>{t(claudeAliasLabelKey(alias))}</option>)}
+              </select>
+            </label>
+            <label style={{ display: "flex", alignItems: "center", gap: 4 }}>
+              <span>{t("claude.presetLabel")}</span>
+              <select
+                aria-label={t("claude.presetLabel")}
+                value={state.preset}
+                onChange={(event) => { if (isClaudeToolPreset(event.target.value)) state.onPresetChange?.(event.target.value); }}
+                style={claudeSelectStyle}
+              >
+                {CLAUDE_TOOL_PRESETS.map((preset) => (
+                  <option key={preset} value={preset}>{t(preset === "writable" ? "claude.presetWritable" : "claude.presetReadOnly")}</option>
+                ))}
+              </select>
+            </label>
+          </>
+        )}
+      </div>
+      {!available && state.availability !== null && <div className="claude-unavailable">{t("claude.notOnPath")}</div>}
+      {claudeOn && (
+        <>
+          <div>{t("claude.fixedForSession")}</div>
+          <div>{t(claudePresetTextKey(state.preset))}</div>
+          {state.availability?.configDir && (
+            <div style={{ fontFamily: "var(--font-mono)", fontSize: 11, wordBreak: "break-all" }}>
+              {t("claude.configDir", { path: state.availability.configDir })}
+            </div>
+          )}
+          <div>{t("claude.configDirNote")}</div>
+        </>
+      )}
+    </div>
+  );
 }
 
 export interface ChatInputHandle {
@@ -711,6 +837,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   cwd,
   onAttachFiles,
   compact = false,
+  claude,
 }: Props, ref) {
   const { t } = useI18n();
   const { fontSize } = useChatAppearance();
@@ -1831,7 +1958,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     <button
       onClick={onAbort}
       title={t("chat.stopAgent")}
-      aria-label={iconOnly ? t("chat.stopAgent") : undefined}
+      aria-label={t("chat.stopAgent")}
       style={{
         display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
         flexShrink: 0,
@@ -2580,7 +2707,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 ? t("chat.compactingPlaceholder")
                 : isStreaming && (onSteer || onFollowUp)
                 ? t("chat.steerPlaceholder")
-                : isStreaming ? t("chat.agentPlaceholder")
+                : isStreaming ? t(claude?.harness === CLAUDE_HARNESS ? "claude.sendWhileRunning" : "chat.agentPlaceholder")
                 : t("chat.messagePlaceholder")
             }
             rows={1}
@@ -2606,6 +2733,17 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0, alignSelf: "flex-end" }}>
               {isMobile && renderStopButton(true)}
               {!isNarrowMobile && renderSteerFollowUpButtons(!isMobile, false)}
+              {/* claude takes one message per turn (no queue, no steer): Send stays, disabled. */}
+              {claude?.harness === CLAUDE_HARNESS && (
+                <button
+                  type="button"
+                  disabled
+                  aria-label={t("chat.send")}
+                  style={{ flexShrink: 0, padding: isMobile ? 0 : "7px 14px", width: isMobile ? 36 : undefined, height: isMobile ? 36 : undefined, background: "var(--bg-panel)", border: "none", borderRadius: 8, color: "var(--text-dim)", cursor: "not-allowed", fontSize: 13, fontWeight: 600 }}
+                >
+                  {isMobile ? "→" : t("chat.send")}
+                </button>
+              )}
             </div>
           ) : (
             sendButton
@@ -2620,6 +2758,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
           </div>
         )}
 
+        {!compact && claude && <ClaudeComposerControls state={claude} t={t} />}
+
         {/* Bottom bar: left | center (context) | right */}
         {!compact && <div className="chat-input-controls" style={{
           marginTop: isMobile ? 4 : 8,
@@ -2631,7 +2771,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
 
           {/* LEFT: attach + model selector (idle) or steer/followup toggle (streaming) */}
           <div style={{ flex: isMobile ? "1 1 auto" : "0 0 auto", minWidth: 0, display: "flex", alignItems: "center", gap: 2 }}>
-            <button
+            {/* A claude session takes text only: no attachments. */}
+            {claude?.harness !== CLAUDE_HARNESS && <button
               onClick={openImagePicker}
               title={t("chat.attachFiles")}
               style={{
@@ -2658,7 +2799,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 <circle cx="8.5" cy="8.5" r="1.5" />
                 <polyline points="21 15 16 10 5 21" />
               </svg>
-            </button>
+            </button>}
             {/* Model selector - visible always, disabled while the session or switch is busy */}
             {(modelOptions.length > 0 || model || modelError) && onModelChange && (
               <ModelSelector

@@ -1,3 +1,5 @@
+// carries: components/Polyforge*, components/polyforge-*, hooks/usePolyforge*, lib/polyforge*, app/api/polyforge/*
+// carries: components/AppShell*
 // pi#114 (wi_fnV3SUypLyIN) — Polyforge step list as a flow graph. Authored
 // pre-code against artifacts/spec.md (new-behaviour acceptance criteria only);
 // standalone like e2e/polyforge.mjs (own dev server, stub `pf` on PATH). A NODE is
@@ -6,6 +8,14 @@
 // sequence EDGE is any visible element/text (or ::after/::before connector) between
 // DOM-consecutive nodes; a rewind EDGE is a dashed-styled element (border, outline,
 // stroke-dasharray or a ⇢-style glyph) naming gate then target. Any FAIL exits 1.
+//
+// (owner-intentional change, by ruling — not a regression): the
+// standalone event tail and its pi#112 simple/verbose mode are gone, so a
+// detail is recognised by its title row's slug, its execution-progress block
+// and its rendered graph (no longer by the tail's raw marker kind), nothing
+// seeds `pi-web:polyforge-event-mode`, and G1/G13 lose the mode dimension —
+// one graph in every state — while every graph assertion stays as it was; G13
+// additionally asserts that no mode control and no `sync ×N` row exist.
 //
 //   node e2e/polyforge-graph.mjs
 import assert from "node:assert/strict";
@@ -30,7 +40,8 @@ writeFileSync(join(agentDir, "sessions", "e2e", `${SESSION}.jsonl`), [
   { type: "message", id: "m1", parentId: null, timestamp: ts, message: { role: "user", content: "E2E polyforge graph host session" } },
 ].map((entry) => JSON.stringify(entry)).join("\n") + "\n");
 
-// ---- fixtures (one watch per slug; each tail ends with a unique raw marker kind) ----
+// ---- fixtures (one watch per slug; each tail ends with a unique raw marker
+// kind — an unknown kind, which since renders nowhere) ----
 const ONFAIL_SENTINEL = "E2E-ONFAIL-SENTINEL-114";
 const PATH_SENTINEL = "/srv/e2e-secret-workspace-114";
 const at = (h, m) => `2026-10-19T${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:00Z`;
@@ -94,7 +105,7 @@ chmodSync(join(stubDir, "pf"), 0o755);
 
 // ---- scenario bookkeeping ----
 const T = {
-  G1: "G1: Simple mode shows one graph node per step and no step chips",
+  G1: "G1: One graph node per step and no step chips (one graph in every state since)",
   G2: "G2: A step re-run after a rewind keeps exactly one node and no attempt counter",
   G3: "G3: declared_steps drives node order and sequence edges, unstarted steps included",
   G4: "G4: Declared on_fail targets are never drawn",
@@ -106,7 +117,7 @@ const T = {
   G10: "G10: Node shows the 24-char-cut name; title and aria label carry full name and status",
   G11: "G11: Clicking a node does nothing",
   G12: "G12: Nine nodes wrap onto rows without horizontal scroll in the 460px dock and the mobile sheet",
-  G13: "G13: No step name+status chips in any event mode (verbose, simple, invalid)",
+  G13: "G13: No step name+status chips, no event-mode control and no sync row (the event modes are gone since)",
   G14: "G14: Watch route sanitizes declared_steps to ordered ids only",
   G15: "G15: Docs describe the graph contract and polyforge labels stay in all three locales",
 };
@@ -148,11 +159,11 @@ async function get(path) {
   return { status: response.status, text, json };
 }
 const errors = [];
-async function openPage({ viewport = { width: 1280, height: 800 }, mode, reducedMotion } = {}) {
+async function openPage({ viewport = { width: 1280, height: 800 }, reducedMotion } = {}) {
   const context = await browser.newContext({ viewport, locale: "en-US", ...(reducedMotion ? { reducedMotion } : {}) });
-  await context.addInitScript((m) => {
-    try { localStorage.setItem("pi-web:split-view-enabled", "false"); if (m) localStorage.setItem("pi-web:polyforge-event-mode", m); } catch {}
-  }, mode ?? null);
+  await context.addInitScript(() => {
+    try { localStorage.setItem("pi-web:split-view-enabled", "false"); } catch {}
+  });
   const page = await context.newPage(); page.setDefaultTimeout(10_000); page.on("pageerror", (error) => errors.push(error.message));
   page.on("console", (event) => { if (event.type() === "error") errors.push(event.text()); });
   page.on("response", (r) => { if (r.url().startsWith(base) && r.status() >= 500) errors.push(`${r.status()} ${r.url()}`); });
@@ -165,19 +176,24 @@ async function openPage({ viewport = { width: 1280, height: 800 }, mode, reduced
 }
 const pfButton = (page) => page.getByRole("button", { name: /^(?!.*close).*polyforge/i }).first();
 const pfPanel = (page) => page.getByRole("complementary", { name: /polyforge/i }).or(page.getByRole("dialog", { name: /polyforge/i }));
-// The detail for `slug` shows iff its unique raw marker kind renders in the tail.
-// Job rows toggle selection: verify first, click only when absent, retry bounded.
+// The detail for `slug` shows iff its title row names the slug, its
+// execution-progress block is mounted and its graph has rendered (the watch
+// read landed). Job cards toggle selection: verify first, click only when
+// absent, retry bounded.
 async function select(page, slug) {
+  const showing = async (panel) => (await panel.locator("[data-pf-detail-title]").getByText(slug, { exact: true }).count()) > 0
+    && (await panel.locator("[data-pf-progress]").count()) > 0
+    && (await panel.locator('[data-pf-detail-graph] [role="listitem"]').count()) > 0;
   for (let attempt = 0; attempt < 6; attempt++) {
     if ((await pfPanel(page).count()) === 0) { await pfButton(page).click(); await pfPanel(page).first().waitFor(); continue; }
     const panel = pfPanel(page).first();
-    if ((await panel.getByText(marker(slug)).count()) > 0) { await delay(300); return panel; }
-    if ((await panel.getByText(slug, { exact: true }).count()) === 0) { await delay(500); continue; }
-    await panel.getByText(slug, { exact: true }).first().click().catch(() => {});
-    // Wait for the watch read to land instead of a fixed 700ms: under the
-    // default pool the detail can take longer than that, and an early retry
-    // toggles the row again. The assertions are unchanged.
-    await panel.getByText(marker(slug)).first().waitFor({ timeout: 5_000 }).catch(() => {});
+    if (await showing(panel)) return panel;
+    const cardFor = panel.locator(`[data-pf-card-wi="${WATCHES[slug].work_item}"]`);
+    if ((await cardFor.count()) === 0) { await cardFor.waitFor({ timeout: 5_000 }).catch(() => {}); continue; }
+    if ((await panel.locator("[data-pf-detail-title]").getByText(slug, { exact: true }).count()) === 0) await cardFor.click().catch(() => {});
+    // Wait for the watch read to land (the graph renders), bounded; an early
+    // retry would toggle the card again.
+    await panel.locator('[data-pf-detail-graph] [role="listitem"]').first().waitFor({ timeout: 5_000 }).catch(() => {});
   }
   throw new Error(`the ${slug} detail did not render`);
 }
@@ -271,10 +287,10 @@ try {
   });
   const CHIPS201 = NINE.map((n) => [n, n === "e2e-author" ? "In progress" : /grill|spec|plan/.test(n) ? "Done" : "Pending"]);
   await onPage([T.G1, T.G3, T.G4, T.G12], {}, "pi#201", async (page, panel, g) => {
-    await check(T.G1, "simple mode", async () => {
+    await check(T.G1, "one graph", async () => {
       requireNodes(g, 9);
       assert.deepEqual([...names(g)].sort(), [...NINE].sort(), "not exactly one node per step");
-      assert.equal(await chipCount(panel, CHIPS201), 0, "step chips render in simple mode");
+      assert.equal(await chipCount(panel, CHIPS201), 0, "step chips render");
     });
     await check(T.G3, "declared order", async () => {
       requireNodes(g, 9);
@@ -294,21 +310,12 @@ try {
     await check(T.G12, "mobile sheet", async () => assertWraps(g));
   });
   await onPage([T.G13], {}, "pi#201", async (page, panel, g) => {
-    await check(T.G13, "simple mode", async () => {
+    await check(T.G13, "no chips, no mode, no sync row", async () => {
       requireNodes(g, 9);
-      assert.equal(await chipCount(panel, CHIPS201), 0, "simple mode shows name+status chips");
-    });
-  });
-  await onPage([T.G13], { mode: "verbose" }, "pi#201", async (page, panel, g) => {
-    await check(T.G13, "verbose", async () => {
-      requireNodes(g, 9);
-      assert.equal(await chipCount(panel, CHIPS201), 0, "verbose mode shows name+status chips");
-    });
-  });
-  await onPage([T.G13], { mode: "bogus" }, "pi#201", async (page, panel, g) => {
-    await check(T.G13, "invalid mode", async () => {
-      requireNodes(g, 9);
-      assert.equal(await chipCount(panel, CHIPS201), 0, "an invalid stored mode shows chips");
+      assert.equal(await chipCount(panel, CHIPS201), 0, "the detail shows name+status chips");
+      assert.equal(await panel.getByRole("button", { name: /^(simple|verbose)$/i }).count(), 0, "an event-mode control exists");
+      assert.equal(await panel.getByText(/sync\s*[×x]\s*\d/i).count(), 0, "a collapsed sync row exists");
+      assert.equal(await panel.getByText(marker("pi#201")).count(), 0, "the unknown marker kind renders somewhere");
     });
   });
   const errorsBefore = errors.length;
@@ -406,7 +413,7 @@ try {
       const early = hits.filter((h) => h.t > t0 + 250 && h.t < t0 + 2500 && !background.has(h.path));
       assert.deepEqual(early, [], `clicking nodes issued ${JSON.stringify(early)}`);
       assert.equal(page.url(), url, "clicking a node navigated");
-      assert.ok((await panel.getByText(marker("pi#209")).count()) > 0 && (await panel.locator("[title]").count()) === titled, "clicking a node changed the detail or filtered the tail");
+      assert.ok((await panel.locator("[data-pf-detail-title]").getByText("pi#209", { exact: true }).count()) > 0 && (await panel.locator("[title]").count()) === titled, "clicking a node changed the detail");
     });
   });
   await onPage([T.G9], { reducedMotion: "reduce" }, "pi#209", async (page, panel, g) => {

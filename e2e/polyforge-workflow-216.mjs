@@ -1,3 +1,5 @@
+// carries: components/Polyforge*, components/polyforge-*, hooks/usePolyforge*, lib/polyforge*, app/api/polyforge/*
+// carries: components/SettingsPanel*, components/SettingsUi*, components/settings-ui-helpers*, lib/settings-navigation*, lib/package-settings*, app/api/plugins/*, app/settings.css, lib/i18n/*
 // — the workflow card + merged 工作区 card, end-to-end.
 //
 // Authored pre-code against artifacts/spec.md (the capsule's
@@ -12,6 +14,12 @@
 // the writers and the cards do not exist yet, so every scenario is an
 // assertion-level red (unknown verb, missing JSON field, refused write, absent
 // card) — never a build or fixture error.
+//
+// Single-repo SKIP: the real `pf` comes from the sibling repos/pi-web
+// checkout, which a pi-web-only capsule does not have. When that sibling is
+// absent the suite prints one SKIP line and exits 0 before any fixture side
+// effect; when it is present the build still runs and a missing `go`, a failed
+// build or a missing cmd/pf still FAILS the suite.
 //
 //   node e2e/polyforge-workflow-216.mjs
 import assert from "node:assert/strict";
@@ -29,6 +37,12 @@ import { NAV_MS } from "./timeouts.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const acme = fileURLToPath(new URL("../../pi-web/", import.meta.url));
+// Probe before any side effect: without the sibling checkout there is no real
+// pf to build. A sibling that exists but is broken still fails at the build.
+if (!existsSync(acme)) {
+  console.log(`SKIP polyforge-workflow-216: sibling repo absent at ${acme} (single-repo capsule); real pf cannot be built`);
+  process.exit(0);
+}
 assert.ok(!existsSync(join(root, process.env.PI_WEB_DIST_DIR || ".next", "dev/lock")), "Run in a checkout without an active dev server");
 
 const work = mkdtempSync(join(tmpdir(), "pi-web-pf-w216-"));

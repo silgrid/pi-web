@@ -1,3 +1,5 @@
+// carries: components/Polyforge*, components/polyforge-*, hooks/usePolyforge*, lib/polyforge*, app/api/polyforge/*
+// carries: components/SettingsPanel*, components/SettingsUi*, components/settings-ui-helpers*, lib/settings-navigation*, lib/package-settings*, app/api/plugins/*
 // pi#122 (wi_Gvm8wRZcr88O) — Settings Polyforge section: end-to-end acceptance pass.
 //
 // Authored pre-code against artifacts/spec.md (AC1–AC12, AC14; AC13 is this file

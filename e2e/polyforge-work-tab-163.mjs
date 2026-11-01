@@ -1,3 +1,5 @@
+// carries: components/Polyforge*, components/polyforge-*, hooks/usePolyforge*, lib/polyforge*, app/api/polyforge/*
+// carries: components/AppShell*
 // — Polyforge dock: the carried Work-tab base (Jobs + Tasks,
 // sub-tabs, badges, durations, filters, empty states, anchors) plus the owner's
 // card-form ruling: compact side-by-side job/task grids, key-information job
@@ -6,7 +8,7 @@
 //
 // Authored pre-code against artifacts/spec.md and the carried
 // artifacts/carried-163/e2e-scenarios.md; the capsule's artifacts/e2e-scenarios.md
-// carries the GIVEN/WHEN/THEN blocks, the scenario titles and the baseline
+// holds the GIVEN/WHEN/THEN blocks, the scenario titles and the baseline
 // evidence. The suite starts its own `next dev` on a stub `pf` and a throwaway
 // daemon data root holding the job/capsule/transcript fixtures; every pf argv
 // is appended to a ledger, so read discipline is asserted, not assumed.
@@ -19,6 +21,10 @@
 // and classified instead of leaving the whole command as the unit).
 //
 //   node --experimental-strip-types e2e/polyforge-work-tab-163.mjs
+//
+// e2e/all: isolated — proven load-sensitive on a shared host: under the
+// parallel full bar S3/S20/S10 hit `locator.click: Timeout 8000ms exceeded`
+// while the suite passed alone (#227, #235;).
 import assert from "node:assert/strict";
 import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -27,7 +33,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
 import { startNextServer } from "./next-server.mjs";
-import { NAV_MS } from "./timeouts.mjs";
+import { ACTION_MS, NAV_MS } from "./timeouts.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 assert.ok(!existsSync(join(root, process.env.PI_WEB_DIST_DIR || ".next", "dev/lock")), "Run in a checkout without an active dev server");
@@ -222,7 +228,7 @@ async function openPage({ viewport = { width: 1280, height: 800 }, storage = {} 
       for (const [key, value] of Object.entries(prefs)) localStorage.setItem(key, value); } catch { /* storage unavailable */ }
   }, { prefs: storage });
   const page = await context.newPage();
-  page.setDefaultTimeout(8_000);
+  page.setDefaultTimeout(ACTION_MS);
   page.__cards = []; page.__pf = [];
   await page.route((url) => url.pathname === BARRIER, (route) => route.fulfill({ status: 204 }));
   page.on("pageerror", (error) => errors.push(error.message));
@@ -244,14 +250,23 @@ const topTab = (page, re) => topTabs(page).filter({ hasText: re }).first();
 const subTab = (page, re) => dock(page).getByRole("tab", { name: re }).or(dock(page).getByRole("button", { name: re })).last();
 const card = (page, wi) => dock(page).locator(`[data-pf-card-wi="${wi}"]`);
 async function openDock(page) {
-  // The helper tolerates a folded Polyforge button, though made it
-  // resident right of the toolbar's More toggle at ≤480px.
+  // the toggle only renders once the mount-time status probe
+  // resolves (`pfPresent`), so wait for that bounded condition instead of
+  // letting the 8 s click bound absorb a slow probe under host load.
+  // made the Polyforge button resident right of the toolbar's
+  // More toggle at ≤480px (never folded into the More sheet): opening More
+  // before the status probe resolved left the sheet covering the toggle once
+  // it rendered ( verification).
+  // since the toggle is resident at ≤480px and
+  // inline wider, so never open ⋯ to reveal it — ⋯'s overlay covers that
+  // slot (left: TOP_BAR_ICON_BUTTON_SIZE, z-index 20) and intercepts the
+  // click. Close ⋯ if it is open, then click the toggle.
   const more = page.locator('[data-mobile-toolbar-more="true"]');
-  if ((await pfButton(page).count()) === 0 && (await more.count()) > 0 && (await more.getAttribute("aria-expanded")) !== "true") await more.click();
-  // rewind: the toggle only renders once the mount-time status
-  // probe resolves (`pfPresent`), so wait for that bounded condition instead
-  // of letting the 8 s click bound absorb a slow probe under host load.
   await waitFor(async () => (await pfButton(page).count()) > 0, "the Polyforge toggle renders", 20_000);
+  if ((await more.count()) > 0 && (await more.getAttribute("aria-expanded")) === "true") {
+    await more.click();
+    await page.locator('[data-mobile-toolbar-actions="true"]').waitFor({ state: "hidden", timeout: 10_000 });
+  }
   await pfButton(page).click(); await dock(page).waitFor({ timeout: 20_000 }); return dock(page);
 }
 async function openWork(page, sub) {
