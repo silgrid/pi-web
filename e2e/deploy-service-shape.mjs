@@ -1,3 +1,4 @@
+// carries: deploy-piweb.sh, bin/pi-web-deploy.js, .polyforge/deploy.sh, bin/pi-web.js, lib/web-auth*, app/api/web-auth/*
 // repro e2e: a deploy must keep the operator service shape.
 //
 // Reported failure (2026-10-30,): the release lane ran

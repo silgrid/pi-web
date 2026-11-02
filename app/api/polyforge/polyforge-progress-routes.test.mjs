@@ -6,7 +6,7 @@ import test from "node:test";
 import { createJiti } from "jiti";
 
 // GET /api/polyforge/progress?wi= — the job detail's
-// execution-progress read face. The handler runs for real (jiti) against a
+// execution-progress read face (the whole-job snapshot since). The handler runs for real (jiti) against a
 // throwaway daemon data root; the source pins cover what a run cannot (no
 // other handler, no log/env/write).
 const source = readFileSync(new URL("./progress/route.ts", import.meta.url), "utf8");
@@ -21,7 +21,7 @@ function fixture(t) {
   const work = mkdtempSync(join(tmpdir(), "pf-progress-route-"));
   const previous = process.env.POLYFORGE_DATA_DIR;
   const root = join(work, "data");
-  mkdirSync(root, { recursive: true });
+  mkdirSync(join(root, "events"), { recursive: true });
   process.env.POLYFORGE_DATA_DIR = root;
   t.after(() => {
     if (previous === undefined) delete process.env.POLYFORGE_DATA_DIR;
@@ -34,7 +34,7 @@ function fixture(t) {
     mkdirSync(join(dir, "runtime-state"), { recursive: true });
     mkdirSync(join(dir, "session"), { recursive: true });
     const path = transcript ?? join(dir, "session", "s.jsonl");
-    writeFileSync(join(dir, "runtime-state", "spawn-journal.jsonl"), jsonl([{ step_id: "code", transcript: path, harness: "pi" }]));
+    writeFileSync(join(dir, "runtime-state", "spawn-journal.jsonl"), jsonl([{ step_id: "code", spawn_n: 1, started_at: "2026-11-01T00:00:00Z", transcript: path, harness: "pi" }]));
     if (content !== undefined) writeFileSync(path, content);
     jobs.push({ work_item_id: wi, capsule_dir: dir });
     writeFileSync(join(root, "runtime-state.json"), JSON.stringify({ version: 1, jobs }));
@@ -63,7 +63,7 @@ test("the progress route is GET-only, gated in-route, dynamic, and never logs, r
   assert.deepEqual(params, ["wi"], "no path/file query is read");
 });
 
-test("end to end — narration + one masked tool line; no tool result, thinking, prompt or raw credential", async (t) => {
+test("end to end — the whole-job body: narration + one masked tool line + lifecycle lines; no tool result, thinking, prompt or raw credential", async (t) => {
   const f = fixture(t);
   const dir = f.capsule("wi_route210a", undefined, jsonl([
     { type: "session", id: "s" },
@@ -72,14 +72,25 @@ test("end to end — narration + one masked tool line; no tool result, thinking,
     { type: "message", id: "tc", message: { role: "assistant", content: [{ type: "thinking", thinking: "SECRET-THINKING" }, { type: "toolCall", id: "c", name: "bash", arguments: { command: "curl --token=SECRET-TOKEN https://x.invalid" } }] } },
     { type: "message", id: "tr", message: { role: "toolResult", toolName: "bash", content: [{ type: "text", text: "SECRET-TOOL-RESULT" }] } },
   ]));
+  writeFileSync(join(f.root, "events", "wi-wi_route210a.jsonl"), jsonl([
+    { at: "2026-11-01T00:00:00Z", kind: "step_started", body: { step: "code", spawn_n: 1, model: "pi:m" } },
+    { at: "2026-11-01T00:00:01Z", kind: "needs_input", body: { step: "code", question: "SECRET-PROMPT" } },
+    { at: "2026-11-01T00:00:02Z", kind: "published", body: { version: 1 } },
+    { at: "2026-11-01T00:00:03Z", kind: "push_failed", body: { error: "push token=SECRET-TOKEN" } },
+  ]));
   const { status, text } = await get("?wi=wi_route210a");
   assert.equal(status, 200);
   const body = JSON.parse(text);
+  assert.deepEqual(Object.keys(body).sort(), ["available", "lines", "omitted"]);
   assert.equal(body.available, true);
-  assert.deepEqual(body.entries.map(({ kind, text: line }) => [kind, line]), [
-    ["narration", "ROUTE-NARRATION token=***"],
-    ["tool", "bash: curl --token=*** https://x.invalid"],
-  ]);
+  assert.equal(body.omitted, 0);
+  assert.deepEqual(body.lines.map(({ kind, text: line, tone, event }) => [kind, line.replace(/^\d{2}:\d{2}:\d{2} /, ""), tone, event]), [
+    ["event", "▶ code #1 · pi:m", "accent", "step_started"],
+    ["narration", "ROUTE-NARRATION token=***", undefined, undefined],
+    ["tool", "bash: curl --token=*** https://x.invalid", undefined, undefined],
+    ["event", "? code", "amber", "needs_input"],
+    ["event", "⚠ push token=***", "red", "push_failed"],
+  ], "untimed transcript records sit at the spawn's start; dropped kinds produce no line");
   for (const secret of SECRETS) assert.ok(!text.includes(secret), `the response leaks ${secret}`);
   for (const word of ["toolResult", "thinking", "user", "system", dir, f.root]) assert.ok(!text.includes(word), `the response carries ${word}`);
 });
@@ -92,11 +103,27 @@ test("a wrong-shaped or unknown wi is a 400 before any transcript read; no path 
     assert.equal(status, 400, `refused: ${query || "no wi"}`);
     assert.ok(!text.includes("KNOWN-ONLY") && !text.includes(f.root), `nothing read or named for ${query}`);
   }
-  rmSync(join(f.root, "runtime-state.json"));
-  assert.equal((await get("?wi=wi_route210b")).status, 400, "an unreadable job index finds no record");
 });
 
-test("an outside, missing or partial transcript, or a record without a capsule, degrades to 200 available:false", async (t) => {
+test(" (N6): a missing, unreadable or non-JSON job index answers 200 available:false; a malformed id stays 400", async (t) => {
+  const f = fixture(t);
+  f.capsule("wi_route238n", undefined, jsonl([{ type: "message", id: "n", message: { role: "assistant", content: [{ type: "text", text: "INDEXED" }] } }]));
+  const index = join(f.root, "runtime-state.json");
+  const saved = readFileSync(index, "utf8");
+  for (const [label, damage] of [["missing", () => rmSync(index)], ["non-JSON", () => writeFileSync(index, "{half")], ["unreadable", () => { rmSync(index); mkdirSync(index); }]]) {
+    damage();
+    const { status, text } = await get("?wi=wi_route238n");
+    assert.equal(status, 200, label);
+    assert.deepEqual(JSON.parse(text), { available: false, lines: [], omitted: 0 }, label);
+    assert.ok(!text.includes(f.root) && !text.includes("INDEXED"), `${label}: nothing read or named`);
+    assert.equal((await get("?wi=../../etc/passwd")).status, 400, `${label}: a malformed id is still refused first`);
+    rmSync(index, { recursive: true, force: true });
+    writeFileSync(index, saved);
+  }
+  assert.equal((await get("?wi=wi_route238unknown")).status, 400, "a readable index without the job stays 400");
+});
+
+test("an outside, missing or partial transcript adds no line; a record without a capsule degrades to 200 available:false", async (t) => {
   const f = fixture(t);
   const outside = join(f.work, "outside.jsonl");
   writeFileSync(outside, jsonl([{ type: "message", id: "o", message: { role: "assistant", content: [{ type: "text", text: "OUTSIDE" }] } }]));
@@ -106,12 +133,15 @@ test("an outside, missing or partial transcript, or a record without a capsule, 
   const records = JSON.parse(readFileSync(join(f.root, "runtime-state.json"), "utf8"));
   records.jobs.push({ work_item_id: "wi_route210f" });
   writeFileSync(join(f.root, "runtime-state.json"), JSON.stringify(records));
-  for (const wi of ["wi_route210c", "wi_route210d", "wi_route210e", "wi_route210f"]) {
+  for (const wi of ["wi_route210c", "wi_route210d", "wi_route210e"]) {
     const { status, text } = await get(`?wi=${wi}`);
     assert.equal(status, 200, wi);
-    assert.deepEqual(JSON.parse(text), { available: false, entries: [] }, wi);
+    assert.deepEqual(JSON.parse(text), { available: true, lines: [], omitted: 0 }, wi);
     assert.ok(!text.includes("OUTSIDE") && !text.includes("HALF"), wi);
   }
+  const { status, text } = await get("?wi=wi_route210f");
+  assert.equal(status, 200);
+  assert.deepEqual(JSON.parse(text), { available: false, lines: [], omitted: 0 });
 });
 
 test("a cross-site request is refused by the existing gate with 403", async (t) => {

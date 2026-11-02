@@ -24,6 +24,18 @@ export function registerNodeInstrumentation(): void {
   process.on("SIGINT", shutdownStreams);
   process.on("SIGTERM", shutdownStreams);
 
+  // claude children run in process groups of their own: end each group
+  // with the server, or a turn under way would outlive it. The module pulls the session
+  // runtime, so it loads in the background like the SDK below; the sessions themselves
+  // live in a globalThis registry the route bundles share.
+  const claudeSessions = import("@/lib/claude-session");
+  claudeSessions.catch(() => {});
+  const shutdownClaude = () => {
+    void claudeSessions.then((module) => module.shutdownAllClaudeSessions()).catch(() => {});
+  };
+  process.on("SIGINT", shutdownClaude);
+  process.on("SIGTERM", shutdownClaude);
+
   // Next evaluates a route's code on its first request, so the first
   // /api/sessions used to pay for importing the whole pi SDK, seconds on
   // Windows (#964). Start that import now, unawaited so register() stays fast:

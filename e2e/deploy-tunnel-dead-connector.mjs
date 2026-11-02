@@ -1,3 +1,4 @@
+// carries: deploy-piweb.sh, bin/pi-web-deploy.js
 // pi#118 repro e2e: quick_tunnel_alive's bare `pgrep -f` identity
 // false-positives on the session-group tmux server's own argv.
 //

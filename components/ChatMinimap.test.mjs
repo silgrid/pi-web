@@ -104,3 +104,47 @@ test("counts no tool calls for non-assistant or string-content messages", () => 
   assert.equal(countToolCalls({ role: "assistant", content: "plain string" }), 0);
   assert.equal(countToolCalls({ role: "assistant" }), 0);
 });
+
+// (upstream #791 client half). The rail renders only after the
+// scroll container is measured, so these are source pins like the
+// click-to-toggle test above; the end-to-end proof is e2e/run.mjs.
+test("loaded turns are numbered after the turns not loaded", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const source = await readFile(new URL("./ChatMinimap.tsx", import.meta.url), "utf8");
+  assert.match(source, /\n  turnsBefore: number;\n\}/, "turnsBefore is a required prop");
+  assert.match(source, /String\(turnsBefore \+ node\.index \+ 1\)\.padStart\(2, "0"\)/);
+  assert.doesNotMatch(source, /String\(node\.index \+ 1\)/, "no numbering from the loaded window alone");
+});
+
+test("one dotted stub above the first node while earlier turns are unloaded", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const source = await readFile(new URL("./ChatMinimap.tsx", import.meta.url), "utf8");
+  assert.equal(source.match(/data-minimap-earlier=""/g)?.length, 1);
+  assert.match(
+    source,
+    /\{turnsBefore > 0 && \([\s\S]{0,120}?<div\s+data-minimap-earlier=""[\s\S]{0,120}?top: 0,\s*height: MINIMAP_PADDING,[\s\S]{0,80}?repeating-linear-gradient\(to bottom, var\(--text-dim\) 0 2px, transparent 2px 4px\)/,
+  );
+  // The stub comes before the rail nodes, and no node is added per unloaded turn.
+  assert.ok(source.indexOf("data-minimap-earlier") < source.indexOf("data-minimap-node-index"));
+  assert.doesNotMatch(source, /Array\.from\(\{ length: turnsBefore/);
+});
+
+test("the preview's first row reports the unloaded turns; its click scrolls to the top and closes the preview", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const source = await readFile(new URL("./ChatMinimap.tsx", import.meta.url), "utf8");
+  const chatWindow = await readFile(new URL("./ChatWindow.tsx", import.meta.url), "utf8");
+  // First child of the preview box, before the turn rows.
+  assert.match(
+    source,
+    /data-minimap-preview-box=""[\s\S]{0,400}?\{turnsBefore > 0 && \(\s*<button\s+type="button"\s+className=\{styles\.earlier\}\s+data-minimap-preview-earlier=""\s+onClick=\{handleEarlierClick\}\s*>\s*\{t\("chatMinimap\.earlierTurns", \{ count: turnsBefore \}\)\}\s*<\/button>\s*\)\}\s*\{allNodes\.map\(/,
+  );
+  // One stable handler (#127): scroll to the top (the list's sentinel pages
+  // history in) and close the preview, like every other row.
+  assert.match(
+    source,
+    /const handleEarlierClick = useCallback\(\(\) => \{\s*scrollContainer\.current\?\.scrollTo\(\{ top: 0, behavior: "smooth" \}\);\s*setMinimapHovered\(false\);\s*\}, \[scrollContainer\]\);/,
+  );
+  // ChatWindow passes the hook's offset.
+  assert.match(chatWindow, /historyCursor, hasEarlierMessages, earlierTurnCount, streamingStore,/);
+  assert.match(chatWindow, /<ChatMinimap[\s\S]{0,400}?turnsBefore=\{earlierTurnCount\}/);
+});

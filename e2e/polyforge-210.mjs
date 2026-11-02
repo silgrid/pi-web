@@ -1,6 +1,23 @@
+// carries: components/Polyforge*, components/polyforge-*, hooks/usePolyforge*, lib/polyforge*, app/api/polyforge/*
+// carries: components/AppShell*, lib/i18n/*
 // — Polyforge job detail re-layout: title row, DAG timings, live progress.
 //
-// Authored PRE-CODE against artifacts/spec.md (Acceptance criteria + `####
+// (owner-intentional change, by ruling — not a regression): this
+// suite now asserts the #238 destination where it reverses parts of #210 and
+// pi#112. The detail is three blocks — summary (title row, folded goal + toggle,
+// facts, summarize narration, tool calls / recent files / origin) → DAG →
+// execution progress last, no fourth block; the command row and the
+// simple/verbose event-mode toggle are gone; the progress is the whole job's
+// stream (`{available, lines:[{id, kind, text, tone?, event?}], omitted}`, every
+// spawn, the newest 2000 lines) instead of the current step's newest 50
+// entries; a missing job index answers 200 `available:false` (N6). Every #210
+// guarantee that #238 keeps (title row, DAG timing line, 2 s cadence, last-good
+// read, whitelist, masking, 400/403/405, no path, no inner scroller) is still
+// asserted, none weakened; the over-bound omitted marker is the authored
+// e2e/polyforge-238.mjs suite's (S238-10). Absence checks settle on a probe
+// request the page issues after the fact (N8), never a fixed sleep.
+//
+// Originally authored PRE-CODE against artifacts/spec.md (Acceptance criteria + `####
 // Scenario` blocks). The suite drives the panel through the existing Jobs tab
 // (`[data-pf-card-wi]`, the deselect control) and the new read face at
 // `GET /api/polyforge/progress?wi=`; the exact route path and the four
@@ -17,7 +34,7 @@
 //
 //   node e2e/polyforge-210.mjs
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -38,6 +55,7 @@ const dataRoot = join(work, "data");
 const SESSION = "e2e-pf-210-session";
 const ROUTE = "/api/polyforge/progress";
 const POLL_KEY = "pi-web:polyforge-poll-interval";
+const PROBE = "/api/polyforge/e2e-settle-probe";
 const EPOCH = "2026-10-31T00:00:00.000Z";
 const GOAL = "feat: pi-web 作业卡片详情区重构——自上而下三段、无嵌套滚动与实时进度";
 const SHORT = "pi-web 作业卡片详情区重构";
@@ -84,10 +102,14 @@ const watchB = () => ({ status: { wi: B.wi, slug: B.slug, workflowStatus: "needs
 const watchC = () => ({ status: { wi: C.wi, slug: C.slug, workflowStatus: "paused", currentStep: "step-code", updatedAt: EPOCH,
   steps: [{ name: "step-code", status: "blocked", startedAt: at(0) }], declared_steps: [{ id: "step-code" }], events: [] } });
 const entry = (n, text, kind = "narration") => ({ id: `e${n}`, kind, text });
-const defaultProgress = () => ({ available: true, entries: [
+const eventLine = (n, text, event, tone) => ({ id: `ev${n}`, kind: "event", text, event, ...(tone ? { tone } : {}) });
+const snapshot = (lines, omitted = 0) => ({ available: true, lines, omitted });
+const CODE_LINES = [
+  eventLine(0, "00:00:01 ▶ step-code #1 · pi:e2e/model", "step_started", "accent"),
   entry(1, "E2E-STEP-CODE-NARRATION"),
   entry(2, "bash: curl --token=*** https://e2e.invalid", "tool"),
-] });
+];
+const defaultProgress = () => snapshot(CODE_LINES);
 
 // ── real read-face fixture: one daemon data root, capsule transcripts ──────
 const routeWi = (n) => `wi_E2E210Route${n}`;
@@ -108,17 +130,26 @@ writeFileSync(routePi, jsonl([
   pi("tc", [{ type: "thinking", thinking: "SECRET-THINKING" }, { type: "toolCall", id: "c", name: "bash", arguments: { command: "curl --token=SECRET-TOKEN https://e2e.invalid" } }]),
   { type: "message", id: "tr", parentId: null, timestamp: EPOCH, message: { role: "toolResult", toolName: "bash", content: [{ type: "text", text: "SECRET-TOOL-RESULT" }] } },
 ]));
+const routeReview = join(caps[routeWi(1)], "session", "review.jsonl");
+writeFileSync(routeReview, jsonl([{ ...piText("r", "E2E-ROUTE-REVIEW-NARRATION"), timestamp: "2026-10-31T00:00:30.000Z" }]));
+mkdirSync(join(dataRoot, "events"), { recursive: true });
+writeFileSync(join(dataRoot, "events", `wi-${routeWi(1)}.jsonl`), jsonl([
+  { at: EPOCH, kind: "step_started", work_item: routeWi(1), body: { step: "code", spawn_n: 1, model: "pi:e2e/model" } },
+  { at: "2026-10-31T00:00:20.000Z", kind: "step_done", work_item: routeWi(1), body: { step: "code", spawn_n: 1 } },
+  { at: "2026-10-31T00:00:25.000Z", kind: "step_started", work_item: routeWi(1), body: { step: "review", spawn_n: 1, model: "pi:e2e/model" } },
+]));
 const manyPi = join(caps[routeWi(5)], "session", "many.jsonl");
 writeFileSync(manyPi, jsonl([...Array.from({ length: 60 }, (_, i) => piText(`m${i}`, `E2E-MANY-${String(i + 1).padStart(2, "0")}`))]));
 const partialPi = join(caps[routeWi(4)], "session", "partial.jsonl");
 writeFileSync(partialPi, '{"type":"message","id":"half","message":{"role":"assistant","content":[{"type":"text","text":"E2E-HALF"');
-const journal = (wi, transcript, stepId = "code") => writeFileSync(join(caps[wi], "runtime-state", "spawn-journal.jsonl"), jsonl([{ at: EPOCH, work_item: wi, step_id: stepId, started_at: EPOCH, transcript, harness: "pi" }]));
-journal(routeWi(1), routePi);
+const journal = (wi, transcript, stepId = "code", more = []) => writeFileSync(join(caps[wi], "runtime-state", "spawn-journal.jsonl"), jsonl([{ at: EPOCH, work_item: wi, step_id: stepId, spawn_n: 1, started_at: EPOCH, transcript, harness: "pi" }, ...more]));
+journal(routeWi(1), routePi, "code", [{ at: "2026-10-31T00:00:25.000Z", work_item: routeWi(1), step_id: "review", spawn_n: 1, started_at: "2026-10-31T00:00:25.000Z", transcript: routeReview, harness: "pi" }]);
 journal(routeWi(2), "/etc/passwd");
 journal(routeWi(3), join(caps[routeWi(3)], "session", "missing.jsonl"));
 journal(routeWi(4), partialPi);
 journal(routeWi(5), manyPi);
-writeFileSync(join(dataRoot, "runtime-state.json"), JSON.stringify({ version: 1, jobs: [1, 2, 3, 4, 5].map((n) => ({
+const runtimeState = join(dataRoot, "runtime-state.json");
+writeFileSync(runtimeState, JSON.stringify({ version: 1, jobs: [1, 2, 3, 4, 5].map((n) => ({
   work_item_id: routeWi(n), capsule_dir: caps[routeWi(n)], transcript: n === 3 ? join(caps[routeWi(3)], "session", "missing.jsonl") : undefined,
 })) }));
 
@@ -144,17 +175,28 @@ async function openPage({ clock = false, storage = {} } = {}) {
   const progress = { status: 200, body: defaultProgress(), hits: [] };
   page.__progress = progress;
   page.__progressRequests = [];
+  // The daemon drops a finished job from runtime-state.json and `pf ops
+  // status` (runtime dropJob): `__dropA` serves A's absence from both lists,
+  // the watch read failing for it and the progress route's 400 (N6: an id
+  // naming no job in a readable index), as on real data.
+  page.__dropA = false;
+  page.__droppedReads = 0;
   page.route((url) => url.pathname.startsWith("/api/polyforge/"), (route) => {
     const path = new URL(route.request().url()).pathname;
-    if (path === "/api/polyforge/status") return route.fulfill({ json: status });
-    if (path === "/api/polyforge/cards") return route.fulfill({ json: { pfPresent: true, cards } });
+    const dropA = page.__dropA;
+    if (dropA && (path === "/api/polyforge/status" || path === "/api/polyforge/cards")) page.__droppedReads += 1;
+    if (path === "/api/polyforge/status") return route.fulfill({ json: dropA ? { ...status, status: { ...status.status, jobs: status.status.jobs.filter((j) => j.wi !== A.wi) } } : status });
+    if (path === "/api/polyforge/cards") return route.fulfill({ json: { pfPresent: true, cards: dropA ? cards.filter((c) => c.job.wi !== A.wi) : cards } });
     if (path === "/api/polyforge/watch") {
       const wi = new URL(route.request().url()).searchParams.get("wi");
+      if (dropA && (wi === A.wi || wi === A.slug)) return route.fulfill({ status: 404, json: { error: "E2E job dropped" } });
       const body = wi === B.wi || wi === B.slug ? watchB() : wi === C.wi || wi === C.slug ? watchC() : watchA();
       return route.fulfill({ json: body });
     }
+    if (path === PROBE) return route.fulfill({ json: {} });
     if (path === ROUTE) {
       progress.hits.push(Date.now());
+      if (dropA && new URL(route.request().url()).searchParams.get("wi") === A.wi) return route.fulfill({ status: 400, json: { error: "unknown work item" } });
       if (progress.status !== 200) return route.fulfill({ status: progress.status, json: { error: "E2E stub failure" } });
       return route.fulfill({ json: progress.body });
     }
@@ -170,8 +212,16 @@ async function openPage({ clock = false, storage = {} } = {}) {
 }
 const withPage = async (opts, fn) => { const page = await openPage(opts); try { return await fn(page); } finally { await page.context().close(); } };
 async function openDock(page) {
+  // the toggle renders only after the mount-time status probe
+  // (`pfPresent`) and, since, is resident at ≤480px / inline
+  // wider. Never open ⋯ to reveal it: ⋯'s overlay covers that slot and
+  // intercepts the click. Wait for the toggle, close ⋯ if it is open, click.
   const more = page.locator('[data-mobile-toolbar-more="true"]');
-  if ((await pfButton(page).count()) === 0 && (await more.count()) > 0 && (await more.getAttribute("aria-expanded")) !== "true") await more.click();
+  await waitFor(async () => (await pfButton(page).count()) > 0, "the Polyforge toggle renders", 20_000);
+  if ((await more.count()) > 0 && (await more.getAttribute("aria-expanded")) === "true") {
+    await more.click();
+    await page.locator('[data-mobile-toolbar-actions="true"]').waitFor({ state: "hidden", timeout: 10_000 });
+  }
   await pfButton(page).click(); await dock(page).waitFor({ timeout: 20_000 }); return dock(page);
 }
 async function openA(page) {
@@ -184,6 +234,10 @@ async function waitFor(fn, label, ms = 12_000) {
   throw new Error(`${label} (last: ${last})`);
 }
 const tick = (page, ms) => (ms > 0 ? page.clock.runFor(ms) : Promise.resolve());
+// N8: an absence check settles on a real condition — the page issues a probe
+// request after whatever the clock tick fired and the probe's answer lands,
+// so every earlier request of the page has been dispatched and observed.
+const settle = (page) => page.evaluate((probe) => fetch(probe).then((response) => response.text()), PROBE);
 const detail = (page) => dock(page).locator("[data-pf-detail-title]").first();
 const progressBlock = (page) => dock(page).locator("[data-pf-progress]").first();
 const timing = (page, id) => dock(page).locator(`[data-pf-step-timing="${id}"]`).first();
@@ -191,19 +245,26 @@ const titleText = async (page) => (await detail(page).innerText()).replace(/\s+/
 async function order(page, labels) {
   return dock(page).evaluate((scope, wanted) => {
     const leaf = (text) => [...scope.querySelectorAll("*")].find((el) => el.children.length === 0 && (el.textContent || "").trim().startsWith(text));
+    const summary = scope.querySelector("[data-pf-detail-summary]");
     const title = scope.querySelector("[data-pf-detail-title]");
-    const dag = scope.querySelector('[role="list"]');
+    const dag = scope.querySelector("[data-pf-detail-graph]");
     const progress = scope.querySelector("[data-pf-progress]");
-    const found = { title, dag, progress };
+    const region = scope.querySelector("[data-pf-detail-scroll]");
+    const found = { summary, title, dag, progress };
     for (const label of wanted) found[label] = leaf(label);
     const follows = (a, b) => Boolean(a && b && a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
+    const inSummary = wanted.every((label) => Boolean(summary && found[label] && summary.contains(found[label])));
+    // The progress block is the last block: nothing in the region follows it
+    // outside it.
+    const last = Boolean(region && progress && [...region.querySelectorAll("*")].every((el) => progress.contains(el) || !follows(progress, el)));
     return { present: Object.fromEntries(Object.entries(found).map(([k, v]) => [k, Boolean(v)])),
-      order: { dag: follows(title, dag), progress: follows(dag, progress), facts: follows(progress, found.Model),
-        summary: follows(found.Model, found.Summary), command: follows(found.Summary, found.Command),
-        tools: follows(found.Command, found["Tool calls"]), recent: follows(found["Tool calls"], found["Recent files"]),
-        origin: follows(found["Recent files"], found.Origin), events: follows(found.Origin, found["Job started"]) } };
+      order: { title: summary?.contains(title) ?? false, facts: follows(title, found.Model), summary: follows(found.Model, found.Summary),
+        tools: follows(found.Summary, found["Tool calls"]), recent: follows(found["Tool calls"], found["Recent files"]),
+        origin: follows(found["Recent files"], found.Origin), inSummary, dag: follows(found.Origin, dag) && !summary?.contains(dag),
+        progress: follows(dag, progress), last } };
   }, labels);
 }
+const SUMMARY_LABELS = ["Model", "Summary", "Tool calls", "Recent files", "Origin"];
 
 try {
   const logFile = join(work, "server.log");
@@ -215,9 +276,11 @@ try {
 
   await check("S210-01", () => withPage({}, async (page) => {
     await openA(page); await detail(page).waitFor({ timeout: 10_000 });
-    const result = await order(page, ["Model", "Summary", "Command", "Tool calls", "Recent files", "Origin", "Job started"]);
+    const result = await order(page, SUMMARY_LABELS);
     for (const [key, present] of Object.entries(result.present)) assert.ok(present, `${key} is rendered`);
     for (const [key, ok] of Object.entries(result.order)) assert.ok(ok, `the detail block order holds at ${key}: ${JSON.stringify(result)}`);
+    const text = await dock(page).innerText();
+    assert.doesNotMatch(text, /\bCommand\b|E2E-command/, "the command row is gone");
   }));
 
   await check("S210-02", () => withPage({}, async (page) => {
@@ -239,6 +302,10 @@ try {
     }, SHORT);
     assert.ok(style, "the short title has its own element");
     assert.ok(style.whiteSpace === "nowrap" && /hidden/.test(style.overflow) && style.textOverflow === "ellipsis", `one-line ellipsis: ${JSON.stringify(style)}`);
+    // the hover is no longer the only way to the full goal.
+    const goal = dock(page).locator("[data-pf-detail-summary] [data-pf-summary-goal]").first();
+    assert.equal((await goal.innerText()).trim(), GOAL, "the summary shows the full goal");
+    assert.equal(await dock(page).locator("[data-pf-detail-summary] [data-pf-goal-toggle]").getAttribute("aria-expanded"), "false", "folded, with its expand control");
   }));
 
   await check("S210-03", () => withPage({}, async (page) => {
@@ -253,6 +320,7 @@ try {
     const fallback = await titleText(page);
     assert.ok(fallback.includes(B.slug) && fallback.includes("Needs input"), `the no-goal title row carries slug + status: ${fallback}`);
     assert.ok(!/undefined|null|E2E/i.test(fallback), `no invented title is rendered: ${fallback}`);
+    assert.equal(await dock(page).locator("[data-pf-summary-goal], [data-pf-goal-toggle]").count(), 0, "no goal line and no toggle without a goal");
   }));
 
   await check("S210-04", () => withPage({}, async (page) => {
@@ -268,9 +336,8 @@ try {
     await openA(page); await timing(page, "step-code").waitFor({ timeout: 10_000 });
     const first = (await timing(page, "step-code").innerText()).trim();
     assert.match(first, /^\+\d+[smh]/, `the in-progress step shows a live age: ${first}`);
-    await tick(page, 3000); await delay(200);
-    const second = (await timing(page, "step-code").innerText()).trim();
-    assert.notEqual(second, first, "the live age grows with the watch poll");
+    await tick(page, 3000);
+    await waitFor(async () => (await timing(page, "step-code").innerText()).trim() !== first, "the live age grows with the watch poll");
     for (const id of ["step-fail", "step-review"]) {
       const line = (await timing(page, id).innerText()).trim();
       assert.equal(line, "", `${id} keeps an empty timing line (${line})`);
@@ -285,14 +352,18 @@ try {
     const kinds = await progressBlock(page).locator("[data-pf-progress-kind]").evaluateAll((els) => els.map((el) => el.getAttribute("data-pf-progress-kind")));
     assert.ok(kinds.includes("narration") && kinds.includes("tool"), `both whitelisted kinds render: ${JSON.stringify(kinds)}`);
     assert.match(await progressBlock(page).innerText(), /bash: curl --token=\*\*\*/, "the tool line carries the masked command");
-    page.__progress.body = { available: true, entries: [entry(9, "E2E-STEP-REVIEW-NARRATION")] };
-    await tick(page, 2000); await delay(200);
-    await waitFor(async () => /E2E-STEP-REVIEW-NARRATION/.test(await progressBlock(page).innerText()), "the new step tail");
-    assert.doesNotMatch(await progressBlock(page).innerText(), /E2E-STEP-CODE-NARRATION/, "the previous step's tail is not spliced in");
+    assert.equal(await progressBlock(page).locator('[data-pf-progress-kind="event"]').getAttribute("data-pf-progress-tone"), "accent", "a lifecycle line carries its tone");
+    // (reverses #210's current-step-only tail by ruling): a later
+    // step's lines join the stream and the earlier step's lines stay.
+    page.__progress.body = snapshot([...CODE_LINES, eventLine(8, "00:00:20 ▶ step-review #1 · pi:e2e/model", "step_started", "accent"), entry(9, "E2E-STEP-REVIEW-NARRATION")]);
+    await tick(page, 2000);
+    await waitFor(async () => /E2E-STEP-REVIEW-NARRATION/.test(await progressBlock(page).innerText()), "the later step's lines join");
+    const text = await progressBlock(page).innerText();
+    assert.ok(text.indexOf("E2E-STEP-CODE-NARRATION") >= 0 && text.indexOf("E2E-STEP-CODE-NARRATION") < text.indexOf("E2E-STEP-REVIEW-NARRATION"), `the earlier step's lines stay, in order: ${text}`);
   }));
 
   await check("S210-07", () => withPage({}, async (page) => {
-    page.__progress.body = { available: false, entries: [] };
+    page.__progress.body = { available: false, lines: [], omitted: 0 };
     await openA(page); await progressBlock(page).waitFor({ timeout: 10_000 });
     await waitFor(async () => /unavailable|no progress|empty|不可用|无进度/i.test(await progressBlock(page).innerText()), "the localized unavailable state");
     assert.doesNotMatch(await progressBlock(page).innerText(), /E2E-STEP|bash:/, "no fabricated line is shown");
@@ -302,20 +373,31 @@ try {
     const response = await fetch(`${base}${ROUTE}?wi=${routeWi(1)}`, { signal: AbortSignal.timeout(30_000) });
     assert.equal(response.status, 200, "a valid wi answers 200");
     const text = await response.text(); const body = JSON.parse(text);
-    assert.equal(body.available, true, "the tail is available");
-    assert.ok(Array.isArray(body.entries) && body.entries.length > 0, "the tail carries entries");
-    assert.ok(body.entries.some((e) => e.kind === "narration" && e.text.includes("E2E-ROUTE-NARRATION token=***")), `narration is shown masked: ${text}`);
-    assert.ok(body.entries.some((e) => e.kind === "tool" && /bash: curl --token=\*\*\*/.test(e.text)), `one tool line is shown masked: ${text}`);
+    assert.deepEqual(Object.keys(body).sort(), ["available", "lines", "omitted"], `the whole-job wire shape: ${text}`);
+    assert.equal(body.available, true, "the stream is available");
+    assert.equal(body.omitted, 0, "nothing omitted under the bound");
+    assert.ok(body.lines.some((e) => e.kind === "narration" && e.text.includes("E2E-ROUTE-NARRATION token=***")), `narration is shown masked: ${text}`);
+    assert.ok(body.lines.some((e) => e.kind === "tool" && /bash: curl --token=\*\*\*/.test(e.text)), `one tool line is shown masked: ${text}`);
+    const narration = (needle) => body.lines.findIndex((e) => e.text.includes(needle));
+    assert.ok(narration("E2E-ROUTE-NARRATION") >= 0 && narration("E2E-ROUTE-REVIEW-NARRATION") > narration("E2E-ROUTE-NARRATION"), `every spawn's lines, in order: ${text}`);
+    const events = body.lines.filter((e) => e.kind === "event");
+    assert.deepEqual(events.map((e) => [e.event, e.tone]), [["step_started", "accent"], ["step_done", "dim"], ["step_started", "accent"]], `the lifecycle lines carry tone and raw kind: ${text}`);
+    assert.match(events[0].text, /^\d{2}:\d{2}:\d{2} ▶ code #1 · pi:e2e\/model$/);
+    assert.match(events[1].text, /^\d{2}:\d{2}:\d{2} ■ code \+20s$/);
+    for (const line of body.lines) {
+      if (line.kind !== "event") assert.ok(!("tone" in line) && !("event" in line), `tone/event ride event lines only: ${JSON.stringify(line)}`);
+    }
     for (const secret of ["SECRET-TOOL-RESULT", "SECRET-THINKING", "SECRET-PROMPT", "SECRET-TOKEN"]) assert.ok(!text.includes(secret), `the response leaks ${secret}`);
     for (const kind of ["toolResult", "thinking", "user", "system"]) assert.ok(!text.includes(kind), `the response carries no ${kind} record`);
+    assert.ok(!text.includes(work), "no path leaves the read face");
   });
 
   await check("S210-09", () => withPage({ clock: true, storage: { [POLL_KEY]: "1" } }, async (page) => {
     await openA(page); await progressBlock(page).waitFor({ timeout: 10_000 });
     await waitFor(() => progressRequests(page).length >= 1, "the immediate read");
-    await tick(page, 1900); await delay(200);
+    await tick(page, 1900); await settle(page);
     assert.equal(progressRequests(page).length, 1, "no request before the fixed 2 s window elapses");
-    await tick(page, 300); await delay(300);
+    await tick(page, 300);
     await waitFor(() => progressRequests(page).length >= 2, "the first 2 s tick");
     const beforeHide = progressRequests(page).length;
     await page.evaluate(() => {
@@ -323,7 +405,7 @@ try {
       Object.defineProperty(document, "hidden", { configurable: true, get: () => true });
       document.dispatchEvent(new Event("visibilitychange"));
     });
-    await tick(page, 6000); await delay(200);
+    await tick(page, 6000); await settle(page);
     assert.equal(progressRequests(page).length, beforeHide, "a hidden page issues no progress request");
     await page.evaluate(() => {
       Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "visible" });
@@ -335,20 +417,24 @@ try {
     await card(page, B.wi).click();
     await waitFor(() => progressRequests(page).length > beforeHide + 1, "a non-running selection reads once", 5_000);
     const once = progressRequests(page).length;
-    await tick(page, 6000); await delay(200);
+    await tick(page, 6000); await settle(page);
     assert.equal(progressRequests(page).length, once, "a non-running selection is never polled");
   }));
 
   await check("S210-10", async () => {
+    // (reverses #210's newest-50 cap by ruling): under the
+    // 2000-line bound every line of the job is served and rendered.
     const response = await fetch(`${base}${ROUTE}?wi=${routeWi(5)}`, { signal: AbortSignal.timeout(30_000) });
     const body = await response.json();
-    assert.equal(response.status, 200); assert.equal(body.entries.length, 50, "the read face keeps the newest 50 entries");
-    assert.ok(body.entries.some((e) => e.text === "E2E-MANY-60"), "the newest entry is present");
-    assert.ok(!body.entries.some((e) => e.text === "E2E-MANY-10"), "the oldest entries are evicted");
+    assert.equal(response.status, 200); assert.equal(body.lines.length, 60, "the read face serves every line under the bound");
+    assert.equal(body.omitted, 0, "and omits nothing");
+    assert.equal(body.lines[0].text, "E2E-MANY-01", "the oldest line is kept");
+    assert.equal(body.lines.at(-1).text, "E2E-MANY-60", "the newest line is last");
     await withPage({}, async (page) => {
-      page.__progress.body = { available: true, entries: Array.from({ length: 50 }, (_, i) => entry(i, `E2E-LINE-${String(i + 1).padStart(2, "0")}`)) };
+      page.__progress.body = snapshot(Array.from({ length: 60 }, (_, i) => entry(i, `E2E-LINE-${String(i + 1).padStart(2, "0")}`)));
       await openA(page); await progressBlock(page).waitFor({ timeout: 10_000 });
-      await waitFor(async () => (await progressBlock(page).locator("[data-pf-progress-kind]").count()) === 50, "all 50 entries render");
+      await waitFor(async () => (await progressBlock(page).locator("[data-pf-progress-kind]").count()) === 60, "all 60 lines render");
+      assert.equal(await progressBlock(page).locator("[data-pf-progress-omitted]").count(), 0, "no omitted marker under the bound");
       const first = progressBlock(page).locator("[data-pf-progress-kind]").first();
       assert.equal(await first.getAttribute("title"), "E2E-LINE-01", "each line carries its full text on hover");
       const nested = await progressBlock(page).evaluate((scope) => [scope, ...scope.querySelectorAll("*")].some((el) => /(auto|scroll)/.test(getComputedStyle(el).overflowY)));
@@ -360,11 +446,15 @@ try {
     await openA(page); await progressBlock(page).waitFor({ timeout: 10_000 });
     await waitFor(async () => /E2E-STEP-CODE-NARRATION/.test(await progressBlock(page).innerText()), "the first good tail");
     page.__progress.status = 500;
-    await tick(page, 2000); await delay(300);
-    assert.match(await progressBlock(page).innerText(), /E2E-STEP-CODE-NARRATION/, "a failed read keeps the previous tail");
-    page.__progress.status = 200; page.__progress.body = { available: false, entries: [] };
-    await tick(page, 2000); await delay(300);
-    assert.match(await progressBlock(page).innerText(), /E2E-STEP-CODE-NARRATION/, "a degraded read keeps the previous tail too");
+    const before = page.__progress.hits.length;
+    await tick(page, 2000);
+    await waitFor(() => page.__progress.hits.length > before, "the failed read is issued"); await settle(page);
+    assert.match(await progressBlock(page).innerText(), /E2E-STEP-CODE-NARRATION/, "a failed read keeps the previous snapshot");
+    page.__progress.status = 200; page.__progress.body = { available: false, lines: [], omitted: 0 };
+    const degraded = page.__progress.hits.length;
+    await tick(page, 2000);
+    await waitFor(() => page.__progress.hits.length > degraded, "the degraded read is issued"); await settle(page);
+    assert.match(await progressBlock(page).innerText(), /E2E-STEP-CODE-NARRATION/, "a degraded read keeps the previous snapshot too");
     assert.doesNotMatch(await progressBlock(page).innerText(), /error|failed/i, "no extra error readout is rendered");
   }));
 
@@ -377,11 +467,21 @@ try {
     }
     const outside = await get(`${ROUTE}?wi=${routeWi(2)}`);
     assert.equal(outside.status, 200, "a transcript outside the capsule/data root degrades with 200");
-    assert.equal(JSON.parse(outside.text).available, false, "the outside path is not read");
+    assert.deepEqual(JSON.parse(outside.text).lines, [], "the outside path is not read (it adds no line)");
     assert.ok(!outside.text.includes("root:"), "the outside file's content never leaves");
     const partial = await get(`${ROUTE}?wi=${routeWi(4)}`);
     assert.equal(partial.status, 200, "a partially written transcript answers 200, never 5xx");
-    assert.ok(Array.isArray(JSON.parse(partial.text).entries), "the degraded body still carries an entries array");
+    assert.deepEqual(JSON.parse(partial.text).lines, [], "a partially written line is not read");
+    // (N6): a missing job index degrades instead of refusing.
+    renameSync(runtimeState, `${runtimeState}.bak`);
+    try {
+      const missing = await get(`${ROUTE}?wi=${routeWi(1)}`);
+      assert.equal(missing.status, 200, "a missing job index answers 200");
+      assert.deepEqual(JSON.parse(missing.text), { available: false, lines: [], omitted: 0 }, "a missing job index is available:false");
+      assert.equal((await get(`${ROUTE}?wi=../../etc/passwd`)).status, 400, "a malformed id stays 400 without an index");
+    } finally {
+      renameSync(`${runtimeState}.bak`, runtimeState);
+    }
     const gated = await get(`${ROUTE}?wi=${routeWi(1)}`, { headers: { "sec-fetch-site": "cross-site" } });
     assert.equal(gated.status, 403, "the new route sits behind the existing /api gate");
     const post = await get(`${ROUTE}?wi=${routeWi(1)}`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
@@ -391,31 +491,56 @@ try {
   await check("S210-13", async () => {
     await withPage({}, async (page) => {
       await openA(page); await detail(page).waitFor({ timeout: 10_000 });
-      const result = await order(page, ["Model", "Summary", "Command", "Tool calls", "Recent files", "Origin", "Job started"]);
-      for (const [key, ok] of Object.entries(result.order)) assert.ok(ok, `existing block order holds at ${key}: ${JSON.stringify(result)}`);
+      await progressBlock(page).waitFor({ timeout: 10_000 });
+      const result = await order(page, SUMMARY_LABELS);
+      for (const [key, ok] of Object.entries(result.order)) assert.ok(ok, `the three-block order holds at ${key}: ${JSON.stringify(result)}`);
+      // (reverses pi#112's toggle by ruling): no mode control, no
+      // collapsed sync row, no step-timing block in the summary.
+      assert.equal(await dock(page).getByRole("button", { name: /^(simple|verbose)$/i }).count(), 0, "the event-mode toggle is gone");
+      assert.equal(await dock(page).getByText("Step timing", { exact: true }).count(), 0, "the step-timing block has left for the DAG");
+      assert.doesNotMatch(await dock(page).innerText(), /sync ×/, "no collapsed sync row");
     });
-    const button = await withPage({}, async (page) => {
-      await openA(page); await detail(page).waitFor({ timeout: 10_000 });
-      const toggle = await dock(page).getByRole("button", { name: /simple|verbose/i }).count();
-      const timingLabel = await dock(page).getByText("Step timing", { exact: true }).count();
-      return { toggle, timingLabel };
-    });
-    assert.equal(button.toggle, 1, "the event-mode toggle remains");
-    assert.equal(button.timingLabel, 0, "the step-timing block has left the detail rows for the DAG");
   });
 
   await check("S210-14", async () => {
-    const docs = await import("node:fs/promises").then((fs) => fs.readFile(join(root, "docs/agents/polyforge-panel.md"), "utf8"));
-    assert.match(docs, /polyforge\/progress|progress area|Execution progress/i, "the panel note documents the progress face");
-    assert.match(docs, /2 s|2s|whitelist|progress/i, "the panel note covers the progress whitelist and cadence");
-    const map = await import("node:fs/promises").then((fs) => fs.readFile(join(root, "AGENTS.md"), "utf8"));
-    assert.match(map, /polyforge\/progress/, "the file map names the new route");
-    const locales = await Promise.all(["en", "zh-CN", "zh-TW"].map((name) => import("node:fs/promises").then((fs) => fs.readFile(join(root, `lib/i18n/messages/${name}.ts`), "utf8"))));
-    for (const source of locales) {
-      assert.ok(!source.includes("polyforge.stepTiming"), "the dead step-timing key leaves every locale");
-      assert.match(source, /progress/i, "each locale carries the progress-area vocabulary");
+    // N7: exact strings, not vacuous alternations.
+    const read = (path) => import("node:fs/promises").then((fs) => fs.readFile(join(root, path), "utf8"));
+    const docs = await read("docs/agents/polyforge-panel.md");
+    for (const needle of ["`GET /api/polyforge/progress?wi=<wi_id>` (; whole-job since", "`PROGRESS_POLL_MS` = 2000", "`PROGRESS_MAX_LINES` = 2000", "`PROGRESS_TOOL_MAX` = 200", "**Order ("]) {
+      assert.ok(docs.includes(needle), `the panel note documents ${needle}`);
+    }
+    const map = await read("AGENTS.md");
+    assert.ok(map.includes("  polyforge/progress/route.ts     GET ?wi=wi_… the job detail's execution progress: the whole job's stream"), "the file map names the progress route and its whole-job face");
+    const expected = {
+      en: ['"polyforge.progress.title": "Execution progress"', '"polyforge.progress.empty": "No progress yet"', '"polyforge.progress.unavailable": "Progress unavailable"'],
+      "zh-CN": ['"polyforge.progress.title": "执行进度"', '"polyforge.progress.empty": "暂无进度"', '"polyforge.progress.unavailable": "进度不可用"'],
+      "zh-TW": ['"polyforge.progress.title": "執行進度"', '"polyforge.progress.empty": "暫無進度"', '"polyforge.progress.unavailable": "進度不可用"'],
+    };
+    for (const [name, needles] of Object.entries(expected)) {
+      const source = await read(`lib/i18n/messages/${name}.ts`);
+      assert.ok(!source.includes("polyforge.stepTiming"), `the dead step-timing key leaves ${name}`);
+      for (const needle of needles) assert.ok(source.includes(needle), `${name} carries ${needle}`);
+      assert.match(source, /"polyforge\.progress\.omitted": "[^"]*\{count\}[^"]*"/, `${name} carries the omitted marker with its count`);
     }
   });
+
+  await check("S210-15", () => withPage({ clock: true }, async (page) => {
+    // the review finding: the open detail of a job that finishes keeps
+    // its last progress after the daemon drops the job from both lists.
+    const finished = [...CODE_LINES, eventLine(9, "00:00:30 ■ terminal · done", "terminal", "green")];
+    page.__progress.body = snapshot(finished);
+    await openA(page); await progressBlock(page).waitFor({ timeout: 10_000 });
+    await waitFor(async () => /terminal · done/.test(await progressBlock(page).innerText()), "the finished job's last lines render");
+    page.__dropA = true;
+    // Both lists answer without A at least twice (the dock's 3 s cadence), and
+    // the progress read the status change triggers has settled.
+    await waitFor(async () => { if (page.__droppedReads < 4) await tick(page, 3000); return page.__droppedReads >= 4; }, "both lists answer without the finished job");
+    await settle(page);
+    const text = await progressBlock(page).innerText();
+    for (const needle of ["E2E-STEP-CODE-NARRATION", "bash: curl --token=***", "terminal · done"]) assert.ok(text.includes(needle), `the last stream stays visible (${needle}): ${text}`);
+    assert.doesNotMatch(text, /Progress unavailable|Loading/, "the stream is not replaced by a state line");
+    assert.equal(await detail(page).count(), 1, "the detail stays open");
+  }));
 } catch (error) {
   failures.push("suite");
   console.log(`FAIL suite: ${String(error?.message ?? error).split("\n")[0]}`);

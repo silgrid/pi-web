@@ -1,3 +1,5 @@
+// carries: components/ChatWindow*, components/ChatInput*, components/MessageView*, hooks/useAgentSession*, lib/agent-*, lib/stream-client*, lib/session-*, app/api/agent/*, app/api/sessions/*
+// carries: lib/manual-fetch*, lib/i18n/*
 // the session page's manual "fetch latest" affordance.
 //
 // Authored pre-code from artifacts/spec.md (its acceptance criteria and
@@ -29,8 +31,6 @@ mkdirSync(artifacts, { recursive: true });
 const distDir = process.env.PI_WEB_DIST_DIR || ".next/e2e/manual-fetch";
 rmSync(join(root, distDir, "dev/lock"), { force: true });
 
-const agentsPath = join(root, "AGENTS.md");
-const agentsBefore = existsSync(agentsPath) ? readFileSync(agentsPath, "utf8") : null;
 const nextEnvPath = join(root, "next-env.d.ts");
 const nextEnvBefore = existsSync(nextEnvPath) ? readFileSync(nextEnvPath, "utf8") : null;
 
@@ -1090,11 +1090,6 @@ try {
   if (proxy) await new Promise((resolve) => proxy.close(resolve)).catch(() => {});
   model.close();
   rmSync(agentDir, { recursive: true, force: true });
-  if (agentsBefore !== null) {
-    try {
-      if (readFileSync(agentsPath, "utf8") !== agentsBefore) writeFileSync(agentsPath, agentsBefore);
-    } catch { /* AGENTS.md unavailable after the run */ }
-  }
   if (nextEnvBefore !== null) {
     try {
       if (readFileSync(nextEnvPath, "utf8") !== nextEnvBefore) writeFileSync(nextEnvPath, nextEnvBefore);

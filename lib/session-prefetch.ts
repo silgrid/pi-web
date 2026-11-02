@@ -32,6 +32,7 @@ export function prefetchSessionView(sessionId: string): Promise<boolean> {
           entryIds?: string[];
           oldestEntryId?: string | null;
           hasMore?: boolean;
+          turnsBefore?: number;
           thinkingLevel?: string;
           model?: { provider: string; modelId: string } | null;
         };
@@ -47,6 +48,8 @@ export function prefetchSessionView(sessionId: string): Promise<boolean> {
         leafId: data.leafId ?? null,
         oldestEntryId: data.context.oldestEntryId ?? null,
         hasMore: data.context.hasMore ?? false,
+        // the unloaded-turn offset travels with its cursor.
+        turnsBefore: data.context.turnsBefore ?? 0,
         summaryTree: data.tree,
         thinkingLevel: data.context.thinkingLevel ?? "",
         model: data.context.model ?? null,

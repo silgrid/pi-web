@@ -1,3 +1,5 @@
+// carries: components/Polyforge*, components/polyforge-*, hooks/usePolyforge*, lib/polyforge*, app/api/polyforge/*
+// carries: components/AppShell*, lib/i18n/*
 // — Polyforge Messages contacts grouped by project + project
 // membership management (authored BEFORE `code`, against artifacts/spec.md).
 //
@@ -540,13 +542,24 @@ try {
     await requireVisible(historyRegion(panel), "the existing conversation history");
     await panel.getByText("AVA-HELLO", { exact: false }).first().waitFor({ timeout: 10_000 }).catch(() => {});
     assert.ok(await panel.getByText("AVA-HELLO", { exact: false }).count() > 0, "clicking the group row must open Ava's existing conversation");
+    // Ava's displayed unread page is auto-acked by its own
+    // spawn, which lands late under load; count acks only once it has, so the
+    // contact click below is measured alone (bounded condition wait).
+    const avaAcked = () => calls().some((a) => a[0] === "msg" && a[1] === "ack" && a[2] === AVA_CONV.id);
+    for (const deadline = Date.now() + 20_000; !avaAcked() && Date.now() < deadline;) await delay(150);
+    assert.ok(avaAcked(), "opening Ava's unread conversation must auto-ack it before the contact click is measured");
     const before = readState().conversations.length;
-    const acksBefore = calls().filter((a) => a[0] === "msg" && a[1] === "ack").length;
+    const ackCalls = () => calls().filter((a) => a[0] === "msg" && a[1] === "ack");
+    // Opening Ava's conversation legitimately auto-acks it. Under the parallel
+    // bar that ack can finish after this point, so wait for it to settle
+    // (bounded) and then judge only acks that do not belong to the opened
+    // conversation: Ben's click must add none.
+    for (let i = 0; i < 100 && !ackCalls().some((call) => call[2] === AVA_CONV.id); i++) await delay(100);
     await (await requireVisible(panel.getByText(BEN.display_name, { exact: true }), "Ben's group row")).click();
     for (let i = 0; i < 40 && await leafBoxes(panel, BEN.display_name).then((boxes) => boxes.length) < 2; i++) await delay(150);
     assert.ok((await leafBoxes(panel, BEN.display_name)).length >= 2, "clicking a contact without a conversation must open the empty pane with its header");
     assert.equal(readState().conversations.length, before, "a click must create no conversation");
-    assert.equal(calls().filter((a) => a[0] === "msg" && a[1] === "ack").length, acksBefore, "a contact click must ack nothing");
+    assert.deepEqual(ackCalls().filter((call) => call[2] !== AVA_CONV.id), [], "a contact click must ack nothing");
   }));
 
   // S8: management is enabled only when the users read succeeds; a refused

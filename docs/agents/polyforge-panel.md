@@ -2,7 +2,7 @@
 
 A read-only Polyforge panel in the shared dock slot (the bg-tasks slot): a topbar
 button + right dock (desktop) / bottom sheet (mobile), a job card stream, and a selected
-work item's steps and event tail. On a narrow phone (≤480px) the topbar button is
+work item's summary, step graph and execution progress. On a narrow phone (≤480px) the topbar button is
 resident, immediately right of the toolbar's ⋯ (More) button and left of the
 session-stats strip; the More overlay holds the other chat actions but never
 the Polyforge button. Files: `lib/polyforge-status.ts`, `lib/polyforge-messages.ts`,
@@ -53,19 +53,31 @@ probe; the section UI itself is in [settings-ui.md](settings-ui.md).
   daemon files, unknown/malformed wi ids and malformed cursors degrade per card
   (fields absent, `available:false`), never 5xx; GET only (other methods 405),
   `isApiRequestAllowed` re-checked in-route (403 is the only non-2xx).
-- `GET /api/polyforge/progress?wi=<wi_id>` → 200 `{available,
-  entries:[{id, kind:"narration"|"tool", text}]}` — the selected job's
-  execution progress: the current step's newest transcript tail (newest 50
-  entries within 32 KiB of entry JSON), read from the daemon's own files with
-  no pf spawn; see [Job detail layout and execution progress](#job-detail-layout-and-execution-progress).
+- `GET /api/polyforge/progress?wi=<wi_id>` (; whole-job since
+) → 200 `{available, lines:[{id, kind:"narration"|"tool"|"event",
+  text, tone?, event?}], omitted}` — the selected job's execution progress:
+  every spawn of every step (reruns included) as one time-ordered stream of
+  narration, one masked tool line per call and one composed line per retained
+  lifecycle event, the newest 2000 lines with `omitted` the exact count of
+  earlier ones, read from the daemon's own files with no pf spawn, for a
+  running job and for a finished one only while the daemon's job index still
+  holds it — the daemon drops a terminated job moments after its terminal
+  event, and from then on the route answers 400 `unknown work item` (the drop
+  paragraph of the section linked below); `tone` and `event` (the raw daemon
+  kind) ride `event` lines only, `tone` absent = neutral; see
+  [Job detail layout and execution progress](#job-detail-layout-and-execution-progress).
   A `wi` that is not the daemon's `wi_…` id shape answers 400 before any file
-  read; a shape-valid `wi` with no job in the daemon's `runtime-state.json`
-  answers 400 `{error:"unknown work item"}` before any transcript read. A
-  missing, outside-root, unreadable or partially written transcript (or a job
-  record without a capsule) answers 200 `{available:false, entries:[]}` —
-  never 5xx, no response names a path. GET only (other methods 405),
-  `isApiRequestAllowed` re-checked in-route (403); the two 400s and the 403
-  are the only non-2xx answers.
+  read. A missing, unreadable or non-JSON `runtime-state.json` answers 200
+  `{available:false, lines:[], omitted:0}` (the #210 ledger's
+  N6); a readable index with no such job answers 400 `{error:"unknown work
+  item"}` before any capsule read. A job record without a capsule, a capsule
+  with neither a readable spawn journal nor a readable event log, a job whose
+  transcripts exceed the 128 MiB safety bound, or any error answers 200
+  `{available:false, lines:[], omitted:0}`; an outside-root, missing or
+  partially written transcript only contributes no line — never 5xx, no
+  response names a path. GET only (other methods 405), `isApiRequestAllowed`
+  re-checked in-route (403); the two 400s and the 403 are the only non-2xx
+  answers.
 - `GET /api/polyforge/config?cwd=…` → 200
   `{pfPresent, pfVersion, capable, reason?, file?:{sha256,exists},
   items:[{key,value?,set?,source?,class,schema?,daemon?,stale_reason?}],
@@ -683,9 +695,8 @@ card counts as selected for either its slug or its wi id.
   the one-row horizontal scroll at 460/375/340). The
   model, `#spawnN`, step age and idle age left the card: the
   model (24 chars + `…`, full on hover), `#spawnN` and the two ages show in
-  the job detail (a facts row below the detail's title row, DAG and
-  execution progress — — from the status snapshot, so it shows
-  even while the watch read loads). An unreadable work item renders the slug alone.
+  the job detail (the facts of its summary block,, from the
+  status snapshot, so they show even while the watch read loads). An unreadable work item renders the slug alone.
 - **Needs-input marker:** a `needs_input` job shows its status
   label (`polyforge.jobStatus.needs_input`: 等待输入 / Needs input / 等待輸入)
   emphasized (`data-pf-needs-input`, amber `#d97706`, bold, framed) in place
@@ -784,10 +795,11 @@ source, not in the client). Text is whitespace-collapsed, masked by the shared
 `maskPolyforgeCredentials` (the `progress.command` rules — narration can
 itself name a credential) and capped at 400 code points. A first-load window
 with no record of the harness's format reads as `available:false`.
-The job detail's execution progress is a separate, wider read
-face over the same transcript resolution (`readProgressTail`,
-`GET /api/polyforge/progress`): narration plus one masked tool-call line. The
-card stream never uses it; its whitelist above is unchanged.
+The job detail's execution progress (whole-job since
+) is a separate, wider read face (`readProgressSnapshot`,
+`GET /api/polyforge/progress`): every spawn's transcript as narration plus one
+masked tool-call line, with the composed lifecycle lines. The card stream
+never uses it; its whitelist above is unchanged.
 
 **Cursor and bounds.** A cursor is `c1.<16 hex identity>.<byte offset>`; the
 identity hashes the resolved path, device, inode, harness and step, so a new
@@ -1312,6 +1324,23 @@ execution order: started steps by `started_at` ascending, unstarted last,
 ties by name; started steps carry their `startedAt` (pi#117) for the
 client-side timing display, unstarted steps carry none.
 
+**Progress lifecycle lines.** The job detail's execution
+progress reads the WI's event log itself (`GET /api/polyforge/progress`, not
+the watch route), and an event leaves the server only as the one line
+`composeProgressEventLine` composes — never its raw body. Per kind, only these
+body fields are read: `step_started` → `step` + `spawn_n` + `model`;
+`step_done` → `step` (+ the duration paired from the log);
+`step_failed`/`step_dead` → `step` + `cause`; `needs_input`/`answered`/
+`gate_verdict` → `step`; `rewind` → `gate` + `target`; `terminal` →
+`status`; `job_stopped` → nothing; `needs_recovery` → `reason` + `detail`;
+`push_failed` → `error` (the two fault causes are shown by owner ruling
+at review, masked by `maskPolyforgeCredentials`). A `needs_input`
+question, `answered_by`, `files`, `archived`, `evidence`, every other field
+and every dropped kind (`published`, `transcript_missing`, `exec_init`,
+`job_started`, `candidate_switched`, `envelope_rejected`, `authored_tests_rebaselined`
+and any unknown kind) never reach a response. The watch route's sanitizer
+above is unchanged.
+
 **Summarize lane (pi#119).** The four flat wire fields leave only through
 their own whitelist: `summary` (a trimmed non-empty string, verbatim — the
 lane's own bound is 200 chars, no server-side cap), `summary_age_sec` (a
@@ -1404,28 +1433,24 @@ chip row (`buildStepGraph` in `components/PolyforgePanel.tsx`, pure):
   endpoint are not drawn, and no dashed element exists in the panel
   otherwise.
 - **Step status display** — the graph nodes are the only step status
-  display in every event mode (simple, verbose, invalid): the status dot
+  display: the status dot
   (colour, the skipped hollow ring), plus the full name and the translated
   label in each node's `title`/`aria-label` (no visible label). The job card shows
   no step information: this graph is where the DAG lives. The pre-graph per-step name+status chip row was
   removed in pi#116; the dashed rewind chips under the node row are
-  unaffected. The mode toggle behavior is unchanged and stays
-  client-side.
+  unaffected. (The pi#112 event-mode toggle is gone since; the
+  graph is one graph in every state.)
 
-## Detail rows (pi#117)
+## Detail rows (pi#117; inside the summary since)
 
-The selected detail renders the sanitized `progress` and chat-origin data
-as display-only rows between the summary block and the event tail (the
+The selected detail's summary block (below) carries the sanitized `progress`
+and chat-origin data as display-only rows after the summarize narration (the
 per-step timing rows moved under the DAG nodes in — see Step
 flow graph's timing line; the `polyforge.stepTiming` label left all three
-locales). The whole block is absent when the snapshot carries none of it
-(absent → no row, no placeholder); nothing in it is clickable and no row
-issues a request.
+locales). The rows are absent when the snapshot carries none of it (absent →
+no row, no placeholder); nothing in them is clickable and no row issues a
+request.
 
-- **Command** — `progress.command` (already masked + truncated
-  server-side) in mono, with its age from `command_age_sec` beside the
-  label (`Command · 2h 2m`); the full value rides the row's `title`.
-  Shown only when `command` is present.
 - **Tool calls** — the `tool_calls` count, when present (0 renders).
 - **Recent files** — one ellipsized mono row per `recent_files` entry, the
   full path on `title`; anything that is not an array of strings degrades
@@ -1434,47 +1459,69 @@ issues a request.
   (24-char cut, full value on `title`) and `owner` as plain text; the
   whole row is absent otherwise (the wire only carries chat origins).
 
-## Summary block (pi#119)
+The **command row** (`progress.command` + its age) is gone (
+owner ruling): the execution progress shows every tool call as its own line.
+The watch wire still carries `command`/`command_age_sec` (sanitized and
+redacted, below); the panel renders neither, and `polyforge.command` left all
+three locales.
 
-The selected detail renders the summarize lane's narration as one
-display-only block between the step flow graph and the pi#117 detail
-rows: the summary line (verbatim, wrapping — no ellipsis), its age from
-`summary_age_sec` formatted like `command_age_sec` (`Summary · 2h 2m`),
+## Summary narration (pi#119; inside the summary since)
+
+The summary block carries the summarize lane's narration, display-only,
+after the job facts and before the pi#117 rows: the summary line (verbatim,
+wrapping — no ellipsis), its age from `summary_age_sec` (`Summary · 2h 2m`),
 an amber cap-reached marker when `summary_capped` is true, and
 `summary_error` on its own error-styled (red, mono) line — the error may
-show together with an older summary. The whole block is absent when all
-four fields are absent: no heading, placeholder or loading text, and
-nothing in it is clickable or issues a request. The 3 s watch poll
-refreshes the age (as it does `command_age_sec`); no client-side
-ticking between polls. The job-list rows show none of it.
+show together with an older summary. All four fields absent: no heading,
+placeholder or loading text, and nothing in it is clickable or issues a
+request. The 3 s watch poll refreshes the age; no client-side ticking
+between polls. The job-list rows show none of it.
 
 ## Detail scroll region (pi#120)
 
-With a job selected, the whole detail — the title row (back
-button, slug, short title, status), the step flow graph with its timing
-lines, the execution progress, the facts row, the summary block, the detail
-rows, the event-mode toggle and the event tail — is ONE vertical scroll
-region: the container under the job list (`flex: 1; min-height: 0;
-overflow-y: auto`). No nested vertical scroller exists inside the detail
-(the event tail is a plain block since pi#120; the execution progress lists
-its entries inline,), so every event-tail row is
-reachable by scrolling that one region at any sheet height and in the
-desktop dock — the old layout stacked the blocks as non-shrinking children
-of an `overflow: hidden` column and clipped everything below the fold once
-the fixed blocks plus the job list exceeded the available height (the tail
-collapsed to zero). The panel's top header (title / refresh / close) stays
-outside the region and visible. Horizontal behavior is unchanged: the graph
-still wraps with no horizontal scroll. The same component renders the
-mobile sheet and the desktop dock, so both get the fix.
+With a job selected, the whole detail — ① the summary block, ② the step flow
+graph with its timing lines, ③ the execution progress is ONE
+vertical scroll region, `[data-pf-detail-scroll]`: the container under the
+job list (`flex: 1; min-height: 0; overflow-y: auto`). No nested vertical
+scroller exists inside the detail (the execution progress lists its lines
+inline, no virtualisation), so every line is reachable by scrolling that one
+region at any sheet height and in the desktop dock, and a long progress never
+displaces the summary or the DAG above it — the pre-pi#120 layout stacked the
+blocks as non-shrinking children of an `overflow: hidden` column and clipped
+everything below the fold. The panel's top header (title / refresh / close)
+stays outside the region and visible. Horizontal behavior is unchanged: the
+graph still wraps with no horizontal scroll. The same component renders the
+mobile sheet and the desktop dock, so both get it.
+
+**Open at the top, follow only when pinned.** Selecting a job
+(or another job) sets the region's `scrollTop` to 0, so the detail opens at
+the top of the summary — never scrolled past the summary and DAG to the
+progress. The progress block keeps a `pinned` flag from a passive `scroll`
+listener on the region (`isProgressPinnedToBottom` in
+`lib/polyforge-cards-pure.ts`: within `PROGRESS_PIN_THRESHOLD_PX` = 8 px of
+the bottom, or content no taller than the viewport; unreadable numbers never
+pin). After a new snapshot renders, the region scrolls to its bottom only
+when the reader was pinned; a reader parked anywhere else is not moved. A
+reader starts unpinned, and another job starts unpinned again. There is no
+jump-to-latest control.
 
 ## Job detail layout and execution progress
 
-**Order.** With a job selected the detail reads, top to bottom: the title
-row → the step flow graph with a timing line under each node → the execution
-progress → every block that existed before, in its original relative order
-(the facts row, the summary block, the detail rows, the event-mode toggle,
-the event tail). Nothing was removed: the step-timing rows moved into the
-DAG and the old header merged into the title row.
+**Order (owner-intentional reversal of's order).**
+With a job selected the detail reads, top to bottom, three blocks and no
+fourth: ① the summary (`[data-pf-detail-summary]`: the title row, the goal,
+the job facts, the summarize narration, then tool calls / recent files /
+origin) → ② the step flow graph with a timing line under each node
+(`[data-pf-detail-graph]`, moved verbatim — semantics unchanged)
+→ ③ the execution progress, last (`[data-pf-progress]`). Removed by ruling:
+the command row, the pi#112 simple/verbose event-mode toggle with its stored
+`pi-web:polyforge-event-mode` preference (never read or written any more),
+the standalone event tail with its collapsed `sync ×N` row — lifecycle events
+are lines of the execution progress now — and the retired locale keys
+`polyforge.eventMode.simple`, `polyforge.eventMode.verbose`,
+`polyforge.eventSync`, `polyforge.command`, `polyforge.emptyEvents` and every
+`polyforge.eventKind.*` except `polyforge.eventKind.rewind` (the DAG's rewind
+chip label).
 
 **Title row** (`[data-pf-detail-title]`). One line: the deselect control,
 the slug (the watch read's, else the selected job's, else the selection
@@ -1486,6 +1533,23 @@ update time (`polyforge.updatedAt`) and the current step
 (`polyforge.currentStep`) — one per line. Without a readable goal the row
 shows deselect + slug + status only, never an invented title.
 
+**Goal.** Under the title row, the full goal (`[data-pf-summary-goal]`, the
+whole text in the DOM and on `title`) folded to three lines
+(`-webkit-line-clamp: 3`), with a visible control
+(`[data-pf-goal-toggle]`, `aria-expanded`; `polyforge.goal.expand` 展开完整目标 /
+Show full goal / 展開完整目標, `polyforge.goal.collapse` 收起 / Show less /
+收合) that removes and restores the clamp. The control shows whenever a goal
+does (no measurement heuristic); the expanded state belongs to one selected
+job, so another job opens folded. No readable goal: no goal line.
+
+**Facts.** One wrapping row: the current step (`polyforge.currentStep`, the
+watch read's, else the card's `currentStep`), the model (24 chars + `…`, full
+on hover) with `#spawnN`, step age and idle age (the status snapshot, so they
+show while the watch read loads), the job start (`polyforge.jobStart`, the
+card's earliest `job_started` as `HH:MM:SS`) and the total elapsed time
+(`polyforge.elapsed`, `formatAge(now − start)` at render, refreshed by the
+3 s watch poll — no timer of its own). A missing piece renders nothing.
+
 **Short title.** `shortJobTitle(goal)` in `lib/polyforge-cards-pure.ts`, a
 pure client-side heuristic: strip a conventional-commit `type(scope)!:`
 prefix, cut at the first `——` / ` — ` / `：` / `:` / `。` / newline, trim; an
@@ -1494,16 +1558,34 @@ the card title-length preference — the one-line fit is CSS ellipsis.
 
 **Execution progress** (`[data-pf-progress]`, `PolyforgeDetailProgress`).
 A heading (`polyforge.progress.title`: 执行进度 / Execution progress / 執行進度),
-then the selected job's current-step tail from
-`GET /api/polyforge/progress?wi=` — every entry inline in the detail's one
-scroll region (no `overflowY`, no virtualisation), newest last, one nowrap,
-ellipsized line each (`[data-pf-progress-kind="narration"|"tool"]`, the
-full text on `title`; tool lines in mono, dim). States: `polyforge.loading`
-before the first answer, `polyforge.progress.empty` (暂无进度 / No progress
-yet / 暫無進度) for an available tail with no entry,
-`polyforge.progress.unavailable` (进度不可用 / Progress unavailable / 進度不可用)
-when the transcript is not readable or the selected job has no wi — never a
-fabricated line.
+then, when the 2000-line bound left earlier lines out, one dim marker line
+first (`[data-pf-progress-omitted]`, `polyforge.progress.omitted` with the
+exact `{count}`: 已省略更早的 {count} 行 / {count} earlier lines omitted /
+已省略更早的 {count} 行), then the selected job's whole stream from
+`GET /api/polyforge/progress?wi=` — every line inline in the detail's one
+scroll region (no `overflowY`, no virtualisation), oldest first, one nowrap,
+ellipsized line each (`[data-pf-progress-kind="narration"|"tool"|"event"]`).
+Narration is `var(--text)`; a tool line mono and dim; an event line mono, in
+its tone (`[data-pf-progress-tone]`: accent `var(--accent)`, dim
+`var(--text-dim)`, red #dc2626, amber #d97706, green #16a34a, `neutral`
+`var(--text-muted)`). The hover `title` is the full text, preceded on an
+event line by its raw daemon kind (pi#112's "raw kind one hover away"). States:
+`polyforge.loading` only until the first read settles,
+`polyforge.progress.empty` (暂无进度 / No progress yet / 暫無進度) for an
+available snapshot with no line, `polyforge.progress.unavailable` (进度不可用 /
+Progress unavailable / 進度不可用) for an unavailable snapshot, a first read
+that fails outright, or a selection with no wi in either the selected job or
+the selection's watch snapshot — never a fabricated line. The read is keyed on
+`selectedJob?.wi ?? watchStatus?.wi`: the daemon drops a terminated job from
+`runtime-state.json` and `pf ops status` (runtime `dropJob`) moments after its
+terminal event, so a job that finishes while its detail is open leaves the
+status/cards lists and keeps its wi through the watch snapshot (reset per
+selection, kept across failed watch reads). Its next read gets the route's 400
+(N6: an id naming no job in a readable index) and the hook keeps the last good
+snapshot, so the stream read before the drop stays visible; lines written after
+the last read (often the final `terminal` / `job_stopped`) are not shown. A
+finished job selected after the drop has no index entry, so the route cannot
+serve it and the block shows the unavailable state.
 
 **Whitelist (the progress face only).** `progressEntries` in
 `lib/polyforge-cards.ts`: an assistant text block → `{kind:"narration"}`
@@ -1513,21 +1595,65 @@ fabricated line.
 the first string-valued argument in key order, else the name alone), masked
 by `maskPolyforgeCredentials` and capped at `PROGRESS_TOOL_MAX` = 200 code
 points. Tool results, thinking, user/system records, `api-request-blob` and
-every other field produce nothing. `kind` is the one wire field added so the
-client tells the two kinds apart without parsing a text prefix. The card
+every other field produce nothing — the same projection for both harnesses
+(proven on transcripts recorded from real pi and claude sessions,
+`lib/__fixtures__/progress-238/`, provenance in its `README.md`). The card
 stream's whitelist (narration only) is unchanged.
 
-**Read and bounds.** `readProgressTail(root, capsuleDir)` resolves the
-current step's transcript with the card stream's `resolveTranscript` (spawn
-journal's newest line → the harness's live session file → the capsule
-`session/` copy, the same realpath containment), reads its newest 64 KiB
-(`TRANSCRIPT_WINDOW_BYTES`) as whole lines only, and keeps the newest
-`PROGRESS_MAX_ENTRIES` = 50 entries within `PROGRESS_MAX_BYTES` = 32 KiB of
-entry JSON. Every answer is a fresh newest page; entry ids are
-`<16 hex identity>.<offset>.<block>`, the identity hashing the path, device,
-inode, harness and step, so a step change replaces the tail and can never
-splice two steps (and no id names a path). It never throws: any failure is
-`available:false`.
+**Lifecycle lines.** `composeProgressEventLine` in
+`lib/polyforge-cards-pure.ts` turns one daemon event into one line
+`<HH:MM:SS> <glyph> <fields…>` (server-local clock, glyphs instead of per-kind
+words, so no locale string per kind), masked by `maskPolyforgeCredentials`
+and capped at 400 code points:
+
+| kind | line | tone |
+|---|---|---|
+| `step_started` | `▶ <step> #<spawn_n> · <model>` | accent |
+| `step_done` | `■ <step> +<duration>` (since the same step+spawn's `step_started`, `formatCardDuration`) | dim |
+| `step_failed` / `step_dead` | `✕ <step> · <cause>` | red |
+| `needs_input` | `? <step>` | amber |
+| `answered` | `✓ <step>` | neutral |
+| `gate_verdict` | `◆ <step>` | neutral |
+| `rewind` | `↺ <gate> → <target>` | neutral |
+| `terminal` | `⏹ <status>` | green `completed`, red `failed`, neutral otherwise |
+| `job_stopped` | `⏸` | neutral |
+| `needs_recovery` | `⚠ <reason> · <detail>` | red |
+| `push_failed` | `⚠ <error>` | red |
+
+Dropped (no line, no aggregate row): `published`, `transcript_missing`,
+`exec_init`, `job_started`, `candidate_switched`, `envelope_rejected`,
+`authored_tests_rebaselined` (the last three by owner ruling
+at review) and every unknown kind. Only the body fields `step`,
+`model`, `spawn_n`, `cause`, `gate`, `target`, `status`, `reason`, `detail`
+and `error` are read, each only by the kinds above — a `needs_input`
+question, `answered_by`, `files` or any other body field never leaves the
+server.
+
+**Read and bounds.** `readProgressSnapshot(root, capsuleDir, wi)` reads the
+capsule's whole spawn journal (`runtime-state/spawn-journal.jsonl`, up to 4
+MiB) — one spawn per line, in file order, reruns included — and the WI's event
+log (`<root>/events/wi-<wi>.jsonl`, up to its newest 16 MiB of whole lines).
+Each spawn's transcript: the newest spawn reads the harness's live session
+first (the card stream's `resolveTranscript`: a running pi step's capsule
+copy holds only its prompt), every earlier spawn the journal's `transcript`
+(the capsule copy), else for claude its `claude-config` session; the same
+realpath containment, an unknown harness or outside/missing path is no
+transcript. A transcript several spawns name (a `--resume` continuation) is
+read once; each spawn still gets its own start line from the event log.
+Transcripts are read whole, whole lines only (a line still being written is
+not read, a single line over 8 MiB is skipped as a blob record). The stream
+is the stable sort by time of the lifecycle lines (`at`) and the transcript
+lines (`timestamp`; without one, the spawn's `started_at` plus the record's
+ordinal in µs), events first at the same instant, then build order — so each
+step's start line precedes its lines and its end/failure line follows them,
+and a rerun follows the earlier spawn. The newest `PROGRESS_MAX_LINES` = 2000
+are kept and `omitted` is the exact count of the rest; there is no byte cap
+(under the bound every line shows). Neither the journal nor the event log
+readable, the job's transcripts summed over 128 MiB (an exact count would
+need them all) or any error → `available:false`. Line ids are
+`<16 hex identity>.<offset>.<block>` (transcripts) and `e.<offset>` (events):
+never a path. Cost, measured on capsule task-42 (24 spawns, 15.4 MB of
+transcripts): 54–63 ms per whole read. It never throws.
 
 **Cadence.** `hooks/usePolyforgeProgress.ts` (modeled on `useMachineLoad`):
 mounted only with the Jobs detail of a selected job (closing the dock or
@@ -1538,10 +1664,13 @@ ms — a fixed constant, no setting, never the card poll interval. Any other
 status: exactly one read, no interval. A hidden page clears the interval and
 aborts the request in flight (zero requests while hidden); becoming visible
 reads at once. One request in flight, bounded at
-`PROGRESS_REQUEST_TIMEOUT_MS` = 5000 ms. `nextProgressTail` keeps the last
-good tail on a failed or degraded read (no flash, no error readout) and
+`PROGRESS_REQUEST_TIMEOUT_MS` = 5000 ms. `nextProgressSnapshot` keeps the last
+good snapshot on a failed or degraded read (no flash, no error readout) and
 replaces it wholesale on a usable one; another job never shows the previous
-job's tail.
+job's snapshot. A first read that fails outright (HTTP error, network error,
+timeout, malformed body) with nothing held is the unavailable state, never a
+perpetual Loading (the #210 ledger's N5); a later good read
+replaces it. An abort by hiding, deselecting or unmounting writes nothing.
 
 ## Client behavior
 
@@ -1569,7 +1698,7 @@ job's tail.
   polls ignore it.
 - `components/PolyforgePanel.tsx`: all jobs on the machine (no owner filter),
   one card each (see [Jobs tab card stream](#jobs-tab-card-stream));
-  the candidate (now in the detail's facts row), step ids, event values and
+  the candidate (now in the summary's facts), step ids and
   the chat id are shortened client-side to 24 chars + `…`; unknown status
   values pass through raw (known ones use `polyforge.*` keys present in en,
   zh-CN and zh-TW). The selected detail's title row (; it was the
@@ -1610,7 +1739,7 @@ job's tail.
   included), clamped to [340 px, 90 vw] (`lib/panel-layout.ts`:
   `POLYFORGE_DOCK_*`), persisted globally under the localStorage key
   `pi-web:polyforge-dock-width` (absent/invalid reads as 460; the same
-  convention as `pi-web:polyforge-event-mode`). The handle is a DOM child
+  convention as the other `pi-web:polyforge-*` keys). The handle is a DOM child
   of the dock (it straddles the dock's left edge), so the pi#113 outside-
   pointerdown dismissal counts it as part of the dock — dragging never
   closes the dock. The bg-tasks dock in the same slot stays fixed at
@@ -1639,24 +1768,10 @@ job's tail.
   the `(max-width: 640px)` media query does not match (bg-tasks closes first,
   the shared-slot rule); the dock stays the same absolute overlay, so the chat
   is never resized.
-- **Event tail display modes (pi#112):** panel-local state with a global
-  localStorage key `pi-web:polyforge-event-mode` (`"simple"|"verbose"`;
-  absent/invalid reads as simple). Simple mode (the default) collapses each
-  consecutive run of noise events (`published`, `transcript_missing`,
-  `exec_init`) into one gray `sync ×N` row (×1 included); verbose mode renders
-  every event on its own row with the raw kind shown inline and noise kinds
-  de-emphasized individually (whole row in `var(--text-dim)`, the same
-  treatment as the sync row), while meaningful neutral rows keep their values
-  in `var(--text)` for clear contrast against grayed noise. Every row puts
-  the raw kind and full whitelisted field values in its hover `title`, and
-  renders whitelisted values as mono spans (`step · model`,
-  `step · from → to`, `step · cause`, `gate → target`, terminal status, or
-  lone step), ellipsized at 24 chars like the job candidate. The mode toggle
-  uses the action-label model: its label names the mode it switches to
-  (`Simple`/`Verbose`) and it carries no `aria-pressed` state.
-  Severity emphasis: `needs_input` amber (#d97706); `step_failed`,
-  `step_dead`, `push_failed`, `envelope_rejected`, `needs_recovery` and
-  `terminal` failed red (#dc2626); `terminal` completed green (#16a34a);
-  `terminal` cancelled and all other kinds neutral. The mode toggle lives in
-  the event-tail area of the selected detail and is purely client-side — no
-  network request on toggle.
+- **Event tail display modes (pi#112) — retired.** The
+  simple/verbose toggle, its `pi-web:polyforge-event-mode` preference (left in
+  place, never read, rewritten or cleared), the collapsed `sync ×N` noise row
+  and the standalone tail are gone by owner ruling: each retained lifecycle
+  event is one line of the execution progress (see the lifecycle-line table),
+  with its raw kind on the line's hover `title`, and the noise kinds produce
+  no line at all.

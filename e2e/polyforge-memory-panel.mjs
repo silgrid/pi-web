@@ -1,3 +1,4 @@
+// carries: components/Polyforge*, components/polyforge-*, hooks/usePolyforge*, lib/polyforge*, app/api/polyforge/*
 // — pi-web Polyforge dock Memory tab: stub-pf end-to-end pass.
 //
 // Authored pre-code by e2e-author against artifacts/spec.md (route names and

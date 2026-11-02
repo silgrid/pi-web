@@ -1,3 +1,5 @@
+// carries: components/Polyforge*, components/polyforge-*, hooks/usePolyforge*, lib/polyforge*, app/api/polyforge/*
+// carries: components/SettingsPanel*, components/SettingsUi*, components/settings-ui-helpers*, lib/settings-navigation*, lib/package-settings*, app/api/plugins/*
 // — Settings › Polyforge simplification acceptance (authored pre-code).
 //
 // The owner asked for progressive disclosure on the Settings › Polyforge page:

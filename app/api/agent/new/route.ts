@@ -7,6 +7,18 @@ import { isRegistrableRoot } from "@/lib/root-registration-policy";
 import { invalidateSessionListCache } from "@/lib/session-reader";
 import { startRpcSession } from "@/lib/rpc-manager";
 import { cwdMissingBody } from "@/lib/missing-cwd";
+import { EMPTY_CLAUDE_USAGE, removeClaudeSessionRecord, upsertClaudeSessionRecord } from "@/lib/claude-index";
+import { findClaudeBinary, startClaudeSession } from "@/lib/claude-session";
+import {
+  CLAUDE_PROVIDER,
+  DEFAULT_CLAUDE_TOOL_PRESET,
+  isClaudeHarness,
+  isClaudeModelAlias,
+  isClaudeToolPreset,
+  isSessionHarness,
+  type ClaudeModelAlias,
+  type ClaudeToolPreset,
+} from "@/lib/claude-shared";
 
 const THINKING_LEVELS = new Set<ThinkingLevel>(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 
@@ -17,8 +29,62 @@ function parseThinkingLevel(value: unknown): ThinkingLevel | undefined {
   }
   throw new Error(`Invalid thinking level: ${String(value)}`);
 }
-// POST /api/agent/new  body: { cwd: string; type: string; message?: string; ... }
-// Spawns a brand-new pi session. Most calls immediately send the first command;
+function rejected(commandType: string | undefined, body: Record<string, unknown>, status: number) {
+  return NextResponse.json({
+    ...body,
+    ...(commandType === "prompt" ? { code: "prompt_rejected", accepted: false } : {}),
+  }, { status });
+}
+
+/**
+ * A new claude session, after the cwd guard: claude must be on PATH,
+ * then the index entry, the config dir and the first child (`--session-id <new id>`).
+ * The child is spawned before the reply; a prompt goes to its stdin.
+ */
+async function createClaudeSession(
+  cwd: string,
+  modelAlias: ClaudeModelAlias,
+  preset: ClaudeToolPreset,
+  command: Record<string, unknown>,
+  commandType: string | undefined,
+) {
+  if (!findClaudeBinary()) {
+    return rejected(commandType, { error: "claude was not found on PATH" }, 400);
+  }
+  const now = new Date().toISOString();
+  const record = {
+    id: randomUUID(),
+    cwd,
+    modelAlias,
+    preset,
+    created: now,
+    modified: now,
+    firstMessage: commandType === "prompt" && typeof command.message === "string" ? command.message : "",
+    usage: { ...EMPTY_CLAUDE_USAGE },
+  };
+  await upsertClaudeSessionRecord(record);
+  let session;
+  try {
+    session = startClaudeSession(record);
+  } catch (error) {
+    await removeClaudeSessionRecord(record.id);
+    throw error;
+  }
+  allowFileRoot(cwd);
+  const data = commandType === "prompt" ? await session.send(command) : null;
+  return NextResponse.json({
+    success: true,
+    sessionId: record.id,
+    data,
+    model: { provider: CLAUDE_PROVIDER, modelId: modelAlias },
+    thinkingLevel: "off",
+    harness: "claude",
+  });
+}
+
+// POST /api/agent/new  body: { cwd: string; type: string; message?: string; harness?: "pi" | "claude"; ... }
+// Spawns a brand-new pi session, or with harness "claude" a claude session
+// (modelAlias + claudePreset, fixed for its life; type "prompt" or "ensure_session"). Most calls immediately send the first command;
 // type:"ensure_session" only creates the runtime so clients can query commands.
 // Returns pi's real session id plus the model/thinking state selected at startup.
 export async function POST(req: Request) {
@@ -26,8 +92,23 @@ export async function POST(req: Request) {
   let promptAccepted = false;
   try {
     const body = await req.json() as { cwd?: string; [key: string]: unknown };
-    const { cwd, ...command } = body;
+    const { cwd, harness, modelAlias, claudePreset, ...command } = body;
     commandType = typeof command.type === "string" ? command.type : undefined;
+    if (harness !== undefined && !isSessionHarness(harness)) {
+      return rejected(commandType, { error: `Unknown harness: ${String(harness)}` }, 400);
+    }
+    const claude = isClaudeHarness(harness);
+    if (claude) {
+      if (!isClaudeModelAlias(modelAlias)) {
+        return rejected(commandType, { error: `A claude session needs a model alias: ${String(modelAlias)}` }, 400);
+      }
+      if (claudePreset !== undefined && !isClaudeToolPreset(claudePreset)) {
+        return rejected(commandType, { error: `Unknown claude tool preset: ${String(claudePreset)}` }, 400);
+      }
+      if (commandType !== "prompt" && commandType !== "ensure_session") {
+        return rejected(commandType, { error: `${String(commandType)} is not available for claude sessions` }, 400);
+      }
+    }
 
     if (!cwd || typeof cwd !== "string") {
       return NextResponse.json({
@@ -64,6 +145,16 @@ export async function POST(req: Request) {
           ? { code: "prompt_rejected", accepted: false }
           : {}),
       }, { status: 403 });
+    }
+
+    if (claude) {
+      return await createClaudeSession(
+        registrable.path,
+        modelAlias as ClaudeModelAlias,
+        (claudePreset as ClaudeToolPreset | undefined) ?? DEFAULT_CLAUDE_TOOL_PRESET,
+        command,
+        commandType,
+      );
     }
 
     // Use a one-time key so startRpcSession's lock doesn't conflict with real session ids

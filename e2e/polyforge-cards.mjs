@@ -1,3 +1,5 @@
+// carries: components/Polyforge*, components/polyforge-*, hooks/usePolyforge*, lib/polyforge*, app/api/polyforge/*
+// carries: components/AppShell*
 // — Polyforge Jobs tab card stream: end-to-end acceptance pass.
 //
 // Authored pre-code against artifacts/spec.md. The suite drives the new
@@ -236,10 +238,16 @@ const withPage = async (opts, fn) => { const page = await openPage(opts); try { 
 const dock = (page) => page.locator("#polyforge-dock").or(page.getByRole("dialog", { name: /polyforge/i })).first();
 const pfButton = (page) => page.getByRole("button", { name: /^(?!.*close).*polyforge/i }).first();
 const openDock = async (page) => {
-  // The helper tolerates a folded Polyforge button, though made it
-  // resident right of the toolbar's More toggle at ≤480px.
+  // the toggle renders only after the mount-time status probe
+  // (`pfPresent`) and, since, is resident at ≤480px / inline
+  // wider. Never open ⋯ to reveal it: ⋯'s overlay covers that slot and
+  // intercepts the click. Wait for the toggle, close ⋯ if it is open, click.
   const more = page.locator('[data-mobile-toolbar-more="true"]');
-  if ((await pfButton(page).count()) === 0 && (await more.count()) > 0 && (await more.getAttribute("aria-expanded")) !== "true") await more.click();
+  await waitFor(async () => (await pfButton(page).count()) > 0, "the Polyforge toggle renders", 20_000);
+  if ((await more.count()) > 0 && (await more.getAttribute("aria-expanded")) === "true") {
+    await more.click();
+    await page.locator('[data-mobile-toolbar-actions="true"]').waitFor({ state: "hidden", timeout: 10_000 });
+  }
   await pfButton(page).click(); await dock(page).waitFor({ timeout: 20_000 }); return dock(page);
 };
 const card = (page, wi) => dock(page).locator(`[data-pf-card-wi="${wi}"]`);

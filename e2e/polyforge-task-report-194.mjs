@@ -1,3 +1,4 @@
+// carries: components/Polyforge*, components/polyforge-*, hooks/usePolyforge*, lib/polyforge*, app/api/polyforge/*
 // — Polyforge Tasks: the card's report tail line and the reporter filter.
 //
 // Authored pre-code against artifacts/spec.md (Requirement "The authored e2e
@@ -169,8 +170,16 @@ async function waitFor(fn, label, ms = 15_000) {
   throw new Error(`${label} (last: ${last})`);
 }
 async function openDock(page) {
+  // the toggle renders only after the mount-time status probe
+  // (`pfPresent`) and, since, is resident at ≤480px / inline
+  // wider. Never open ⋯ to reveal it: ⋯'s overlay covers that slot and
+  // intercepts the click. Wait for the toggle, close ⋯ if it is open, click.
   const more = page.locator('[data-mobile-toolbar-more="true"]');
-  if ((await pfButton(page).count()) === 0 && (await more.count()) > 0 && (await more.getAttribute("aria-expanded")) !== "true") await more.click();
+  await waitFor(async () => (await pfButton(page).count()) > 0, "the Polyforge toggle renders", 20_000);
+  if ((await more.count()) > 0 && (await more.getAttribute("aria-expanded")) === "true") {
+    await more.click();
+    await page.locator('[data-mobile-toolbar-actions="true"]').waitFor({ state: "hidden", timeout: 10_000 });
+  }
   await pfButton(page).click(); await dock(page).waitFor({ timeout: 20_000 }); return dock(page);
 }
 async function openWork(page) {
