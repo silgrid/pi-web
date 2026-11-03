@@ -5,6 +5,7 @@ import type {
   AgentMessage,
   BackgroundTasksClientEvent,
   BlockingExtensionUiRequest,
+  CustomMessage,
   ExtensionStatusItem,
   ExtensionUiRequest,
   ExtensionWidgetItem,
@@ -2350,6 +2351,45 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         }
         dispatch({ type: "end" });
         setAgentPhase({ kind: "waiting_model" });
+        break;
+      }
+      case "entry_appended": {
+        // The wire forwards a displayed `custom_message` entry (an extension's
+        // decision feed, such as polyforge's `polyforge-decision`) slimmed to
+        // its text: no `message_start`/`message_end` announces it, so this
+        // event is the chat's only live view of it. A mid-run read may have
+        // loaded it from the session file already: append only a novel one.
+        const entry = event.entry as
+          | { type?: string; customType?: unknown; content?: unknown; display?: unknown; timestamp?: unknown }
+          | undefined;
+        if (!entry || entry.type !== "custom_message" || entry.display !== true) break;
+        const content = typeof entry.content === "string" ? entry.content : "";
+        if (!content.trim()) break;
+        const custom: CustomMessage = {
+          role: "custom",
+          customType: typeof entry.customType === "string" ? entry.customType : "",
+          content,
+          display: true,
+          timestamp: typeof entry.timestamp === "number" ? entry.timestamp : Date.now(),
+        };
+        setMessages((prev) => {
+          const dupe = prev.some((m) => {
+            if (m.role !== "custom") return false;
+            const c = m as CustomMessage;
+            if (c.customType !== custom.customType) return false;
+            const text = typeof c.content === "string" ? c.content : "";
+            return text === content;
+          });
+          return dupe ? prev : [...prev, custom];
+        });
+        // Follow the new card only when the user sits at the bottom, same as
+        // streaming output does.
+        if (isNearBottomRef.current && liveFollowFrameRef.current === null) {
+          liveFollowFrameRef.current = requestAnimationFrame(() => {
+            liveFollowFrameRef.current = null;
+            if (isNearBottomRef.current) scrollToBottom("auto");
+          });
+        }
         break;
       }
       case "tool_execution_start": {
