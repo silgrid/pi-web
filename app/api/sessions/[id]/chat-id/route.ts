@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { isApiRequestAllowed } from "@/lib/request-security";
 import { probePolyforgePresent } from "@/lib/polyforge-status";
 import { execFileAsync } from "@/lib/exec-file";
+import { polyforgePfBin } from "@/lib/polyforge-pf-bin";
 import { getRpcSession } from "@/lib/rpc-manager";
 import {
   CHAT_ID_TIMEOUT_MS,
@@ -29,7 +30,7 @@ const resolveSessionChatId = createSessionChatIdResolver({
   present: probePolyforgePresent,
   isLiveSession: (sessionId) => Boolean(getRpcSession(sessionId)),
   spawnChatInit: async (sessionId) => {
-    const { stdout } = await execFileAsync("pf", chatInitArgv(sessionId), {
+    const { stdout } = await execFileAsync(polyforgePfBin(), chatInitArgv(sessionId), {
       timeout: CHAT_ID_TIMEOUT_MS,
     });
     return stdout;

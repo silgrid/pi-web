@@ -18,7 +18,8 @@ import { buildQuotedSelection } from "@/lib/quoted-selection";
 import { dropMentionText, splitDroppedItems, uploadFiles, type DroppedItem } from "@/lib/file-upload-client";
 import { MessageView } from "./MessageView";
 import { MarkdownBody } from "./MarkdownBody";
-import { ChatInput, type ChatInputHandle } from "./ChatInput";
+import { ChatInput, type ChatInputHandle, type ClaudeComposerState } from "./ChatInput";
+import { isClaudeModelAlias, isClaudeToolPreset } from "@/lib/claude-shared";
 import { ChatMinimap, MINIMAP_WIDTH, useMessageRefs } from "./ChatMinimap";
 import { ExtensionStatusBar } from "./ExtensionStatusBar";
 import { AnsiText } from "./AnsiText";
@@ -88,10 +89,6 @@ interface Props {
   /** Signal from AppShell that the session with this id was written by
    *  another pi process; a new `key` triggers one disk reload. */
   externalSessionChange?: { sessionId: string; key: number } | null;
-  /** The toolbar's ↻: each new value starts one manual fetch in the focused pane. */
-  manualFetchKey?: number;
-  /** Whether this chat offers the manual fetch (a saved session) and whether one is under way; null on unmount. */
-  onManualFetchStateChange?: (state: { available: boolean; inProgress: boolean } | null) => void;
   onOpenFile?: (filePath: string, page?: number) => void;
   /** Files dropped onto the chat were written into the working directory. */
   onFilesUploaded?: () => void;
@@ -276,7 +273,7 @@ function ProcessDetailsGroup({ messageCount, toolCallCount, durationMs, cacheMis
   );
 }
 
-export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initialScrollPosition, onScrollPositionChange, sessionRunning, isActivePane = true, newSessionCwd, newSessionDraftKey, initialNewSessionChoices, onNewSessionChoicesChange, onAgentEnd, onToolEnd, onAttentionNeeded, onBackgroundTasksEvent, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemToolsChange, onSystemInfoLoaderChange, onSessionStatsChange, onSessionStatsPanelOpen, onDebugSnapshotReaderChange, onOpenSettings, onContextUsageChange, externalSessionChange, manualFetchKey, onManualFetchStateChange, onOpenFile, onFilesUploaded, onOpenSubagent, onAskInNewChat, quoteSelectionEnabled = false, initialPrompt, onInitialPromptConsumed, soundEnabled = true, onSoundToggle, playDoneSound = () => {}, unlockAudio, holdAudio }: Props) {
+export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initialScrollPosition, onScrollPositionChange, sessionRunning, isActivePane = true, newSessionCwd, newSessionDraftKey, initialNewSessionChoices, onNewSessionChoicesChange, onAgentEnd, onToolEnd, onAttentionNeeded, onBackgroundTasksEvent, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemToolsChange, onSystemInfoLoaderChange, onSessionStatsChange, onSessionStatsPanelOpen, onDebugSnapshotReaderChange, onOpenSettings, onContextUsageChange, externalSessionChange, onOpenFile, onFilesUploaded, onOpenSubagent, onAskInNewChat, quoteSelectionEnabled = false, initialPrompt, onInitialPromptConsumed, soundEnabled = true, onSoundToggle, playDoneSound = () => {}, unlockAudio, holdAudio }: Props) {
   const { t } = useI18n();
   const isMobile = useIsMobile();
   const completionNotificationsEnabled = session?.relation?.kind !== "subagent";
@@ -306,7 +303,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
   const [restoreAnchorReady, setRestoreAnchorReady] = useState(false);
 
   const {
-    loading, error, messages, activeToolResults, entryIds, messageKeys, historyCursor, hasEarlierMessages, streamingStore,
+    loading, error, messages, activeToolResults, entryIds, messageKeys, historyCursor, hasEarlierMessages, earlierTurnCount, streamingStore,
     agentRunning, bashRunning, pendingBash, modelNames, modelList, modelError, missingCwd, modelScopeWarnings, modelThinkingLevels, modelThinkingLevelMaps, toolPreset, thinkingLevel,
     retryInfo, contextUsage, forkingEntryId,
     isCompacting, compactError, compactResult, displayModel: displayModelValue, modelSwitching, sessionStats,
@@ -331,6 +328,8 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
     loadContext, activeLeafId, scrollToBottom, scrollToMessage, scrollToOffset,
     refreshFromDisk,
     manualFetch, manualFetching, manualFetchAvailable,
+    isClaudeSession, claudeSessionChoices, newSessionHarness, setNewSessionHarness, newSessionModelAlias, setNewSessionModelAlias,
+    newSessionClaudePreset, setNewSessionClaudePreset, claudeAvailability,
   } = useAgentSession({
     session, sessionRunning, newSessionCwd, newSessionDraftKey, initialNewSessionChoices, onNewSessionChoicesChange, onAgentEnd: wrappedOnAgentEnd, onToolEnd, onAttentionNeeded, onBackgroundTasksEvent, onSessionCreated, onSessionForked,
     modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemToolsChange, onSystemInfoLoaderChange, onSessionStatsPanelOpen,
@@ -343,6 +342,30 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
   const hasStreamingContent = useStreamingSelector(streamingStore, selectHasStreamingContent);
   const getStreamingMessage = useCallback(() => streamingStore.getState().streamingMessage, [streamingStore]);
   const sessionBusy = agentRunning || bashRunning;
+  // a fresh composer picks pi or claude; a claude session shows its fixed alias and preset.
+  const claudeComposer = useMemo<ClaudeComposerState | undefined>(() => {
+    if (isNew) {
+      return {
+        choosing: true,
+        harness: newSessionHarness,
+        modelAlias: newSessionModelAlias,
+        preset: newSessionClaudePreset,
+        availability: claudeAvailability,
+        onHarnessChange: setNewSessionHarness,
+        onModelAliasChange: setNewSessionModelAlias,
+        onPresetChange: setNewSessionClaudePreset,
+      };
+    }
+    if (!isClaudeSession) return undefined;
+    const fixed = claudeSessionChoices;
+    return {
+      choosing: false,
+      harness: "claude",
+      modelAlias: isClaudeModelAlias(fixed?.modelAlias) ? fixed.modelAlias : "claude-default",
+      preset: isClaudeToolPreset(fixed?.preset) ? fixed.preset : "read-only",
+      availability: null,
+    };
+  }, [isNew, isClaudeSession, claudeSessionChoices, newSessionHarness, newSessionModelAlias, newSessionClaudePreset, claudeAvailability, setNewSessionHarness, setNewSessionModelAlias, setNewSessionClaudePreset]);
   // External-write signal: each new key reloads the mounted session from disk
   // exactly once, and only when it targets the session this window shows.
   const externalSessionChangeKeyRef = useRef<number | null>(null);
@@ -353,9 +376,10 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
     if (externalSessionChange.sessionId !== session?.id) return;
     void refreshFromDisk(externalSessionChange.sessionId);
   }, [externalSessionChange, session?.id, refreshFromDisk]);
-  // The manual fetch, from the toolbar's ↻ or the bottom
-  // pull-up: a reader at the bottom stays at the bottom with the newest content;
-  // anywhere else no scroll command is issued, so that content stays in place.
+  // The manual fetch, from the floating button's ↻ form at the
+  // tail (; the toolbar no longer has one) or the bottom pull-up: a
+  // reader at the bottom stays at the bottom with the newest content; anywhere
+  // else no scroll command is issued, so that content stays in place.
   const runManualFetch = useCallback(() => {
     const container = scrollContainerRef.current;
     const atTail = Boolean(container && isScrollAtTail(container.scrollTop, container.clientHeight, container.scrollHeight));
@@ -363,44 +387,45 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
       if (atTail) requestAnimationFrame(() => scrollToBottom("instant"));
     });
   }, [manualFetch, scrollContainerRef, scrollToBottom]);
-  const runManualFetchRef = useRef(runManualFetch);
-  runManualFetchRef.current = runManualFetch;
-  const manualFetchKeyRef = useRef(manualFetchKey);
-  useEffect(() => {
-    // The mount's value is no trigger; an unfocused pane only follows the key.
-    if (manualFetchKeyRef.current === manualFetchKey) return;
-    manualFetchKeyRef.current = manualFetchKey;
-    if (isActivePane) runManualFetchRef.current();
-  }, [manualFetchKey, isActivePane]);
-  useEffect(() => {
-    onManualFetchStateChange?.({ available: manualFetchAvailable, inProgress: manualFetching });
-  }, [manualFetchAvailable, manualFetching, onManualFetchStateChange]);
-  useEffect(() => () => { onManualFetchStateChange?.(null); }, [onManualFetchStateChange]);
+  // The floating button's form: ↓ while scrolled up, ↻ at the tail of a saved
+  // session, none otherwise (an unsaved session's tail, a pending restore).
+  const floatingForm: "scroll" | "refresh" | null = pendingScrollRestore ? null
+    : showScrollToBottom ? "scroll"
+      : manualFetchAvailable ? "refresh" : null;
+  const floatingLabel = floatingForm === "refresh"
+    ? t(manualFetching ? "chat.manualFetchBusy" : "chat.manualFetch")
+    : t("chat.scrollToLatest");
   // The bottom pull-up (touch only): a touch that starts with the list already
   // at its bottom and is released past PULL_FETCH_THRESHOLD_PX upward starts the
   // same manual fetch. A touch starting in earlier history, a downward drag (the
   // top stays with the "load earlier" sentinel) and a mouse or trackpad never do.
+  // The floating ↻ sits over the list's bottom at the tail, so it carries the same
+  // handlers: a pull-up that starts on it still arms (always against the list).
   const pullFetchRef = useRef<{ startY: number; lastY: number } | null>(null);
-  const handlePullTouchStart = useCallback((event: React.TouchEvent<HTMLDivElement>) => {
-    const container = event.currentTarget;
+  const handlePullTouchStart = useCallback((event: React.TouchEvent<HTMLElement>) => {
+    const container = scrollContainerRef.current;
     const touch = event.touches.length === 1 ? event.touches[0] : undefined;
-    pullFetchRef.current = touch && manualFetchAvailable && shouldArmPullFetch({
+    pullFetchRef.current = container && touch && manualFetchAvailable && shouldArmPullFetch({
       touch: true,
       scrollTop: container.scrollTop,
       clientHeight: container.clientHeight,
       scrollHeight: container.scrollHeight,
     }) ? { startY: touch.clientY, lastY: touch.clientY } : null;
-  }, [manualFetchAvailable]);
-  const handlePullTouchMove = useCallback((event: React.TouchEvent<HTMLDivElement>) => {
+  }, [manualFetchAvailable, scrollContainerRef]);
+  const handlePullTouchMove = useCallback((event: React.TouchEvent<HTMLElement>) => {
     const pull = pullFetchRef.current;
     const touch = event.touches[0];
     if (pull && touch) pull.lastY = touch.clientY;
   }, []);
-  const handlePullTouchEnd = useCallback((event: React.TouchEvent<HTMLDivElement>) => {
+  const handlePullTouchEnd = useCallback((event: React.TouchEvent<HTMLElement>) => {
     const pull = pullFetchRef.current;
     pullFetchRef.current = null;
     const endY = event.changedTouches[0]?.clientY ?? pull?.lastY;
-    if (pull && endY !== undefined && manualFetchAvailable && isPullFetchTriggered(pull.startY, endY)) runManualFetch();
+    if (pull && endY !== undefined && manualFetchAvailable && isPullFetchTriggered(pull.startY, endY)) {
+      // A pull that started on the floating ↻ must not also click it: one gesture, one fetch.
+      if (event.cancelable) event.preventDefault();
+      runManualFetch();
+    }
   }, [manualFetchAvailable, runManualFetch]);
   const handlePullTouchCancel = useCallback(() => {
     pullFetchRef.current = null;
@@ -1115,9 +1140,9 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
       ref={chatInputRef}
       onSend={isActivePane ? handleSend : (() => {}) as () => void}
       onAbort={isActivePane ? handleAbort : (() => {}) as () => void}
-      onSteer={isActivePane && agentRunning ? handleSteer : undefined}
-      onFollowUp={isActivePane && agentRunning ? handleFollowUp : undefined}
-      onPromptWithStreamingBehavior={isActivePane && agentRunning ? handlePromptWithStreamingBehavior : undefined}
+      onSteer={isActivePane && agentRunning && !isClaudeSession ? handleSteer : undefined}
+      onFollowUp={isActivePane && agentRunning && !isClaudeSession ? handleFollowUp : undefined}
+      onPromptWithStreamingBehavior={isActivePane && agentRunning && !isClaudeSession ? handlePromptWithStreamingBehavior : undefined}
       isStreaming={sessionBusy}
       model={displayModelValue}
       isAutoModelSelection={isAutoModelSelection}
@@ -1126,25 +1151,25 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
       modelError={modelError}
       missingCwd={missingCwd}
       modelScopeWarnings={modelScopeWarnings}
-      onModelChange={handleModelChange}
+      onModelChange={isClaudeSession ? undefined : handleModelChange}
       modelSwitching={modelSwitching}
       defaultModel={defaultModel}
       onSetDefaultModel={handleSetDefaultModel}
-      onCompact={session || isNew ? handleCompact : undefined}
+      onCompact={(session || isNew) && !isClaudeSession ? handleCompact : undefined}
       onAbortCompaction={handleAbortCompaction}
       isCompacting={isCompacting}
       compactError={compactError}
       onDismissCompactError={dismissCompactError}
       compactResult={compactResult}
       toolPreset={toolPreset}
-      onToolPresetChange={session || isNew ? handleToolPresetChange : undefined}
+      onToolPresetChange={(session || isNew) && !isClaudeSession ? handleToolPresetChange : undefined}
       thinkingLevel={thinkingLevel}
       isAutoThinkingSelection={isAutoThinkingSelection}
-      onThinkingLevelChange={session || isNew ? handleThinkingLevelChange : undefined}
+      onThinkingLevelChange={(session || isNew) && !isClaudeSession ? handleThinkingLevelChange : undefined}
       availableThinkingLevels={availableThinkingLevels}
       thinkingLevelMap={currentThinkingLevelMap}
       savedDefaultThinkingLevel={savedDefaultThinkingLevel}
-      onSetDefaultThinkingLevel={session || isNew ? handleSetDefaultThinkingLevel : undefined}
+      onSetDefaultThinkingLevel={(session || isNew) && !isClaudeSession ? handleSetDefaultThinkingLevel : undefined}
       retryInfo={retryInfo}
       queuedMessages={queuedMessages}
       inputHistory={inputHistory}
@@ -1152,13 +1177,14 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
       slashCommands={slashCommands}
       slashCommandsLoading={slashCommandsLoading}
       onLoadSlashCommands={loadSlashCommands}
-      onBuiltinCommand={handleBuiltinSlashCommand}
+      onBuiltinCommand={isClaudeSession ? undefined : handleBuiltinSlashCommand}
       soundEnabled={soundEnabled}
       onSoundToggle={onSoundToggle}
       onAudioUnlock={unlockAudio}
       draftKey={session?.id ?? newSessionDraftKey ?? undefined}
       cwd={session?.cwd ?? newSessionCwd}
       onAttachFiles={onAttachFiles}
+      claude={claudeComposer}
     />
   );
 
@@ -1387,7 +1413,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
                     onOpenSubagent={onOpenSubagent}
                     entryId={entryIds[idx]}
                     searchBlock={entryIds[idx] === pendingSearchScroll?.entryId ? searchBlock : undefined}
-                    onFork={bashRunning || isNew ? undefined : handleFork}
+                    onFork={bashRunning || isNew || isClaudeSession ? undefined : handleFork}
                     forking={forkingEntryId === entryIds[idx]}
                     onEditContent={sessionBusy ? undefined : handleEditContent}
                     onCancelEdit={cancelEdit}
@@ -1397,7 +1423,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
                     sessionId={session?.id ?? sessionIdRef.current ?? undefined}
                     writtenFiles={options.writtenFiles}
                     turnDurationMs={options.turnDurationMs}
-                    onCompact={options.recoverTruncation ? handleCompact : undefined}
+                    onCompact={options.recoverTruncation && !isClaudeSession ? handleCompact : undefined}
                     isCompacting={options.recoverTruncation ? isCompacting : undefined}
                     compactError={options.recoverTruncation ? compactError : undefined}
                   />
@@ -1612,6 +1638,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
             messageRefs={messageRefs}
             onRevealHistory={revealHistoryForMinimap}
             scrollToOffset={scrollToOffset}
+            turnsBefore={earlierTurnCount}
           />
         )}
         </>}
@@ -1675,7 +1702,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
             <span aria-hidden="true" style={{ fontSize: 15 }}>@</span>
             <span>{t("chat.askInCurrent")}</span>
           </button>
-          {onAskInNewChat && quotedSelection.sourceEntryId && !bashRunning && (
+          {onAskInNewChat && !isClaudeSession && quotedSelection.sourceEntryId && !bashRunning && (
             <button
               type="button"
               className="file-viewer-icon-button"
@@ -1711,16 +1738,30 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
               zIndex: 20,
             }}
           >
+            {/* One floating button, two forms by scroll position, one element so
+                focus stays on it when the form changes: scrolled up it is ↓ (scroll to the latest,
+                no fetch); at the tail of a saved session it is the manual fetch's ↻ (this pane's
+                own fetch: spins and is aria-busy while one runs, a second click joins it). A
+                session not saved yet has no ↻, so at its tail the button stays hidden, as before. */}
             <button
               type="button"
-              className={`chat-scroll-to-bottom${showScrollToBottom && !pendingScrollRestore ? " is-visible" : ""}`}
-              title={t("chat.scrollToLatest")}
-              aria-label={t("chat.scrollToLatest")}
-              onClick={() => scrollToBottom("smooth")}
+              className={`chat-scroll-to-bottom${floatingForm ? " is-visible" : ""}`}
+              title={floatingLabel}
+              aria-label={floatingLabel}
+              aria-busy={floatingForm === "refresh" ? manualFetching : undefined}
+              onClick={floatingForm === "refresh" ? runManualFetch : () => scrollToBottom("smooth")}
+              onTouchStart={floatingForm === "refresh" ? handlePullTouchStart : undefined}
+              onTouchMove={floatingForm === "refresh" ? handlePullTouchMove : undefined}
+              onTouchEnd={floatingForm === "refresh" ? handlePullTouchEnd : undefined}
+              onTouchCancel={floatingForm === "refresh" ? handlePullTouchCancel : undefined}
             >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                <path d="M12 5v14M5 12l7 7 7-7" />
-              </svg>
+              {floatingForm === "refresh" ? (
+                <span aria-hidden="true" style={{ display: "inline-block", fontSize: 15, lineHeight: 1, animation: manualFetching ? "spin 0.8s linear infinite" : undefined }}>↻</span>
+              ) : (
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M12 5v14M5 12l7 7 7-7" />
+                </svg>
+              )}
             </button>
           </div>
         )}

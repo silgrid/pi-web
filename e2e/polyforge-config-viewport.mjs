@@ -1,3 +1,5 @@
+// carries: components/Polyforge*, components/polyforge-*, hooks/usePolyforge*, lib/polyforge*, app/api/polyforge/*
+// carries: components/SettingsPanel*, components/SettingsUi*, components/settings-ui-helpers*, lib/settings-navigation*, lib/package-settings*, app/api/plugins/*
 // — Settings › Polyforge configuration page VIEWPORT acceptance.
 //
 // The owner's third photo review after #88 and #126 reports that the page still
@@ -7,6 +9,9 @@
 // panel on all four edges, the grouped cards keep their titles, and the page
 // offers one vertical scroll region that reaches scrollHeight - clientHeight so
 // the last configured key is on screen.
+// the card titles follow the merged 工作区 / Workspace card and
+// the workflow card, and the bottom check targets the page's real last block
+// (the footer) instead of a configured key, which no longer ends the page.
 //
 //   node e2e/polyforge-config-viewport.mjs
 import assert from "node:assert/strict";
@@ -16,6 +21,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
 import { startNextServer } from "./next-server.mjs";
+import { NAV_MS } from "./timeouts.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 assert.ok(!existsSync(join(root, process.env.PI_WEB_DIST_DIR || ".next", "dev/lock")), "Run in a checkout without an active dev server");
@@ -73,6 +79,32 @@ const CONFIG = {
   steps_complete: true,
 };
 
+// the workflow card's read, fixed so the page is the fixture's
+// (the card renders after the configuration cards whatever pf is installed).
+const workflowsFixture = (project) => {
+  const chain = (models, from) => ({ "e2e-project": { models, from } });
+  return {
+    pfPresent: true,
+    pfVersion: "v2.20.16",
+    capable: true,
+    workflows: {
+      workflows_dir: "/e2e/workflows", daemon_reachable: true, reason: "", workspace: project, projects: ["e2e-project"],
+      write_capable: true, write_reason: "",
+      bundles: [{
+        name: "feature-full",
+        defaults: { model_candidates: ["pi:ff-default"], effective: chain(["pi:ff-default"], "bundle feature-full defaults.model_candidates") },
+        steps: [
+          { id: "grill", model_candidates: ["pi:ff-grill"], attrs: [{ name: "question_batch_size", type: "int", default: 0 }],
+            effective: chain(["pi:ff-grill"], "bundle feature-full step grill model_candidates") },
+          { id: "code", model_candidates: ["pi:ff-code"], effective: chain(["pi:ff-code"], "bundle feature-full step code model_candidates") },
+        ],
+      }],
+      bundle_errors: [],
+    },
+    workspace: { workspace: project, yaml: { sha256: "e2e-yaml", exists: true }, steps: { "e2e-project": {} } },
+  };
+};
+
 const failures = [];
 let checks = 0;
 async function check(label, fn) {
@@ -126,6 +158,7 @@ try {
   page.setDefaultTimeout(20_000);
   await page.route("**/api/polyforge/config/history", (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ entries: [] }) }));
   await page.route("**/api/polyforge/config?*", (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(CONFIG) }));
+  await page.route("**/api/polyforge/workflows?*", (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(workflowsFixture(project)) }));
   await page.route("**/api/polyforge/detect*", (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
     pfPresent: true, pfVersion: "v2.20.11", pfVersionBelowMinimum: false, line: "internal",
     piSkillInstalled: true, piSkillEnabled: true, claudeSkillsSymlink: true, claudeSessionStartHook: true,
@@ -134,8 +167,8 @@ try {
   await page.route("**/api/plugins?*", (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
     packages: [{ scope: "global", packageName: "polyforge", source: "/opt/polyforge" }],
   }) }));
-  await page.goto(`${base}/?session=${SESSION}`, { waitUntil: "domcontentloaded", timeout: 90_000 });
-  await page.getByText("E2E polyforge viewport host session").first().waitFor({ state: "attached", timeout: 60_000 });
+  await page.goto(`${base}/?session=${SESSION}`, { waitUntil: "domcontentloaded", timeout: NAV_MS });
+  await page.getByText("E2E polyforge viewport host session").first().waitFor({ state: "attached", timeout: NAV_MS });
   const show = page.locator('button[aria-label="Show sidebar"], button[aria-label="显示侧边栏"]').first();
   if (await show.isVisible().catch(() => false)) await show.click();
   await page.locator('button[aria-label="Settings"], button[aria-label="设置"]').first().click();
@@ -144,8 +177,21 @@ try {
   await dialog.locator(CONTENT_ROOT).first().waitFor({ state: "attached", timeout: 30_000 });
   const content = dialog.locator(CONTENT_ROOT).first();
   const hostLocator = dialog.locator(".settings-section-host:visible").first();
+  // the page opens collapsed (detection details, the read-only
+  // folds, the workspace card, the read-outs). Expand every region above the
+  // probe first so the geometry below is measured on the configuration's full
+  // height, the probe included. The install block (below the probe, collapsed
+  // while pf is healthy) keeps its default state: the page tail after the
+  // last configured key stays what the owner-confirmed order puts there.
+  await content.locator(".polyforge-config-row:visible").first().waitFor({ state: "visible", timeout: NAV_MS });
+  await content.locator(".polyforge-config-status [aria-expanded]").first().waitFor({ state: "visible", timeout: NAV_MS });
+  const collapsed = content.locator('section:not(.polyforge-config-install) [aria-expanded="false"]:visible');
+  for (let round = 0; round < 12 && await collapsed.count() > 0; round += 1) {
+    await collapsed.first().click({ timeout: 20_000 });
+  }
+  assert.equal(await collapsed.count(), 0, "a disclosure region is still collapsed after expanding");
   const probe = content.getByText(PROBE, { exact: true }).first();
-  await probe.waitFor({ state: "attached", timeout: 30_000 });
+  await probe.waitFor({ state: "visible", timeout: 30_000 });
 
   const region = async () => hostLocator.evaluate((hostEl, rootSelector) => {
     const contentEl = hostEl.querySelector(rootSelector);
@@ -176,8 +222,11 @@ try {
   };
 
   await check("grouped configuration cards keep their titles", async () => {
-    for (const title of ["cli.toml", "cli.toml · [daemon]", "Workspace mapping", "Summarize (.polyforge.yaml)"]) {
-      assert.ok(await content.getByText(title, { exact: true }).count() >= 1, `missing group card title: ${title}`);
+    for (const title of ["cli.toml", "cli.toml · [daemon]", "Workspace", "Workflow"]) {
+      assert.equal(await content.locator(`section[aria-label="${title}"] .polyforge-config-card-title`).first().innerText(), title, `missing group card title: ${title}`);
+    }
+    for (const gone of ["Workspace mapping", "Summarize (.polyforge.yaml)", "Declared step candidates"]) {
+      assert.equal(await content.locator(`section[aria-label="${gone}"]`).count(), 0, `the retired card ${gone} still renders`);
     }
   });
 
@@ -199,10 +248,12 @@ try {
     assert.ok(after.scrollTop + after.clientHeight >= after.scrollHeight - 1,
       `scrollTop ${after.scrollTop} + clientHeight ${after.clientHeight} < scrollHeight ${after.scrollHeight}`);
     const host = await hostLocator.boundingBox();
-    const box = await probe.boundingBox();
-    assert.ok(host && box, "the bottom probe or the section host has no box");
+    const last = content.locator(":scope > *").last();
+    assert.equal(await last.evaluate((node) => node.className), "config-footer", "the page's last block is not its footer");
+    const box = await last.boundingBox();
+    assert.ok(host && box, "the page's last block or the section host has no box");
     assert.ok(box.y >= host.y - 1 && box.y + box.height <= host.y + host.height + 1,
-      `the last configured key ${PROBE} is outside the visible panel after scrolling to the bottom (probe y=${box.y.toFixed(1)}..${(box.y + box.height).toFixed(1)}, panel y=${host.y.toFixed(1)}..${(host.y + host.height).toFixed(1)})`);
+      `the page's last block is outside the visible panel after scrolling to the bottom (block y=${box.y.toFixed(1)}..${(box.y + box.height).toFixed(1)}, panel y=${host.y.toFixed(1)}..${(host.y + host.height).toFixed(1)})`);
   });
 
   await check("the content keeps exactly the panel-standard padding on all four edges", async () => {

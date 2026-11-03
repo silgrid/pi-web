@@ -26,7 +26,7 @@ test("writes are JSON-only and every mutation is a pf spawn", () => {
   for (const source of [configSource, historySource, reloadSource]) {
     assert.match(source, /hasJsonContentType\(request\)/, "POST is JSON-only");
   }
-  assert.match(writeLib, /spawn\("pf", argv, \{ shell: false/, "one no-shell pf spawn helper");
+  assert.match(writeLib, /spawn\(polyforgePfBin\(\), argv, \{ shell: false/, "one no-shell pf spawn helper resolving PF_BIN");
   assert.match(writeLib, /api_key goes on stdin only|stdin = `\$\{String\(body\.value\)\}\\n`/, "api_key reaches pf on stdin");
   assert.doesNotMatch(writeLib, /writeFileSync|writePrivateFileAtomicSync\([^)]*cli\.toml/, "the write module never writes a config file");
 });

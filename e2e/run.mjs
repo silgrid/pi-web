@@ -1,3 +1,6 @@
+// carries: components/ChatWindow*, components/ChatInput*, components/MessageView*, hooks/useAgentSession*, lib/agent-*, lib/stream-client*, lib/session-*, app/api/agent/*, app/api/sessions/*
+// carries: app/page.tsx, app/layout.tsx, app/globals.css, components/AppShell*, components/SessionSidebar*, components/SplitPaneLayout*, components/PaneHeader*, components/TabBar*, components/MarkdownBody*, components/FileViewer*, components/FileExplorer*, components/ModelSelector*, components/ModelContextWindow*, components/FontSettings*
+// carries: lib/pane-state*, lib/pane-tab-state*, lib/tab-order*, lib/model-*, lib/font-preferences*, lib/markdown*, hooks/useChatAppearance*, hooks/useFontPreferences*, app/api/files/*, app/api/models/*
 // Adapted from @Nuctori's script-style CI/E2E fixtures in PR #617 (issue #599).
 import assert from "node:assert/strict";
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -13,6 +16,8 @@ import { checkChatAppearance } from "./chat-appearance.mjs";
 import { checkCodeBackground } from "./code-background.mjs";
 import { checkSplitPane } from "./split-pane-pass.mjs";
 import { checkModelDiscovery } from "./model-discovery.mjs";
+import { checkModelContext } from "./model-context.mjs";
+import { checkModelSelector } from "./model-selector.mjs";
 import { checkArchive } from "./archive.mjs";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -52,6 +57,305 @@ function writeSession(id, entries, cwd = project) {
   const header = { type: "session", version: 3, id, timestamp, cwd };
   writeFileSync(join(sessionDir, `2026-08-23T00-00-00-000Z_${id}.jsonl`),
     [header, ...entries].map((entry) => JSON.stringify(entry)).join("\n") + "\n");
+}
+
+
+// (upstream #791 client half): authored pre-code against
+// artifacts/spec.md. Each scenario is isolated, logs one marker line when it
+// passes, and keeps running after a failure so the baseline has one piece of
+// evidence per scenario. The 5,000-entry fixture's active branch has 2,500
+// user turns; its newest page (e4950..e4999) holds the last 25 of them, so
+// 2,475 turns are unloaded and the turn asking text(4998) is turn 2,500.
+async function checkMinimapTurns({ browser, base }) {
+  const context = await browser.newContext({
+    viewport: { width: 1280, height: 800 },
+    locale: "en-US",
+    baseURL: base,
+  });
+  await context.addInitScript(() => {
+    try {
+      window.localStorage.setItem("pi-web:session-age-filter-days", "0");
+      window.localStorage.setItem("pi-web:split-view-enabled", "false");
+    } catch {}
+  });
+
+  const openSession = async (page, id, readyText) => {
+    await page.goto(`${base}/?session=${id}`, { waitUntil: "domcontentloaded" });
+    await page.getByText(readyText, { exact: true }).waitFor();
+    await page.locator("[data-minimap-node-index='0']").waitFor();
+  };
+
+  const openPreviewAt = async (page, nodeIndex) => {
+    const node = page.locator(`[data-minimap-node-index='${nodeIndex}']`);
+    await node.waitFor();
+    const rect = await node.boundingBox();
+    assert.ok(rect, `minimap node ${nodeIndex} has a box`);
+    await page.mouse.click(rect.x + rect.width / 2, rect.y + rect.height / 2);
+    const preview = page.locator("[data-minimap-preview-box]");
+    await preview.waitFor({ state: "attached", timeout: 10_000 });
+    return preview;
+  };
+
+  const readPreview = async (preview) => {
+    const turn = preview.locator("[data-minimap-preview-index]").filter({ hasText: text(4998) });
+    await turn.waitFor({ state: "attached", timeout: 10_000 });
+    const earlier = preview.locator("[data-minimap-preview-earlier]");
+    const earlierRows = await earlier.count();
+    return {
+      number: await turn.locator("span[aria-hidden='true']").first().textContent(),
+      earlierRows,
+      earlier: earlierRows === 1 ? await earlier.textContent() : null,
+    };
+  };
+
+  const readTurnNumber = async (preview, messageText) => {
+    const turn = preview.locator("[data-minimap-preview-index]").filter({ hasText: messageText });
+    await turn.waitFor({ state: "attached", timeout: 10_000 });
+    return turn.locator("span[aria-hidden='true']").first().textContent();
+  };
+
+  // Numbering and the earlier count move when a page commits and the hook
+  // settles; poll the real preview state instead of measuring once (the same
+  // load-sensitive rule the suite already applies to prepend anchoring).
+  const readPreviewUntil = async (preview, expected, timeout = 5_000) => {
+    const deadline = Date.now() + timeout;
+    let observed = await readPreview(preview);
+    while (Date.now() < deadline) {
+      observed = await readPreview(preview);
+      if (observed.number === expected.number
+        && observed.earlierRows === expected.earlierRows
+        && observed.earlier === expected.earlier) break;
+      await delay(100);
+    }
+    return observed;
+  };
+
+  const scrollTopOfChat = (page) => page.evaluate(() => {
+    const sentinel = Array.from(document.querySelectorAll("div")).find((element) =>
+      element.textContent === "Scroll up to load earlier messages" && element.children.length === 0);
+    let node = sentinel;
+    let container = null;
+    while (node) {
+      const style = getComputedStyle(node);
+      if ((style.overflowY === "auto" || style.overflowY === "scroll") && node.scrollHeight > node.clientHeight) {
+        container = node;
+        break;
+      }
+      node = node.parentElement;
+    }
+    return container ? container.scrollTop : null;
+  });
+
+  const run = async (id, title, body) => {
+    const page = await context.newPage();
+    page.setDefaultTimeout(30_000);
+    try {
+      await body(page);
+      console.log(`PASS ${id}`);
+    } catch (error) {
+      console.error(`FAIL ${id} (${title}): ${error?.message ?? error}`);
+      process.exitCode = 1;
+    } finally {
+      await page.close().catch(() => {});
+    }
+  };
+
+  try {
+    await run(
+      "S1",
+      "First page numbers turn 2500, reports 2475 earlier turns, and opens the preview by click",
+      async (page) => {
+        await openSession(page, LONG, text(4999));
+        const node = page.locator("[data-minimap-node-index='0']");
+        const rect = await node.boundingBox();
+        assert.ok(rect);
+        const nodeCenter = { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+
+        await page.mouse.move(nodeCenter.x, nodeCenter.y);
+        assert.equal(await page.locator("[data-minimap-preview-box]").count(), 0,
+          "hovering the rail must not open the preview");
+
+        // Clicking node 0 jumps the chat to the first loaded turn, which can put
+        // the top sentinel in view and load a page before the first-page values
+        // are read (grill-qa round 2). Hold that one request until the read is
+        // done, so the assertion observes the first page, not the paged one.
+        let release;
+        const heldPage = new Promise((resolve) => { release = resolve; });
+        let held = false;
+        const contextRoute = `**/api/sessions/${LONG}/context?*`;
+        await page.route(contextRoute, async (route) => {
+          if (!held && new URL(route.request().url()).searchParams.has("before")) {
+            held = true;
+            await heldPage;
+          }
+          await route.continue().catch(() => {});
+        });
+        try {
+          await page.mouse.click(nodeCenter.x, nodeCenter.y);
+          const preview = page.locator("[data-minimap-preview-box]");
+          await preview.waitFor({ state: "attached", timeout: 10_000 });
+          const expectedFirstPage = {
+            number: "2500",
+            earlierRows: 1,
+            earlier: "Earlier turns not loaded: 2475. Click to load",
+          };
+          assert.deepEqual(await readPreviewUntil(preview, expectedFirstPage), expectedFirstPage,
+            "the first page must number from the branch's first turn and report the unloaded count");
+        } finally {
+          release();
+          await page.unroute(contextRoute).catch(() => {});
+        }
+      },
+    );
+
+    await run(
+      "S2",
+      "Loading older pages keeps turn 2500 and lowers the earlier-turns count",
+      async (page) => {
+        await openSession(page, LONG, text(4999));
+        const sentinel = page.getByText("Scroll up to load earlier messages", { exact: true });
+        await sentinel.waitFor({ state: "attached" });
+        const olderResponses = [];
+        page.on("response", (response) => {
+          const url = new URL(response.url());
+          if (url.pathname === `/api/sessions/${LONG}/context` && url.searchParams.has("before")) {
+            olderResponses.push(response);
+          }
+        });
+        for (let turn = 0; turn < 2; turn++) {
+          const responsePromise = page.waitForResponse((response) =>
+            new URL(response.url()).pathname === `/api/sessions/${LONG}/context`);
+          await sentinel.evaluate((element) => element.scrollIntoView({ block: "start", behavior: "instant" }));
+          const response = await responsePromise;
+          const older = (await response.json()).context;
+          const firstMessage = older.messages.find((message) => message.role === "user")?.content;
+          assert.equal(typeof firstMessage, "string", "Older page must contain user messages");
+          await page.getByText(firstMessage, { exact: true }).waitFor({ state: "attached" });
+          await page.getByText(text(4999), { exact: true })
+            .evaluate((element) => element.scrollIntoView({ block: "end", behavior: "instant" }));
+        }
+        assert.equal(olderResponses.length, 2, "two older pages must have loaded");
+        const oldest = Number(new URL(olderResponses.at(-1).url()).searchParams.get("before")?.slice(1)) - 50;
+        const nodes = page.locator("[data-minimap-node-index]");
+        const nodeCount = await nodes.count();
+        assert.ok(nodeCount > 0);
+        const preview = await openPreviewAt(page, nodeCount - 1);
+        const expectedPaged = {
+          number: "2500",
+          earlierRows: 1,
+          earlier: `Earlier turns not loaded: ${oldest / 2}. Click to load`,
+        };
+        assert.deepEqual(await readPreviewUntil(preview, expectedPaged), expectedPaged,
+          "loading older pages must not renumber minimap turns");
+      },
+    );
+
+    await run(
+      "S3",
+      "Clicking the earlier-turns row scrolls to the top, loads one page, keeps numbers, and closes the preview",
+      async (page) => {
+        await openSession(page, LONG, text(4999));
+        const sentinel = page.getByText("Scroll up to load earlier messages", { exact: true });
+        await sentinel.waitFor({ state: "attached" });
+        const olderResponses = [];
+        page.on("response", (response) => {
+          const url = new URL(response.url());
+          if (url.pathname === `/api/sessions/${LONG}/context` && url.searchParams.has("before")) {
+            olderResponses.push(response);
+          }
+        });
+        const nodes = page.locator("[data-minimap-node-index]");
+        const nodeCount = await nodes.count();
+        const preview = await openPreviewAt(page, nodeCount - 1);
+        const before = await readPreview(preview);
+        assert.equal(before.number, "2500", "the first page starts at turn 2500");
+        assert.equal(before.earlier, "Earlier turns not loaded: 2475. Click to load");
+        const firstLoadedBefore = await readTurnNumber(preview, text(4950));
+
+        const earlierRow = preview.locator("[data-minimap-preview-earlier]");
+        await earlierRow.waitFor({ state: "attached", timeout: 5_000 });
+        const olderPage = page.waitForResponse((response) => {
+          const url = new URL(response.url());
+          return url.pathname === `/api/sessions/${LONG}/context` && url.searchParams.has("before");
+        });
+        // the owner answer (S3=A): the click moves the
+        // chat toward the top through the sentinel; the existing prepend
+        // anchoring then keeps the previous first row in view, so scrollTop is
+        // not asserted to stay 0 after the page lands.
+        const startTop = await scrollTopOfChat(page);
+        await page.evaluate(() => {
+          const sentinel = Array.from(document.querySelectorAll("div")).find((element) =>
+            element.textContent === "Scroll up to load earlier messages" && element.children.length === 0);
+          let node = sentinel;
+          while (node) {
+            const style = getComputedStyle(node);
+            if ((style.overflowY === "auto" || style.overflowY === "scroll") && node.scrollHeight > node.clientHeight) break;
+            node = node.parentElement;
+          }
+          window.__wb232MinScrollTop = node ? node.scrollTop : null;
+          node?.addEventListener("scroll", () => {
+            window.__wb232MinScrollTop = Math.min(window.__wb232MinScrollTop, node.scrollTop);
+          });
+        });
+        await earlierRow.click();
+        await preview.waitFor({ state: "detached", timeout: 10_000 });
+        const response = await olderPage;
+        const older = (await response.json()).context;
+        assert.equal(older.turnsBefore, 2450, "one older page leaves 2,450 unloaded turns");
+        const firstMessage = older.messages.find((message) => message.role === "user")?.content;
+        assert.equal(typeof firstMessage, "string");
+        await page.getByText(firstMessage, { exact: true }).waitFor({ state: "attached" });
+
+        const minTop = await page.evaluate(() => window.__wb232MinScrollTop);
+        assert.ok(typeof startTop === "number" && startTop > 0, "the chat starts below the top");
+        assert.ok(typeof minTop === "number" && minTop < startTop,
+          "clicking the earlier row must move the chat toward the top (through the sentinel)");
+
+        const loaded = olderResponses.length;
+        await delay(500);
+        assert.equal(olderResponses.length, loaded, "click-to-top must load exactly one older page");
+        assert.equal(loaded, 1, "click-to-top must load one older page");
+
+        const reopened = await openPreviewAt(page, nodeCount - 1);
+        const expectedAfterTop = {
+          number: "2500",
+          earlierRows: 1,
+          earlier: "Earlier turns not loaded: 2450. Click to load",
+        };
+        assert.deepEqual(await readPreviewUntil(reopened, expectedAfterTop), expectedAfterTop,
+          "loaded turn numbers must stay while the unloaded count drops");
+        assert.equal(await readTurnNumber(reopened, text(4950)), firstLoadedBefore,
+          "the already-loaded first turn must keep its number");
+      },
+    );
+
+    await run(
+      "S4",
+      "The rail stub and earlier-turns row appear only while earlier turns are unloaded",
+      async (page) => {
+        await openSession(page, LONG, text(4999));
+        const stub = page.locator("[data-minimap-earlier]");
+        assert.equal(await stub.count(), 1, "a dotted stub must sit above the first rail node");
+        const nodes = page.locator("[data-minimap-node-index]");
+        assert.equal(await nodes.count(), 25, "no placeholder node may be drawn for an unloaded turn");
+        const stubRect = await stub.boundingBox();
+        const firstNodeRect = await nodes.first().boundingBox();
+        assert.ok(stubRect && firstNodeRect);
+        assert.ok(stubRect.y + stubRect.height <= firstNodeRect.y + firstNodeRect.height / 2 + 1,
+          "the stub must sit above the first node");
+
+        // the owner answer (S4): the 3-entry BRANCH
+        // session does not scroll, so no rail renders there; assert only that
+        // zero unloaded turns show no stub.
+        await page.goto(`${base}/?session=${BRANCH}`, { waitUntil: "domcontentloaded" });
+        await page.getByText("Active branch answer", { exact: true }).waitFor();
+        assert.equal(await page.locator("[data-minimap-earlier]").count(), 0,
+          "zero unloaded turns must show no stub");
+      },
+    );
+  } finally {
+    await context.close().catch(() => {});
+  }
 }
 
 let server;
@@ -245,6 +549,7 @@ try {
   }
 
   browser = await chromium.launch();
+  await checkMinimapTurns({ browser, base });
   for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 }]) {
     // pi#102 blocked-round correction (layered by e2e-author after the
     // recovery script): the archive pass drives the UI through a relative
@@ -573,9 +878,11 @@ try {
       if (await showSidebar.isVisible()) await showSidebar.click();
       await checkModelDiscovery(page);
     }
+    await checkModelContext(page);
     await page.goto(`${base}/?session=${CODE_BACKGROUND}`, { waitUntil: "domcontentloaded" });
     await page.locator(".markdown-code-block pre").waitFor();
     await checkCodeBackground(page);
+    await checkModelSelector(page, { base, project, artifacts });
     // wi_tN1cVXKf1VIr: the archive acceptance pass (authored pre-code; see
     // e2e/archive.mjs). Desktop-only, and self-guarding — a failing archive
     // scenario logs FAIL and sets the exit code without aborting the rest

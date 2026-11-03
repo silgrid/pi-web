@@ -1,3 +1,4 @@
+// carries: deploy-piweb.sh, bin/pi-web-deploy.js
 // pi#107 variants e2e: the tunnel-idempotence acceptance cases of the work
 // item that the main repro (e2e/deploy-tunnel.mjs, quick mode) does not
 // cover:

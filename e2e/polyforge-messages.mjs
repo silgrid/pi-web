@@ -1,3 +1,4 @@
+// carries: components/Polyforge*, components/polyforge-*, hooks/usePolyforge*, lib/polyforge*, app/api/polyforge/*
 // — pi-web Messages panel redo (Slack-like), dual-user stub-pf e2e.
 //
 // Originally authored for against artifacts/spec.md; this revision
@@ -38,6 +39,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
 import { startNextServer } from "./next-server.mjs";
+import { NAV_MS } from "./timeouts.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 assert.ok(!existsSync(join(root, process.env.PI_WEB_DIST_DIR || ".next", "dev/lock")), "Run in a checkout without an active dev server");
@@ -322,7 +324,8 @@ const T = {
   PM13: "PM13: the conversation list is a right-hand column of 120–220px with avatars, names, unread badges, 单聊/群聊 sections, 尚无群聊, contact rows and no compose entry",
   PM14: "PM14: the open conversation header shows the peer's avatar and display name",
   PM15: "PM15: own bubbles sit right without attribution while peer bubbles sit left with avatar and name on the first of a run, keeping timestamps, anchor quotes and reply quotes",
-  PM16: "PM16: desktop keeps two columns at the default and the minimum dock width and mobile stays a single view with a back control",
+  // owner 有意变更: mobile keeps the desktop two columns (was a single view).
+  PM16: "PM16: desktop keeps two columns at the default and the minimum dock width and mobile keeps the same two columns with a back control",
   PM17: "PM17: the list offers the existing peers and silent contacts by display name, a peer row sends to its id and a first contact is its silent contact row",
   PM18: "PM18: the conversation route keeps peer as the send address and adds peer_name, and a send still addresses the peer id",
 };
@@ -358,8 +361,8 @@ async function openPage(options = {}) {
   page.on("pageerror", (error) => errors.push(error.message));
   page.on("console", (event) => { if (event.type() === "error") errors.push(event.text()); });
   page.on("response", (r) => { if (r.url().startsWith(base) && r.status() >= 500) errors.push(`${r.status()} ${r.url()}`); });
-  await page.goto(`${base}/?session=${SESSION}`, { waitUntil: "domcontentloaded", timeout: 60_000 });
-  await page.getByText("E2E pf messages host session").first().waitFor({ state: "attached", timeout: 60_000 });
+  await page.goto(`${base}/?session=${SESSION}`, { waitUntil: "domcontentloaded", timeout: NAV_MS });
+  await page.getByText("E2E pf messages host session").first().waitFor({ state: "attached", timeout: NAV_MS });
   return page;
 }
 const get = (path) => fetch(`${base}${path}`, { signal: AbortSignal.timeout(60_000) }).then(async (r) => ({ status: r.status, text: await r.text() }));
@@ -536,6 +539,37 @@ const listColumn = (panel) => panel.evaluate((root) => {
 });
 
 const clamp = (value, low, high) => Math.min(high, Math.max(low, value));
+// The desktop list's resize separator; the mobile sheet
+// renders none.
+const listSeparator = (panel) => panel.getByRole("separator", { name: /调整会话列表宽度|Resize conversation list/ }).first();
+
+const waitForColumnWidth = async (panel, predicate, what) => {
+  const deadline = Date.now() + 10_000;
+  let width = 0;
+  while (Date.now() < deadline) {
+    width = (await listColumn(panel))?.width ?? 0;
+    if (predicate(width)) return width;
+    await delay(50);
+  }
+  throw new Error(`${what}: the list width stayed ${Math.round(width)}px`);
+};
+
+// Drag the list's left divider by deltaX (negative widens, positive
+// narrows). The handle straddles the divider and spans the list's height.
+const dragListSeparator = async (page, panel, deltaX) => {
+  const handle = await requireVisible(listSeparator(panel), "the list resize separator");
+  const box = await handle.boundingBox();
+  assert.ok(box, "the list resize separator must have a box");
+  const x = box.x + box.width / 2;
+  const y = box.y + box.height / 2;
+  await page.mouse.move(x, y);
+  await page.mouse.down();
+  await page.mouse.move(x + deltaX, y, { steps: 8 });
+  await page.mouse.up();
+};
+
+const storedListWidth = (page) => page.evaluate(() => localStorage.getItem("pi-web:polyforge-messages-list-width"));
+
 
 try {
   browser = await chromium.launch();
@@ -770,7 +804,10 @@ try {
 
     // A work-item anchor switches to Jobs and runs the existing watch read.
     await panel.getByRole("button", { name: /task-42/ }).or(panel.getByRole("link", { name: /task-42/ })).first().click();
-    await panel.getByText("WATCH-DETAIL-39", { exact: false }).first().waitFor({ timeout: 15_000 });
+    // owner 有意变更 the current step moved from the old detail header's visible text into
+    // the title row's hover; the same guarantee (this work item's watch read opened its detail) is read from
+    // the title row carrying the slug with the watched current step on hover.
+    await panel.locator('[data-pf-detail-title][title*="WATCH-DETAIL-39"]').getByText("task-42").first().waitFor({ timeout: 15_000 });
     assert.ok(calls().some((a) => a[0] === "watch" && a[1] === "task-42"), "the anchor must run the existing watch read for task-42");
     // The deep reference exposes only its work-item part.
     await messagesTab(page); await openConversation(page, ANCHOR);
@@ -995,6 +1032,87 @@ try {
     assert.ok(ellipsis.clipped, "a long display name must be ellipsized inside the 120–220px column");
   }));
 
+  // owner 有意变更 the desktop list is drag-resizable from its
+  // left divider, bounded by 120px…min(480px, panel−200px), defaulting to the
+  // old 35% clamp, and its width survives a reload.
+  seed({ conversations: [ANCHOR], acked: { conv_anchor: 4 } });
+  await check(T.PM13, "PM13 desktop list resize: drag bounds, keyboard reset and reload persistence", () => withPage(async (page) => {
+    await openDock(page); await messagesTab(page); await openConversation(page, ANCHOR);
+    const panel = dock(page);
+    const panelBox = await panel.boundingBox();
+    assert.ok(panelBox, "the dock must have a box");
+    const defaultWidth = await waitForColumnWidth(panel, (width) => width >= 118 && width <= 222, "the untouched default list width");
+    const expectedDefault = clamp(panelBox.width * 0.35, 120, 220);
+    assert.ok(Math.abs(defaultWidth - expectedDefault) <= 2,
+      `an untouched desktop list keeps the 35% default (${Math.round(defaultWidth)} vs ${Math.round(expectedDefault)}px)`);
+
+    const handle = await requireVisible(listSeparator(panel), "the desktop list resize separator");
+    assert.equal(await handle.getAttribute("role"), "separator", "the list divider is a separator");
+    assert.equal(await handle.getAttribute("aria-valuemin"), "120", "the separator advertises the 120px minimum");
+    const max = Math.min(480, Math.round(panelBox.width - 200));
+    const ariaMax = Number(await handle.getAttribute("aria-valuemax"));
+    assert.ok(Math.abs(ariaMax - max) <= 2, `the separator's max is min(480, panel−200) (${ariaMax} vs ${max})`);
+    assert.ok(Math.abs(Number(await handle.getAttribute("aria-valuenow")) - defaultWidth) <= 2, "aria-valuenow is the shown width");
+
+    // Without a stored choice the default still follows the panel: at the
+    // dock's 340px minimum it is 35% clamped to 120, and it returns when the
+    // dock does. (The dock's own Enter resets the dock to 460.)
+    const dockHandle = await requireVisible(page.locator('[data-resize-handle="polyforge-dock"]').first(), "the dock resize handle");
+    await dockHandle.focus();
+    await dockHandle.press("Home");
+    const narrowPanelBox = await panel.boundingBox();
+    assert.ok(narrowPanelBox, "the narrowed dock must have a box");
+    const narrowDefault = clamp(narrowPanelBox.width * 0.35, 120, 220);
+    await waitForColumnWidth(panel, (width) => Math.abs(width - narrowDefault) <= 2,
+      `the untouched default at the ${Math.round(narrowPanelBox.width)}px dock (${Math.round(narrowDefault)}px)`);
+    const narrowColumn = await listColumn(panel);
+    assert.ok(narrowPanelBox.width - narrowColumn.width >= 198,
+      `the chat pane must keep at least 200px at the dock minimum (${Math.round(narrowPanelBox.width - narrowColumn.width)}px)`);
+    await dockHandle.press("Enter");
+    await waitForColumnWidth(panel, (width) => Math.abs(width - expectedDefault) <= 2, "the untouched default after restoring the dock");
+
+    // Dragging left widens the list; the chat pane keeps its 200px floor.
+    await dragListSeparator(page, panel, -(defaultWidth < max - 70 ? 70 : Math.max(0, max - defaultWidth - 10)));
+    const widened = await waitForColumnWidth(panel, (width) => width > defaultWidth + 40, "a left drag widening the list");
+    assert.ok(widened <= max + 2, `the widened list ${Math.round(widened)}px must stay within ${max}px`);
+    const widenedBox = await listColumn(panel);
+    assert.ok(panelBox.width - widenedBox.width >= 198,
+      `the chat pane must keep at least 200px after the drag (${Math.round(panelBox.width - widenedBox.width)}px)`);
+
+    // Past the cap: the display and the saved value both stop at the cap.
+    await dragListSeparator(page, panel, -400);
+    const capped = await waitForColumnWidth(panel, (width) => Math.abs(width - max) <= 2, "a drag past the maximum");
+    const cappedBox = await listColumn(panel);
+    assert.ok(panelBox.width - cappedBox.width >= 198,
+      `the chat pane must keep at least 200px at the maximum (${Math.round(panelBox.width - cappedBox.width)}px)`);
+    assert.equal(await storedListWidth(page), String(Math.round(capped)), "the capped drag stores the width it ended at");
+
+    // Past the minimum: 120px wins.
+    await dragListSeparator(page, panel, 400);
+    const floored = await waitForColumnWidth(panel, (width) => width >= 118 && width <= 122, "a drag past the minimum");
+    assert.ok(floored >= 118 && floored <= 122, `the list must clamp at 120px, got ${Math.round(floored)}`);
+    assert.equal(await storedListWidth(page), "120", "the minimum drag stores 120px");
+
+    // Keyboard: End reaches the same cap, Enter resets and stores the default.
+    await handle.focus();
+    await handle.press("End");
+    await waitForColumnWidth(panel, (width) => Math.abs(width - max) <= 2, "End at the maximum");
+    await handle.press("Enter");
+    const reset = await waitForColumnWidth(panel, (width) => Math.abs(width - expectedDefault) <= 2, "Enter reset to the default");
+    assert.equal(await storedListWidth(page), String(Math.round(reset)), "the reset stores the default it returns to");
+
+    // A fresh drag is remembered across a reload (same browser context).
+    await dragListSeparator(page, panel, -30);
+    const chosen = await waitForColumnWidth(panel, (width) => width > reset + 20 && width < max - 1, "a drag committing a chosen width");
+    const chosenStored = Number(await storedListWidth(page));
+    assert.equal(chosenStored, Math.round(chosen), "the drag commits the integer px it ended at");
+    await page.reload({ waitUntil: "domcontentloaded", timeout: NAV_MS });
+    await page.getByText("E2E pf messages host session").first().waitFor({ state: "attached", timeout: NAV_MS });
+    await openDock(page); await messagesTab(page); await openConversation(page, ANCHOR);
+    const reloaded = dock(page);
+    await waitForColumnWidth(reloaded, (width) => Math.abs(width - chosenStored) <= 1, "the stored width after a reload");
+  }, {}));
+
   seed({ conversations: [BUBBLES], acked: { conv_bubbles: 5 } });
   await check(T.PM14, "PM14 header shows avatar and name", () => withPage(async (page) => {
     await openDock(page); await messagesTab(page); await openConversation(page, BUBBLES);
@@ -1068,7 +1186,7 @@ try {
   }));
 
   seed();
-  await check(T.PM16, "PM16 desktop two columns and mobile single view", () => withPage(async (page) => {
+  await check(T.PM16, "PM16 desktop two columns and mobile two columns", () => withPage(async (page) => {
     await openDock(page); await messagesTab(page); await openConversation(page, ANCHOR);
     const panel = dock(page);
     const dockBox = await panel.boundingBox();
@@ -1098,17 +1216,42 @@ try {
   }, {}));
 
   seed({ conversations: [DOT, ANCHOR], acked: { conv_anchor: 4, conv_dot: 1 } });
-  await check(T.PM16, "PM16 mobile single view with a back control", () => withPage(async (page) => {
+  // owner 有意变更: the mobile sheet keeps the
+  // desktop two-pane layout — the list column (clamped width, divider) stays
+  // beside the chat pane before, while and after a conversation is open, and
+  // the ← back control still closes the conversation (was a single view).
+  await check(T.PM16, "PM16 mobile two columns with a back control", () => withPage(async (page) => {
     await openDock(page); await messagesTab(page);
     const panel = dock(page);
-    await requireVisible(sectionDirect(panel), "the list view on mobile");
-    assert.equal(await historyRegion(panel).count(), 0, "mobile must show one view at a time (the list, no history)");
+    await requireVisible(sectionDirect(panel), "the list column on mobile");
+    assert.equal(await historyRegion(panel).count(), 0, "nothing is auto-opened on mobile");
+    const sheet = await panel.boundingBox();
+    const empty = await (await requireVisible(selectEmpty(panel), "the select-a-conversation pane on mobile")).boundingBox();
+    const column = await listColumn(panel);
+    assert.ok(sheet && empty && column, "the sheet, the empty pane and the list column must render");
+    assert.ok(column.x >= empty.x + empty.width - 8, "the list column sits right of the empty chat pane on mobile");
+    const expected = clamp(sheet.width * 0.35, 120, 220);
+    assert.ok(Math.abs(column.width - expected) <= 22, `the mobile column ${Math.round(column.width)}px must resolve from the clamp (${Math.round(expected)}px)`);
+    assert.equal(await listSeparator(panel).count(), 0, "the mobile sheet renders no list resize separator");
+    const divider = await panel.evaluate((root) => {
+      const header = [...root.querySelectorAll("*")].find((node) => (node.textContent || "").trim() === "单聊");
+      for (let node = header; node && node !== root; node = node.parentElement) {
+        const text = node.textContent || "";
+        if (text.includes("单聊") && text.includes("群聊") && text.includes("尚无群聊")) return parseFloat(getComputedStyle(node).borderLeftWidth) || 0;
+      }
+      return 0;
+    });
+    assert.ok(divider >= 1, `the mobile list column keeps the desktop divider (${divider}px)`);
     await panel.getByText("Dot Rowan", { exact: true }).or(panel.getByText(DOT.peer, { exact: false })).first().click();
-    await requireVisible(historyRegion(panel), "the chat view on mobile");
-    assert.equal(await panel.getByText("单聊", { exact: true }).count(), 0, "the chat view must replace the list on mobile");
+    const history = await (await requireVisible(historyRegion(panel), "the chat pane on mobile")).boundingBox();
+    await requireVisible(sectionDirect(panel), "the list column beside the open chat on mobile");
+    const openColumn = await listColumn(panel);
+    assert.ok(history && openColumn && openColumn.x >= history.x + history.width - 8, "the list and the open chat are two columns on mobile");
     await requireVisible(panel.getByRole("button", { name: /←/ }).first(), "the mobile back control").then((back) => back.click());
-    await requireVisible(sectionDirect(panel), "the list view after going back");
-    assert.equal(await historyRegion(panel).count(), 0, "going back must return to the list-only view");
+    await historyRegion(panel).waitFor({ state: "detached", timeout: 10_000 });
+    assert.equal(await historyRegion(panel).count(), 0, "the back control closes the conversation");
+    await requireVisible(sectionDirect(panel), "the list column after going back");
+    await requireVisible(selectEmpty(panel), "the select-a-conversation pane after going back");
   }, { viewport: { width: 600, height: 900 } }));
 
   // The picker and the typed id are gone (ruling 5 removes the feature): the

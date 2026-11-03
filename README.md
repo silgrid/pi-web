@@ -13,6 +13,10 @@ This is the **@silgrid/pi-web** fork of the upstream pi-web project, adding spli
 | 0.0.1 | 0.9.1 | `ffb2daf` |
 | 0.0.4 | 0.9.1 | `1eb5e66` |
 | 0.0.17 | 0.9.3 | `96966e5` (merge of piupstream/main) |
+| 0.1.6 | 0.11.0 | `c9e1513` |
+| 0.1.6 | 0.12.1 | `f83b1a5` |
+| 0.1.6 | 0.12.2 | `b017cd4` |
+| 0.1.6 | 0.13.0 | `d128bae` (merge `ca5fae9`) |
 
 Update one row per upstream merge so the table stays the mapping between the fork line and the upstream baseline.
 
@@ -23,8 +27,9 @@ Update one row per upstream merge so the table stays the mapping between the for
 - **Session workspace**: browse, resume, rename, export, and delete conversations grouped by project, with running state, context usage, cost, and compaction details.
 - **Two ways to branch**: **New session** creates an independent session file from an earlier message; **Edit from here** creates a branch inside the current session.
 - **Project file tools**: browse and upload files, inspect Git diffs, and preview source, Markdown, images, audio, PDFs, and DOCX files with automatic refresh.
-- **Git worktrees**: switch checkouts from the sidebar while keeping sessions from the same repository grouped together.
 - **Web-based configuration**: manage provider login and API keys, models, model tests, plugin packages, and skills without leaving Pi Web.
+- **Polyforge panel**: with a local `pf` on the machine, a topbar button opens a dock panel (a bottom sheet on phones) for Polyforge: Jobs cards and a job detail with its step graph and whole-job execution progress, Tasks, the 工单列表 work item list, project Memory, and Messages with project-grouped contacts and member management. See [docs/agents/polyforge-panel.md](docs/agents/polyforge-panel.md).
+- **claude sessions**: a fresh composer picks the pi or the claude harness; a claude session keeps a fixed model alias and a `read-only` or `writable` tool preset for its life, and runs claude with its own config dir, `<pi agent dir>/claude`. See [docs/agents/claude-sessions.md](docs/agents/claude-sessions.md).
 - **English, Simplified Chinese, and Traditional Chinese UI**: Pi Web follows the browser language initially and provides a language switcher in the top bar.
 
 ## Quick Start
@@ -106,36 +111,58 @@ A non-loopback bind is refused before any install or tmux change unless both
 The error names the missing variables and the old service keeps running.
 
 After the swap, a deploy that has both `PIWEB_PORT` and `PI_WEB_PASSWORD` probes
-the configured port: `GET /login` must answer 200 and an anonymous
-`GET /api/sessions` must answer 401 within 20 seconds. A failed probe exits 3,
-so the deploy lane reports `state=changed` instead of `state=deployed`; an
-unreachable or unauthenticated service is never reported as a successful
-deploy. The probe needs `curl` on the deploy host (a script dependency, next to
-`bash`, `tmux` and `npm`): without it the probe fails at once with an error
-naming `curl` (exit 3, `state=changed`) instead of blaming the service. The
-probe runs only when both `PIWEB_PORT` and `PI_WEB_PASSWORD` are set, so a
-loopback deploy with a port but no password gets no reachability check.
+the configured port: `GET /login` must answer 200, an anonymous
+`GET /api/sessions` must answer 401, and an authenticated `GET /` must answer a
+non-5xx, all within 20 seconds. The probe logs in with
+`POST /api/web-auth` and a session cookie (Basic auth only works on API
+paths), writing the password-bearing JSON body to a temporary `0600` file from
+stdin so it never appears on a command line or in a log. A failed probe exits
+3, so the deploy lane reports `state=changed` instead of `state=deployed`; an
+unreachable, unauthenticated or broken-logged-in service is never reported as
+a successful deploy. The probe needs `curl` on the deploy host (a script
+dependency, next to `bash`, `tmux`, `npm` and `node`): without it the probe
+fails at once with an error naming `curl` (exit 3, `state=changed`) instead of
+blaming the service. The probe runs only when both `PIWEB_PORT` and
+`PI_WEB_PASSWORD` are set, so a loopback deploy with a port but no password
+gets no reachability check.
 
 The deploy then checks that the pi-web it serves is the pi-web it just
-installed. Three points must agree: the package `command -v pi-web` resolves to
-(symlinks followed), that package's version against the version npm just wrote
-under its global root (`npm root -g`, falling back to `npm ls -g`), and the
-package of the script the running `piweb` loop process executes. The check
-waits for the loop's first process and compares up to 3 times within 30
-seconds. Any disagreement prints exactly one
-`warn: serving <old>, installed <new>` line (`unknown` for a point that cannot
-be read), e.g. when npm installed into a prefix whose `bin` is not on the
-service `PATH`. The warning is advisory: the exit code is unchanged and the
-deploy lane still reports `state=deployed`. When all three agree the deploy
-prints `==> Served == installed: pi-web <version> (<path>)`.
+installed. The restart-loop command puts the global install's `bin` directory
+first on its own `PATH`, so neither the deploy caller's `PATH` nor a later
+`tmux respawn-window` from a hostile shell decides which package runs.
+Everything pi-web spawns (agent shell sessions included) then resolves through
+that same prefix-first `PATH`, so same-named tools from the installed prefix
+can shadow ones later on the caller's `PATH`.
+After the loop's first process is up, the package of the script that process
+executes must equal the package npm just wrote under its global root
+(`npm root -g`), **directory and version**, compared up to 3 times within 30
+seconds. A mismatch — including an old prefix that happens to carry the same
+version — prints the served and installed packages and exits 3, so the lane
+reports `state=changed`, never `state=deployed`. Only when npm cannot report
+its global root does the older version-only advisory remain: one
+`warn: serving <old>, installed <new>` line with the exit code unchanged.
+When the packages agree the deploy prints
+`==> Served == installed: pi-web <version> (<path>)`.
+
+The same loop command also pins the `pf` the service will run. The deploy
+takes a non-empty `PF_BIN` from the deploying shell, else the tmux server's
+global `PF_BIN`, else `pf` found on the loop's pinned `PATH`, sets that value
+on the loop's own environment, and prints exactly one line:
+`==> pf: <absolute path> (<pf --version>)`. A later hostile
+`tmux respawn-window` therefore cannot drop pf either, and the printed line
+names what the service actually uses. When no pf is found, or a configured
+`PF_BIN` is not executable, the deploy prints
+`==> pf: none found (<reason>)` instead; the Polyforge panel then reports
+"not installed" until a pf is installed or `PF_BIN` is set correctly.
 
 The deploy then probes the TLS edge of the first `PI_WEB_ALLOWED_HOSTS` entry
 with a single `https` `GET /` (5-second timeout; any HTTP answer, a redirect
 included, counts as reachable). The edge (e.g. a reverse proxy) is a separate
 service, so a failure only prints `warn: TLS edge unreachable (<host>)`: the
 exit code is unchanged and the deploy lane still reports `state=deployed`. An
-empty `PI_WEB_ALLOWED_HOSTS` skips the edge probe with one line, and so does a
-host without `curl`: `warn: TLS edge probe skipped: curl is not installed (<host>)`.
+empty `PI_WEB_ALLOWED_HOSTS` skips the edge probe with one line naming it,
+`warn: TLS edge probe skipped: PI_WEB_ALLOWED_HOSTS is not set (no edge host to probe)`,
+and so does a host without `curl`: `warn: TLS edge probe skipped: curl is not installed (<host>)`.
 
 For container entrypoint autostart, create the tmux session at container start
 (e.g. from an entrypoint script or shell rc):
@@ -299,7 +326,6 @@ Closed-app Web Push on Android goes through FCM, which needs a VPN in mainland C
 - **Filesystem access**: Pi Web must be able to read the agent data directory and the working directories recorded by its sessions. Run Pi Web in the same filesystem environment as pi when sharing existing sessions.
 - **Shared configuration**: the Models panel uses pi's model, settings, and credential storage, so changes are visible to both interfaces. An open session applies a saved edit of its model when you select the model again.
 - **File access boundary**: the file browser is limited to working directories selected in Pi Web and project or session roots it already knows about; it is not a general filesystem browser.
-- **Git worktrees**: see [Worktrees in Pi Web](./docs/worktrees.md) for switcher visibility, worktree creation, and removal behavior.
 
 ### Downstream Session Context Menu
 
@@ -331,6 +357,9 @@ Server-side Pi extensions with detached work can prevent automatic idle
 session eviction through the versioned global registry:
 
 ```js
+// Projection grep exemption: the key's literal spelling names
+// the upstream package, so this sample reaches it only through the exported
+// SESSION_LIVENESS_REGISTRY_KEY and Symbol.for(...); never paste the literal.
 // SESSION_LIVENESS_REGISTRY_KEY: the registry key string exported by
 // lib/session-liveness.ts (the upstream-compatible v1 key); use its value.
 const liveness = globalThis[Symbol.for(SESSION_LIVENESS_REGISTRY_KEY)];

@@ -1,6 +1,7 @@
 import { execFileAsync } from "./exec-file";
 import { parsePfError } from "./polyforge-config-write";
 import { isPolyforgeVersionBelowMinimum } from "./polyforge-detect";
+import { polyforgePfBin } from "./polyforge-pf-bin";
 import { probePolyforgeVersion } from "./polyforge-status";
 import { workspaceProjects } from "../components/polyforge-config-helpers";
 import {
@@ -295,7 +296,7 @@ export function sanitizeMemoryDetail(raw: unknown): PolyforgeMemoryDetail | null
 
 async function runPfJson(argv: string[], timeoutMs = READ_TIMEOUT_MS): Promise<unknown> {
   try {
-    const { stdout } = await execFileAsync("pf", argv, { timeout: timeoutMs, maxBuffer: SPAWN_MAX_BUFFER });
+    const { stdout } = await execFileAsync(polyforgePfBin(), argv, { timeout: timeoutMs, maxBuffer: SPAWN_MAX_BUFFER });
     return JSON.parse(stdout);
   } catch (error) {
     throw PolyforgeMemoryError.fromSpawnError(error);

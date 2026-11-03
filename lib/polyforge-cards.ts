@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { closeSync, constants, fstatSync, openSync, readdirSync, readSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, join, sep } from "node:path";
+import { basename, isAbsolute, join, sep } from "node:path";
 import { parseFrontmatter } from "./frontmatter";
 import { readRegularFileText } from "./regular-file";
 import { maskPolyforgeCredentials, type PolyforgeJob } from "./polyforge-status";
@@ -11,7 +11,9 @@ import {
   CARD_POLL_PAGE,
   CARD_RESPONSE_MAX_BYTES,
   CARD_RESPONSE_MAX_ENTRIES,
+  PROGRESS_MAX_LINES,
   capCodePoints,
+  composeProgressEventLine,
   formatCardCursor,
   isPolyforgeWorkItemId,
   parseCardCursor,
@@ -20,6 +22,8 @@ import {
   type PolyforgeCardEntry,
   type PolyforgeCardProgress,
   type PolyforgeCardStep,
+  type PolyforgeProgressLine,
+  type PolyforgeProgressSnapshot,
 } from "./polyforge-cards-pure";
 
 /**
@@ -38,8 +42,8 @@ import {
  * - `<capsule>/runtime-state/spawn-journal.jsonl` latest line → the current
  *   step's `harness`, `started_at`, `harness_session` and `transcript`. The
  *   harness's live session file is read first (pi: the newest file under
- *   `<data root>/step-agent-sessions/<encoded capsule>/` written since the
- *   step started; claude: `<data root>/claude-config/projects/<encoded
+ *   `<data root>/step-agent-sessions/<encoded capsule>/`, unless that
+ *   session itself started before the step; claude: `<data root>/claude-config/projects/<encoded
  *   capsule>/<harness_session>.jsonl`), then the journal's `transcript` (the
  *   capsule copy, complete only once the step ends). The job record's own
  *   `transcript` is the job's first step, never the current one, so it is
@@ -51,6 +55,13 @@ import {
  * narration text, credential-masked never a tool call, its
  * name or command/argument, tool results, thinking, user/system prompts. Every failure degrades to an
  * absent field or `available: false`; nothing here throws to the route.
+ *
+ * The job detail's execution-progress face (whole-job since
+ * `readProgressSnapshot`) is a separate, wider projection:
+ * every spawn's transcript as narration plus one masked, truncated
+ * `<name>: <primary argument>` line per tool call (`progressEntries`), merged
+ * with one composed line per retained lifecycle event. It never reaches the
+ * card stream above, whose whitelist stays narration only.
  */
 
 /** Small JSON records (job index, capsule, work item, execution). */
@@ -140,19 +151,9 @@ export interface PolyforgeJobRecord {
   capsuleDir?: string;
 }
 
-/** `runtime-state.json` → wi → its record's capsule dir. */
+/** `runtime-state.json` → wi → its record's capsule dir (`readJobIndex`). */
 export function readJobRecords(root: string): Map<string, PolyforgeJobRecord> {
-  const records = new Map<string, PolyforgeJobRecord>();
-  const jobs = asObject(readJson(join(root, "runtime-state.json")))?.jobs;
-  if (!Array.isArray(jobs)) return records;
-  for (const job of jobs) {
-    const record = asObject(job);
-    const wi = record?.work_item_id;
-    if (!isPolyforgeWorkItemId(wi) || records.has(wi)) continue;
-    const capsuleDir = asString(record?.capsule_dir);
-    records.set(wi, capsuleDir && isAbsolute(capsuleDir) ? { capsuleDir } : {});
-  }
-  return records;
+  return readJobIndex(root).records;
 }
 
 // ---- events and step durations ----
@@ -363,8 +364,13 @@ export function encodeClaudeProjectDir(cwd: string): string {
   return cwd.replace(/[^A-Za-z0-9]/g, "-");
 }
 
-/** Slack for a pi session file created just before the journal's start stamp. */
-const SESSION_START_SLACK_MS = 60_000;
+/** Clock-skew allowance between the spawn journal's `started_at` and the pi
+ *  session's own start stamp (one host, so only a few seconds). */
+const SESSION_START_SKEW_MS = 5_000;
+/** Bytes read from a session file's head for its `{"type":"session"}` record. */
+const SESSION_HEAD_BYTES = 4 * 1024;
+/** pi's session file name: `<ISO timestamp, ':' and '.' → '-'>_<uuid>.jsonl`. */
+const PI_SESSION_FILE_STAMP = /^(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})-(\d{2})-(\d{3})Z_/;
 
 function newestJsonl(dir: string): { path: string; mtime: number } | undefined {
   try {
@@ -379,6 +385,26 @@ function newestJsonl(dir: string): { path: string; mtime: number } | undefined {
   } catch {
     return undefined;
   }
+}
+
+/** When a pi session started, by its own record, not its last write: the
+ *  first record's `timestamp` (type `"session"`), else the ISO timestamp in
+ *  the file name, else the file's mtime. A previous step's
+ *  session can still be written after the next step starts, so its mtime
+ *  says nothing about which step it belongs to. */
+function piSessionStartMs(path: string, mtime: number): number {
+  const head = readSlice(path, 0, SESSION_HEAD_BYTES);
+  const first = head ? parseLine(head.buffer.toString("utf8").split("\n")[0] ?? "") : undefined;
+  if (first?.type === "session") {
+    const stamp = Date.parse(asString(first.timestamp) ?? "");
+    if (Number.isFinite(stamp)) return stamp;
+  }
+  const named = PI_SESSION_FILE_STAMP.exec(basename(path));
+  if (named) {
+    const stamp = Date.parse(`${named[1]}T${named[2]}:${named[3]}:${named[4]}.${named[5]}Z`);
+    if (Number.isFinite(stamp)) return stamp;
+  }
+  return mtime;
 }
 
 /** The current step's transcript and harness, from the spawn journal's
@@ -399,11 +425,13 @@ export function resolveTranscript(root: string, capsuleDir: string): PolyforgeTr
   const roots = [capsuleDir, root];
   const candidates: (string | undefined)[] = [];
   if (harness === "pi") {
-    // The newest session of this capsule, unless it predates the step (the
-    // current step has not written its own yet).
+    // The newest session of this capsule, unless it started before the step
+    // (a previous step's session: the current step has not written its own yet).
     const newest = newestJsonl(join(root, "step-agent-sessions", encodePiSessionDir(capsuleDir)));
     const startedMs = Date.parse(asString(latest?.started_at) ?? "");
-    if (newest && (!Number.isFinite(startedMs) || newest.mtime >= startedMs - SESSION_START_SLACK_MS)) candidates.push(newest.path);
+    if (newest && (!Number.isFinite(startedMs) || piSessionStartMs(newest.path, newest.mtime) >= startedMs - SESSION_START_SKEW_MS)) {
+      candidates.push(newest.path);
+    }
   } else {
     const session = asString(latest?.harness_session);
     if (session && HARNESS_SESSION_PATTERN.test(session)) {
@@ -448,6 +476,55 @@ export function transcriptEntries(record: Record<string, unknown>, harness: Poly
     if (block.type !== "text" || typeof block.text !== "string") return;
     const text = cleanText(block.text);
     if (text) entries.push({ id: `${idPrefix}.${index}`, text });
+  });
+  return entries;
+}
+
+/** A tool-call line's cap, in code points after masking. */
+export const PROGRESS_TOOL_MAX = 200;
+
+/** A tool call's primary argument: a string `command`, else the first
+ *  string-valued argument in key order, else nothing. */
+function primaryArgument(args: unknown): string | undefined {
+  const object = asObject(args);
+  if (!object) return undefined;
+  if (typeof object.command === "string" && object.command.trim()) return object.command;
+  for (const value of Object.values(object)) {
+    if (typeof value === "string" && value.trim()) return value;
+  }
+  return undefined;
+}
+
+/** The execution-progress entries of one transcript record:
+ *  each assistant text block → `narration` (as `transcriptEntries`), each pi
+ *  `toolCall` / claude `tool_use` block → one `tool` line `<name>: <primary
+ *  argument>`, credential-masked and capped at PROGRESS_TOOL_MAX. Tool
+ *  results, thinking, user/system records and every other field produce
+ *  nothing. Only `readProgressSnapshot` uses it; the card face never does. */
+export function progressEntries(record: Record<string, unknown>, harness: PolyforgeHarness, idPrefix: string): PolyforgeProgressLine[] {
+  const message = asObject(record.message);
+  if (!message || message.role !== "assistant") return [];
+  if (harness === "pi" ? record.type !== "message" : record.type !== "assistant") return [];
+  const content = message.content;
+  const blocks = typeof content === "string" ? [{ type: "text", text: content }] : Array.isArray(content) ? content : [];
+  const entries: PolyforgeProgressLine[] = [];
+  blocks.forEach((value, index) => {
+    const block = asObject(value);
+    if (!block) return;
+    const id = `${idPrefix}.${index}`;
+    if (block.type === "text" && typeof block.text === "string") {
+      const text = cleanText(block.text);
+      if (text) entries.push({ id, kind: "narration", text });
+      return;
+    }
+    const toolBlock = harness === "pi" ? "toolCall" : "tool_use";
+    if (block.type !== toolBlock) return;
+    const name = asString(block.name);
+    if (!name) return;
+    const argument = primaryArgument(harness === "pi" ? block.arguments : block.input);
+    const line = (argument ? `${name}: ${argument}` : name).replace(/\s+/g, " ").trim();
+    const text = capCodePoints(maskPolyforgeCredentials(line), PROGRESS_TOOL_MAX);
+    if (text) entries.push({ id, kind: "tool", text });
   });
   return entries;
 }
@@ -554,6 +631,257 @@ export function readCardProgress(
   // next poll reads the newest page again instead of skipping it.
   if (entries.length === 0 && all.length > 0) return { available: true, entries: [] };
   return { available: true, entries, cursor: formatCardCursor(identity, slice.start + end), reset: true };
+}
+
+// ---- the whole-job execution progress ----
+
+/** Spawn journal: read whole up to this (its newest window beyond it). */
+const PROGRESS_JOURNAL_MAX_BYTES = 4 * 1024 * 1024;
+/** Event log: read whole up to this (its newest whole lines beyond it). */
+const PROGRESS_EVENTS_MAX_BYTES = 16 * 1024 * 1024;
+/** A single transcript line above this is a blob record, never progress. */
+const PROGRESS_LINE_MAX_BYTES = 8 * 1024 * 1024;
+/** Transcript bytes summed over the whole job; beyond it the read answers
+ *  `available: false` rather than an inexact `omitted` count. */
+const PROGRESS_TRANSCRIPTS_MAX_BYTES = 128 * 1024 * 1024;
+
+/** Whole lines of a bounded read: the newest `max` bytes, the leading
+ *  partial line dropped when the window starts mid-file, the trailing one
+ *  (a line still being written) always dropped. Each line keeps its byte
+ *  offset in the file. Undefined when the file is not readable. */
+function readWholeLines(path: string, max: number): { offset: number; text: string }[] | undefined {
+  const slice = readSlice(path, (size) => size - max, max);
+  if (!slice) return undefined;
+  const buffer = slice.buffer;
+  let lineStart = 0;
+  if (slice.start > 0) {
+    const first = buffer.indexOf(0x0a);
+    lineStart = first < 0 ? buffer.length : first + 1;
+  }
+  const lines: { offset: number; text: string }[] = [];
+  while (lineStart < buffer.length) {
+    const newline = buffer.indexOf(0x0a, lineStart);
+    if (newline < 0) break;
+    lines.push({ offset: slice.start + lineStart, text: buffer.subarray(lineStart, newline).toString("utf8") });
+    lineStart = newline + 1;
+  }
+  return lines;
+}
+
+export interface PolyforgeJobIndex {
+  /** False: `runtime-state.json` is missing, unreadable or not a JSON object. */
+  readable: boolean;
+  records: Map<string, PolyforgeJobRecord>;
+}
+
+/** `runtime-state.json` → whether the daemon's job index is readable at all,
+ *  and wi → its record's capsule dir (the first record per wi). */
+export function readJobIndex(root: string): PolyforgeJobIndex {
+  const records = new Map<string, PolyforgeJobRecord>();
+  const index = asObject(readJson(join(root, "runtime-state.json")));
+  if (!index) return { readable: false, records };
+  const jobs = index.jobs;
+  if (Array.isArray(jobs)) {
+    for (const job of jobs) {
+      const record = asObject(job);
+      const wi = record?.work_item_id;
+      if (!isPolyforgeWorkItemId(wi) || records.has(wi)) continue;
+      const capsuleDir = asString(record?.capsule_dir);
+      records.set(wi, capsuleDir && isAbsolute(capsuleDir) ? { capsuleDir } : {});
+    }
+  }
+  return { readable: true, records };
+}
+
+export interface PolyforgeSpawn {
+  step?: string;
+  spawnN?: number;
+  startedAt?: string;
+  harness?: string;
+  harnessSession?: string;
+  transcript?: string;
+}
+
+/** Every spawn of the job, in journal (file) order: one per line of
+ *  `<capsule>/runtime-state/spawn-journal.jsonl`. Undefined when the journal
+ *  is not readable. */
+export function readSpawnJournal(capsuleDir: string): PolyforgeSpawn[] | undefined {
+  const lines = readWholeLines(join(capsuleDir, "runtime-state", "spawn-journal.jsonl"), PROGRESS_JOURNAL_MAX_BYTES);
+  if (!lines) return undefined;
+  const spawns: PolyforgeSpawn[] = [];
+  for (const line of lines) {
+    const record = parseLine(line.text);
+    if (!record) continue;
+    const spawnN = record.spawn_n;
+    const step = asString(record.step_id);
+    const startedAt = asString(record.started_at) ?? asString(record.at);
+    const harness = asString(record.harness);
+    const harnessSession = asString(record.harness_session);
+    const transcript = asString(record.transcript);
+    spawns.push({
+      ...(step ? { step } : {}),
+      ...(typeof spawnN === "number" && Number.isSafeInteger(spawnN) ? { spawnN } : {}),
+      ...(startedAt ? { startedAt } : {}),
+      ...(harness ? { harness } : {}),
+      ...(harnessSession ? { harnessSession } : {}),
+      ...(transcript ? { transcript } : {}),
+    });
+  }
+  return spawns;
+}
+
+export interface PolyforgeProgressEvent {
+  /** The line's byte offset in the log: a stable id, never a path. */
+  offset: number;
+  at: string;
+  kind: string;
+  body: Record<string, unknown>;
+}
+
+/** The WI's event log `<root>/events/wi-<wi>.jsonl`, whole up to
+ *  PROGRESS_EVENTS_MAX_BYTES (else its newest whole lines), each line's
+ *  time, kind and raw body. Undefined when the log is not readable. */
+export function readProgressEventLog(root: string, wi: string): PolyforgeProgressEvent[] | undefined {
+  if (!isPolyforgeWorkItemId(wi)) return undefined;
+  const lines = readWholeLines(join(root, "events", `wi-${wi}.jsonl`), PROGRESS_EVENTS_MAX_BYTES);
+  if (!lines) return undefined;
+  const events: PolyforgeProgressEvent[] = [];
+  for (const line of lines) {
+    const record = parseLine(line.text);
+    const at = asString(record?.at);
+    const kind = asString(record?.kind);
+    if (!at || !kind) continue;
+    events.push({ offset: line.offset, at, kind, body: asObject(record?.body) ?? {} });
+  }
+  return events;
+}
+
+/** One spawn's transcript: the newest spawn reads the harness's live
+ *  session first (`resolveTranscript`, the rule — a running pi
+ *  step's capsule copy holds only its prompt); every earlier spawn reads the
+ *  journal's `transcript` (the capsule copy), else, for claude, its
+ *  `claude-config` session. Same realpath containment; an unknown harness
+ *  or an outside/missing path is no transcript. */
+function spawnTranscript(root: string, capsuleDir: string, spawn: PolyforgeSpawn, newest: boolean): PolyforgeTranscriptSource | undefined {
+  if (spawn.harness !== "pi" && spawn.harness !== "claude") return undefined;
+  const harness: PolyforgeHarness = spawn.harness;
+  if (newest) {
+    const live = resolveTranscript(root, capsuleDir);
+    if (live && live.harness === harness) return live;
+  }
+  const candidates = [spawn.transcript];
+  if (harness === "claude" && spawn.harnessSession && HARNESS_SESSION_PATTERN.test(spawn.harnessSession)) {
+    candidates.push(join(root, "claude-config", "projects", encodeClaudeProjectDir(capsuleDir), `${spawn.harnessSession}.jsonl`));
+  }
+  for (const candidate of candidates) {
+    if (!candidate || !isAbsolute(candidate)) continue;
+    const path = realInside(candidate, [capsuleDir, root]);
+    if (path) return { path, harness, ...(spawn.step ? { step: spawn.step } : {}) };
+  }
+  return undefined;
+}
+
+/** A stream line before the bound: its sort keys and the wire line. */
+interface ProgressStreamItem {
+  atMs: number;
+  rank: 0 | 1;
+  order: number;
+  line: PolyforgeProgressLine;
+}
+
+const unavailableSnapshot = (): PolyforgeProgressSnapshot => ({ available: false, lines: [], omitted: 0 });
+
+/**
+ * The job detail's whole-job execution progress for one
+ * capsule: every spawn in the spawn journal (reruns included), each spawn's
+ * transcript projected by `progressEntries` (narration + one masked tool
+ * line; a transcript several spawns name — a `--resume` continuation — is
+ * read once), merged with one lifecycle line per retained event of the WI's
+ * event log (`composeProgressEventLine`; `step_done` carries the duration
+ * since its `step_started` of the same step and spawn). The stream is the
+ * stable sort by time — events before transcript lines at the same instant,
+ * then build order; a record without a readable `timestamp` sits at its
+ * spawn's start plus its ordinal in microseconds — bounded to the newest
+ * PROGRESS_MAX_LINES with the exact `omitted` count.
+ *
+ * `wi` defaults to the capsule's own `work-item.json` id. `available:
+ * false`: neither the journal nor the event log readable, the transcripts
+ * over PROGRESS_TRANSCRIPTS_MAX_BYTES, or any error. Never throws; no line
+ * id names a path.
+ */
+export function readProgressSnapshot(root: string, capsuleDir: string, wi?: string): PolyforgeProgressSnapshot {
+  try {
+    const workItem = wi ?? asString(asObject(readJson(join(capsuleDir, "runtime-state", "work-item.json")))?.id);
+    const spawns = readSpawnJournal(capsuleDir);
+    const events = workItem ? readProgressEventLog(root, workItem) : undefined;
+    if (!spawns && !events) return unavailableSnapshot();
+    const items: ProgressStreamItem[] = [];
+    const push = (atMs: number, rank: 0 | 1, line: PolyforgeProgressLine) => items.push({ atMs, rank, order: items.length, line });
+
+    const starts = new Map<string, number>();
+    for (const event of events ?? []) {
+      const atMs = Date.parse(event.at);
+      const step = typeof event.body.step === "string" ? event.body.step : "";
+      const spawnKey = `${step}\0${String(event.body.spawn_n ?? "")}`;
+      let durationSec: number | undefined;
+      if (event.kind === "step_started" && Number.isFinite(atMs)) {
+        starts.set(spawnKey, atMs);
+        starts.set(`${step}\0`, atMs);
+      } else if (event.kind === "step_done") {
+        const startMs = starts.get(spawnKey) ?? starts.get(`${step}\0`);
+        if (startMs !== undefined && Number.isFinite(atMs) && atMs >= startMs) durationSec = Math.round((atMs - startMs) / 1000);
+      }
+      const line = composeProgressEventLine(`e.${event.offset}`, { at: event.at, kind: event.kind, body: event.body, ...(durationSec !== undefined ? { durationSec } : {}) }, maskPolyforgeCredentials);
+      if (line) push(Number.isFinite(atMs) ? atMs : 0, 0, line);
+    }
+
+    const sources: { source: PolyforgeTranscriptSource; startMs: number }[] = [];
+    const seen = new Set<string>();
+    let transcriptBytes = 0;
+    (spawns ?? []).forEach((spawn, index, all) => {
+      const source = spawnTranscript(root, capsuleDir, spawn, index === all.length - 1);
+      if (!source || seen.has(source.path)) return;
+      seen.add(source.path);
+      const startMs = Date.parse(spawn.startedAt ?? "");
+      sources.push({ source, startMs: Number.isFinite(startMs) ? startMs : 0 });
+    });
+    for (const { source } of sources) {
+      transcriptBytes += readSlice(source.path, 0, 0)?.size ?? 0;
+    }
+    if (transcriptBytes > PROGRESS_TRANSCRIPTS_MAX_BYTES) return unavailableSnapshot();
+
+    for (const { source, startMs } of sources) {
+      const slice = readSlice(source.path, 0, PROGRESS_TRANSCRIPTS_MAX_BYTES);
+      if (!slice) continue;
+      const identity = createHash("sha256")
+        .update(`${source.path}\0${slice.dev}\0${slice.ino}\0${source.harness}`)
+        .digest("hex")
+        .slice(0, 16);
+      const buffer = slice.buffer;
+      let lineStart = 0;
+      let ordinal = 0;
+      while (lineStart < buffer.length) {
+        const newline = buffer.indexOf(0x0a, lineStart);
+        if (newline < 0) break; // a line still being written
+        ordinal += 1;
+        if (newline - lineStart <= PROGRESS_LINE_MAX_BYTES) {
+          const record = parseLine(buffer.subarray(lineStart, newline).toString("utf8"));
+          if (record) {
+            const stamp = Date.parse(asString(record.timestamp) ?? "");
+            const atMs = Number.isFinite(stamp) ? stamp : startMs + ordinal / 1000;
+            for (const entry of progressEntries(record, source.harness, `${identity}.${lineStart}`)) push(atMs, 1, entry);
+          }
+        }
+        lineStart = newline + 1;
+      }
+    }
+
+    items.sort((a, b) => a.atMs - b.atMs || a.rank - b.rank || a.order - b.order);
+    const kept = items.slice(-PROGRESS_MAX_LINES);
+    return { available: true, lines: kept.map((item) => item.line), omitted: items.length - kept.length };
+  } catch {
+    return unavailableSnapshot();
+  }
 }
 
 // ---- the card stream ----

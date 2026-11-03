@@ -68,7 +68,6 @@ import { getInitialNavigation, linkedSessionId, withTabOpen } from "@/lib/initia
 import { clearTabOpenSession, getTabOpen, setTabOpenNewSession, setTabOpenSession } from "@/lib/tab-session";
 import { mergeCatalogRow } from "./session-catalog-helpers";
 import { rekeyDraft } from "@/lib/draft-store";
-import { MachineLoadSection } from "./MachineLoadSection";
 import {
   clearLastOpen,
   getLastOpenSession,
@@ -317,11 +316,17 @@ export function AppShell() {
     setActiveTab: setPfActiveTab,
     workTab: pfWorkTab,
     setWorkTab: setPfWorkTab,
+    workItemsRunning: pfWorkItemsRunning,
+    setWorkItemsRunning: setPfWorkItemsRunning,
     messagesCapable: pfMessagesCapable,
     messagesReason: pfMessagesReason,
     messagesError: pfMessagesError,
     conversations: pfConversations,
     contacts: pfContacts,
+    groups: pfGroups,
+    membershipAdmin: pfMembershipAdmin,
+    users: pfUsers,
+    changeMembership: changePfMembership,
     unreadTotal: pfUnreadTotal,
     selectedConversation: pfSelectedConversation,
     selectConversation: selectPfConversation,
@@ -345,6 +350,10 @@ export function AppShell() {
     reason: pfMessagesReason,
     conversations: pfConversations,
     contacts: pfContacts,
+    groups: pfGroups,
+    membershipAdmin: pfMembershipAdmin,
+    users: pfUsers,
+    onChangeMembership: changePfMembership,
     error: pfMessagesError,
     selectedConversation: pfSelectedConversation,
     onSelectConversation: selectPfConversation,
@@ -761,11 +770,6 @@ export function AppShell() {
   const handleSessionStatsChange = useCallback((stats: SessionStatsInfo | null) => {
     setSessionStats(stats);
   }, []);
-  // The toolbar's ↻ manual fetch: each click bumps the key the
-  // focused chat acts on; the chat reports whether it offers one (a saved
-  // session) and whether one is under way.
-  const [manualFetchKey, setManualFetchKey] = useState(0);
-  const [manualFetchState, setManualFetchState] = useState<{ available: boolean; inProgress: boolean } | null>(null);
   const [copiedSessionField, setCopiedSessionField] = useState<SessionCopyField | null>(null);
   const sessionCopyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const handleCopySessionField = useCallback((field: SessionCopyField, value: string) => {
@@ -1802,6 +1806,9 @@ export function AppShell() {
     });
   }, [fileTabs, terminalTabs, agentTabs]);
 
+  // a claude session has no HTML export, background tasks or subagents.
+  const selectedIsClaude = selectedSession?.harness === "claude";
+
   const handleViewFullHistory = useCallback(() => {
     if (!selectedSession) return;
     // Render the export snapshot inside the right panel instead of a contextless
@@ -2182,94 +2189,105 @@ export function AppShell() {
     </span>
   );
 
-  const renderChatToolbarActions = (mobile: boolean) => {
-    // The Polyforge button is gated by pf presence alone (independent of
-    // chat visibility); the chat actions keep their own gate.
-    const showChatActions = mobile || showChat;
-    if (!showChatActions && !pfPresent) return null;
+  // one stable handler for the topbar toggle, used by both
+  // the resident phone slot and the wide/desktop inline slot.
+  const togglePolyforgePanel = useCallback(() => {
+    setPfPanelOpen((open) => {
+      const next = !open;
+      if (next) setBgPanelOpen(false);
+      return next;
+    });
+  }, []);
+
+  const renderPolyforgeButton = (mobile: boolean) => {
+    if (!pfPresent) return null;
     return (
-      <div style={{ display: "flex", alignItems: "stretch", height: "100%" }}>
-        {pfPresent && (
-          <button
-            type="button"
-            data-pf-toggle
-            onClick={() => {
-              setPfPanelOpen((open) => {
-                const next = !open;
-                if (next) setBgPanelOpen(false);
-                return next;
-              });
-            }}
-            title={translate("polyforge.open")}
-            aria-label={translate("polyforge.open")}
-            aria-pressed={pfPanelOpen}
+      <button
+        type="button"
+        data-pf-toggle
+        onClick={togglePolyforgePanel}
+        title={translate("polyforge.open")}
+        aria-label={translate("polyforge.open")}
+        aria-pressed={pfPanelOpen}
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          position: "relative",
+          width: mobile ? TOP_BAR_ICON_BUTTON_SIZE : undefined,
+          minWidth: mobile ? undefined : 34,
+          height: "100%",
+          padding: mobile ? 0 : "0 10px",
+          background: pfPanelOpen ? "var(--bg-selected)" : "none",
+          border: "none",
+          borderRight: "1px solid var(--border)",
+          color: pfRunningCount ? "var(--text)" : "var(--text-muted)",
+          cursor: "pointer",
+          fontSize: 11,
+          flexShrink: 0,
+          whiteSpace: "nowrap",
+          transition: "color 0.1s, background 0.1s",
+        }}
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <path d="M4 21V9l8-5 8 5v12" /><path d="M4 21h16" /><path d="M12 4v5" /><path d="M9 21v-6h6v6" />
+        </svg>
+        {pfUnreadTotal > 0 && (
+          <span
+            aria-label={translate("polyforge.messages.unread")}
+            title={translate("polyforge.messages.unread")}
             style={{
+              position: "absolute",
+              bottom: 6,
+              left: mobile ? 6 : 10,
+              width: 8,
+              height: 8,
+              borderRadius: 4,
+              background: "var(--accent)",
+              display: "inline-block",
+            }}
+          />
+        )}
+        {pfRunningCount !== null && pfRunningCount > 0 && (
+          <span
+            aria-label={String(pfRunningCount)}
+            style={{
+              position: "absolute",
+              top: 6,
+              right: mobile ? 6 : 10,
+              minWidth: 14,
+              height: 14,
+              padding: "0 3px",
+              borderRadius: 7,
+              background: "var(--accent)",
+              color: "var(--bg-panel)",
+              fontSize: 9,
+              fontWeight: 700,
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
-              position: "relative",
-              width: mobile ? TOP_BAR_ICON_BUTTON_SIZE : undefined,
-              minWidth: mobile ? undefined : 34,
-              height: "100%",
-              padding: mobile ? 0 : "0 10px",
-              background: pfPanelOpen ? "var(--bg-selected)" : "none",
-              border: "none",
-              borderRight: "1px solid var(--border)",
-              color: pfRunningCount ? "var(--text)" : "var(--text-muted)",
-              cursor: "pointer",
-              fontSize: 11,
-              flexShrink: 0,
-              whiteSpace: "nowrap",
-              transition: "color 0.1s, background 0.1s",
+              lineHeight: 1,
             }}
           >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-              <path d="M4 21V9l8-5 8 5v12" /><path d="M4 21h16" /><path d="M12 4v5" /><path d="M9 21v-6h6v6" />
-            </svg>
-            {pfUnreadTotal > 0 && (
-              <span
-                aria-label={translate("polyforge.messages.unread")}
-                title={translate("polyforge.messages.unread")}
-                style={{
-                  position: "absolute",
-                  bottom: 6,
-                  left: mobile ? 6 : 10,
-                  width: 8,
-                  height: 8,
-                  borderRadius: 4,
-                  background: "var(--accent)",
-                  display: "inline-block",
-                }}
-              />
-            )}
-            {pfRunningCount !== null && pfRunningCount > 0 && (
-              <span
-                aria-label={String(pfRunningCount)}
-                style={{
-                  position: "absolute",
-                  top: 6,
-                  right: mobile ? 6 : 10,
-                  minWidth: 14,
-                  height: 14,
-                  padding: "0 3px",
-                  borderRadius: 7,
-                  background: "var(--accent)",
-                  color: "var(--bg-panel)",
-                  fontSize: 9,
-                  fontWeight: 700,
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  lineHeight: 1,
-                }}
-              >
-                {pfRunningCount > 9 ? "9+" : pfRunningCount}
-              </span>
-            )}
-          </button>
+            {pfRunningCount > 9 ? "9+" : pfRunningCount}
+          </span>
         )}
+      </button>
+    );
+  };
+
+  const renderChatToolbarActions = (mobile: boolean, options: { includePolyforge?: boolean } = {}) => {
+    // The phone's resident Polyforge slot owns the button at <=480px; the
+    // overlay and the wide inline row keep their original composition.
+    const includePolyforge = options.includePolyforge ?? true;
+    // The chat actions keep their own gate; the Polyforge button has its own.
+    const showChatActions = mobile || showChat;
+    if (!showChatActions && !(includePolyforge && pfPresent)) return null;
+    return (
+      <div style={{ display: "flex", alignItems: "stretch", height: "100%" }}>
+        {includePolyforge && renderPolyforgeButton(mobile)}
         {showChatActions && (<>
-        <button
+        {!selectedIsClaude && <button
           type="button"
           onClick={() => {
             setBgPanelOpen((open) => {
@@ -2328,8 +2346,18 @@ export function AppShell() {
               {bgRunningCount > 9 ? "9+" : bgRunningCount}
             </span>
           )}
-        </button>
-        <button
+        </button>}
+        {selectedIsClaude ? (
+          // HTML export is pi's: unavailable, said in visible text (hidden on a phone's icon row).
+          !mobile && (
+            <span
+              className="claude-export-unavailable"
+              style={{ display: "flex", alignItems: "center", padding: "0 12px", borderRight: "1px solid var(--border)", color: "var(--text-dim)", fontSize: 11, whiteSpace: "nowrap", flexShrink: 0 }}
+            >
+              {translate("claude.exportUnavailable")}
+            </span>
+          )
+        ) : <button
           type="button"
           onClick={() => {
             handleViewFullHistory();
@@ -2389,8 +2417,8 @@ export function AppShell() {
             <path d="M12 7v5l3 2" />
           </svg>
           {!mobile && <span>{translate("history.label")}</span>}
-        </button>
-        {(() => {
+        </button>}
+        {!selectedIsClaude && (() => {
           // 上下文压缩后当前消息可能不再包含 user 消息，需同时参考会话文件的消息总数。
           const hasMessages = Boolean(
             selectedSession
@@ -2468,7 +2496,7 @@ export function AppShell() {
             </button>
           );
         })()}
-        {hasSubagentSessions && agentsBadge && (
+        {!selectedIsClaude && hasSubagentSessions && agentsBadge && (
           <button
             type="button"
             onClick={() => toggleTopPanel("agents", mobile)}
@@ -2613,55 +2641,8 @@ export function AppShell() {
     );
   };
 
-  // The ↻ manual fetch, immediately before the session stats on a desktop and on a phone
-  // (outside the narrow phone's "more" panel). It stays clickable while a fetch runs: the
-  // chat joins a second click to the fetch under way.
-  const renderManualFetchButton = (mobile: boolean) => {
-    if (!showChat || !manualFetchState?.available) return null;
-    const busy = manualFetchState.inProgress;
-    const label = translate(busy ? "chat.manualFetchBusy" : "chat.manualFetch");
-    const covered = mobile && isNarrowMobile && mobileToolbarMoreOpen;
-    return (
-      <button
-        type="button"
-        onClick={() => setManualFetchKey((key) => key + 1)}
-        disabled={covered}
-        tabIndex={covered ? -1 : undefined}
-        title={label}
-        aria-label={label}
-        aria-busy={busy}
-        aria-hidden={covered ? true : undefined}
-        data-mobile-toolbar-action={mobile ? "manual-fetch" : undefined}
-        style={{
-          visibility: covered ? "hidden" : "visible",
-          display: "flex", alignItems: "center", justifyContent: "center",
-          width: TOP_BAR_ICON_BUTTON_SIZE, height: "100%", padding: 0,
-          background: "none",
-          border: "none",
-          borderTop: "2px solid transparent",
-          ...(mobile ? { borderRight: "1px solid var(--border)" } : { borderLeft: "1px solid var(--border)" }),
-          color: busy ? "var(--text)" : "var(--text-muted)",
-          cursor: "pointer", flexShrink: 0, transition: "color 0.1s, background 0.1s",
-          fontSize: 15, lineHeight: 1,
-        }}
-        onMouseEnter={(event) => {
-          event.currentTarget.style.color = "var(--text)";
-        }}
-        onMouseLeave={(event) => {
-          event.currentTarget.style.color = busy ? "var(--text)" : "var(--text-muted)";
-        }}
-      >
-        <span aria-hidden="true" style={{ display: "inline-block", animation: busy ? "spin 0.8s linear infinite" : undefined }}>↻</span>
-      </button>
-    );
-  };
-
-  // The ↻ manual fetch (renderManualFetchButton) comes with the stats, immediately before
-  // them, whether or not they have values yet.
   const renderSessionStatsButton = (mobile: boolean) => {
-    const manualFetchButton = renderManualFetchButton(mobile);
-    // One fragment either way, so the ↻ keeps its element when the stats appear.
-    if (!mobile && (!showChat || (!sessionStats && !contextUsage))) return <>{manualFetchButton}</>;
+    if (!mobile && (!showChat || (!sessionStats && !contextUsage))) return null;
 
     // pi#121: the current session's polyforge chat id, display-only. The
     // mobile layout has no session-name header — this stats button is the
@@ -2712,7 +2693,6 @@ export function AppShell() {
 
     return (
       <>
-      {manualFetchButton}
       <button
         type="button"
         onClick={() => toggleTopPanel("session")}
@@ -2727,14 +2707,15 @@ export function AppShell() {
         style={{
           // The Debug button before it takes the free space (renderDebugButton).
           marginLeft: 0,
-          display: "flex", alignItems: "center", justifyContent: "flex-end",
+          display: "flex", alignItems: "center", justifyContent: mobile ? "flex-start" : "flex-end",
           flex: mobile ? 1 : undefined,
           minWidth: 0,
           gap: mobile ? 7 : 10,
           paddingLeft: mobile ? 6 : 12,
           paddingRight: mobile ? 6 : 12,
           height: "100%",
-          overflow: "hidden",
+          overflowX: mobile ? "auto" : "hidden",
+          overflowY: "hidden",
           visibility: covered ? "hidden" : "visible",
           pointerEvents: covered ? "none" : "auto",
           background: activeTopPanel === "session" ? "var(--bg-selected)" : "none",
@@ -2753,7 +2734,7 @@ export function AppShell() {
         }}
       >
         {mobile ? (
-          <>
+          <span style={{ display: "flex", alignItems: "center", gap: 7, marginLeft: "auto", minWidth: "max-content", height: "100%" }}>
             {tokens && tokens.input > 0 && (
               <span className="mobile-session-stat-io" style={{ display: "flex", alignItems: "center", gap: 2, flexShrink: 0 }}>
                 <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -2799,7 +2780,7 @@ export function AppShell() {
                 {`· ${shortenCandidate(currentChatId)}`}
               </span>
             )}
-          </>
+          </span>
         ) : (
           <>
             {tokens && tokens.input > 0 && (
@@ -2987,6 +2968,14 @@ export function AppShell() {
       }
       .mobile-session-stats {
         container-type: inline-size;
+        /* phone stats scroll instead of clipping; the wrapper's
+           auto margin keeps the old right alignment while the items fit. */
+        scrollbar-width: none;
+        -webkit-overflow-scrolling: touch;
+        overscroll-behavior-x: contain;
+      }
+      .mobile-session-stats::-webkit-scrollbar {
+        display: none;
       }
       @container (max-width: 158px) {
         .mobile-session-stat-io {
@@ -3163,6 +3152,7 @@ export function AppShell() {
                 </button>
               )}
               {!isNarrowMobile && renderChatToolbarActions(true)}
+              {isNarrowMobile && renderPolyforgeButton(true)}
               {!isNarrowMobile && renderDebugButton(true)}
               {renderSessionStatsButton(true)}
               {renderMainFileToggle(true)}
@@ -3190,7 +3180,7 @@ export function AppShell() {
                     backdropFilter: "blur(10px)",
                   }}
                 >
-                  {renderChatToolbarActions(true)}
+                  {renderChatToolbarActions(true, { includePolyforge: false })}
                   {renderDebugButton(true)}
                 </div>
               )}
@@ -3449,7 +3439,6 @@ export function AppShell() {
                        {translate("session.load")}
                     </div>
                   )}
-                  <MachineLoadSection translate={translate} />
                 </div>
               )}
               {activeTopPanel === "debug" && (
@@ -3563,10 +3552,6 @@ export function AppShell() {
                     // always the focused pane, never an unfocused one.
                     onSessionStatsChange={focused ? handleSessionStatsChange : undefined}
                     onContextUsageChange={focused ? handleContextUsageChange : undefined}
-                    // every pane follows the key, only the focused
-                    // one fetches on it and reports whether it offers the ↻.
-                    manualFetchKey={manualFetchKey}
-                    onManualFetchStateChange={focused ? setManualFetchState : undefined}
                     // pi#28: every pane feeds its own background-task events;
                     // handleBackgroundTasksEvent filters by the session the
                     // panel currently follows. Terminal notifications stay
@@ -3627,8 +3612,6 @@ export function AppShell() {
               onOpenSettings={openSettingsSection}
               onContextUsageChange={handleContextUsageChange}
               externalSessionChange={externalSessionChange}
-              manualFetchKey={manualFetchKey}
-              onManualFetchStateChange={setManualFetchState}
               onOpenFile={handleOpenLinkedFile}
               onFilesUploaded={handleExplorerRefresh}
               onOpenSubagent={handleOpenSubagentTab}
@@ -3786,6 +3769,8 @@ export function AppShell() {
                     onActiveTab={setPfActiveTab}
                     workTab={pfWorkTab}
                     onWorkTab={setPfWorkTab}
+                    workItemsRunning={pfWorkItemsRunning}
+                    onWorkItemsRunningChange={setPfWorkItemsRunning}
                     memoryCwd={projectTrustCwd}
                     messagesSurface={pfMessagesSurface}
                     showPin={false}
@@ -3834,6 +3819,8 @@ export function AppShell() {
                   onActiveTab={setPfActiveTab}
                   workTab={pfWorkTab}
                   onWorkTab={setPfWorkTab}
+                  workItemsRunning={pfWorkItemsRunning}
+                  onWorkItemsRunningChange={setPfWorkItemsRunning}
                   memoryCwd={projectTrustCwd}
                   messagesSurface={pfMessagesSurface}
                   showPin

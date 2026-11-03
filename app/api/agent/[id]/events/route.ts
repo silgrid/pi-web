@@ -3,6 +3,8 @@ import { resolveSessionPath } from "@/lib/session-reader";
 import { getRpcSession, startRpcSession } from "@/lib/rpc-manager";
 import { isValidLivenessHolder } from "@/lib/session-liveness";
 import { describeStreamClient } from "@/lib/stream-client";
+import { getClaudeSessionRecord } from "@/lib/claude-index";
+import { startClaudeSession } from "@/lib/claude-session";
 
 export const dynamic = "force-dynamic";
 
@@ -18,10 +20,14 @@ export async function GET(
   const holderParam = new URL(req.url).searchParams.get("holder");
   const holder = isValidLivenessHolder(holderParam) ? holderParam : null;
 
+  // A claude session's stream is its child's: opening it starts one (`--resume`) when none is alive.
+  const claudeRecord = getClaudeSessionRecord(id);
   // Fast path: already-running session
-  const session = getRpcSession(id);
+  const session = claudeRecord ? undefined : getRpcSession(id);
   let sessionPromise;
-  if (session?.isAlive()) {
+  if (claudeRecord) {
+    sessionPromise = Promise.resolve().then(() => startClaudeSession(claudeRecord));
+  } else if (session?.isAlive()) {
     sessionPromise = Promise.resolve(session);
   } else {
     const filePath = await resolveSessionPath(id);

@@ -1,3 +1,5 @@
+// carries: components/Polyforge*, components/polyforge-*, hooks/usePolyforge*, lib/polyforge*, app/api/polyforge/*
+// carries: components/SettingsPanel*, components/SettingsUi*, components/settings-ui-helpers*, lib/settings-navigation*, lib/package-settings*, app/api/plugins/*
 // — Settings › Polyforge configuration page LAYOUT acceptance.
 //
 // Authored as the reproduction for the owner's second photo review: #88 made the
@@ -7,6 +9,9 @@
 // renders pf's reload classes as bare English. This suite measures the rendered
 // page at the owner's desktop width (1100px) and at the phone breakpoint, with
 // the config read mocked so the fixture is the page's data, not pf's.
+// the summarize keys and the workspace mapping are one 工作区 /
+// Workspace card, and the workflow card (its read mocked too) renders after
+// the configuration cards; the assertions below target those cards.
 //
 //   node e2e/polyforge-config-layout.mjs
 import assert from "node:assert/strict";
@@ -16,6 +21,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
 import { startNextServer } from "./next-server.mjs";
+import { NAV_MS } from "./timeouts.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 assert.ok(!existsSync(join(root, process.env.PI_WEB_DIST_DIR || ".next", "dev/lock")), "Run in a checkout without an active dev server");
@@ -63,6 +69,32 @@ const CONFIG = {
   steps_complete: true,
 };
 
+// the workflow card's read, fixed so the page is the fixture's
+// (the card renders after the configuration cards whatever pf is installed).
+const workflowsFixture = (project) => {
+  const chain = (models, from) => ({ "e2e-project": { models, from } });
+  return {
+    pfPresent: true,
+    pfVersion: "v2.20.16",
+    capable: true,
+    workflows: {
+      workflows_dir: "/e2e/workflows", daemon_reachable: true, reason: "", workspace: project, projects: ["e2e-project"],
+      write_capable: true, write_reason: "",
+      bundles: [{
+        name: "feature-full",
+        defaults: { model_candidates: ["pi:ff-default"], effective: chain(["pi:ff-default"], "bundle feature-full defaults.model_candidates") },
+        steps: [
+          { id: "grill", model_candidates: ["pi:ff-grill"], attrs: [{ name: "question_batch_size", type: "int", default: 0 }],
+            effective: chain(["pi:ff-grill"], "bundle feature-full step grill model_candidates") },
+          { id: "code", model_candidates: ["pi:ff-code"], effective: chain(["pi:ff-code"], "bundle feature-full step code model_candidates") },
+        ],
+      }],
+      bundle_errors: [],
+    },
+    workspace: { workspace: project, yaml: { sha256: "e2e-yaml", exists: true }, steps: { "e2e-project": {} } },
+  };
+};
+
 const failures = [];
 let checks = 0;
 async function check(label, fn) {
@@ -100,6 +132,7 @@ try {
     page.setDefaultTimeout(20_000);
     await page.route("**/api/polyforge/config/history", (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ entries: [] }) }));
     await page.route("**/api/polyforge/config?*", (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(CONFIG) }));
+    await page.route("**/api/polyforge/workflows?*", (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(workflowsFixture(project)) }));
     await page.route("**/api/polyforge/detect*", (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
       pfPresent: true, pfVersion: "v2.20.11", pfVersionBelowMinimum: false, line: "internal",
       piSkillInstalled: true, piSkillEnabled: true, claudeSkillsSymlink: true, claudeSessionStartHook: true,
@@ -108,8 +141,8 @@ try {
     await page.route("**/api/plugins?*", (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
       packages: [{ scope: "global", packageName: "polyforge", source: "/opt/polyforge" }],
     }) }));
-    await page.goto(`${base}/?session=${SESSION}`, { waitUntil: "domcontentloaded", timeout: 90_000 });
-    await page.getByText("E2E polyforge layout host session").first().waitFor({ state: "attached", timeout: 60_000 });
+    await page.goto(`${base}/?session=${SESSION}`, { waitUntil: "domcontentloaded", timeout: NAV_MS });
+    await page.getByText("E2E polyforge layout host session").first().waitFor({ state: "attached", timeout: NAV_MS });
     const show = page.locator('button[aria-label="Show sidebar"], button[aria-label="显示侧边栏"]').first();
     if (await show.isVisible().catch(() => false)) await show.click();
     await page.locator('button[aria-label="Settings"], button[aria-label="设置"]').first().click();
@@ -121,10 +154,10 @@ try {
   };
 
   const cards = (dialog) => ({
-    flat: dialog.locator('[aria-label="cli.toml"]').first(),
-    daemon: dialog.locator('[aria-label="cli.toml · [daemon]"]').first(),
-    workspace: dialog.locator('[aria-label="Workspace mapping"]').first(),
-    summarize: dialog.locator('[aria-label="Summarize (.polyforge.yaml)"]').first(),
+    flat: dialog.locator('section[aria-label="cli.toml"]').first(),
+    daemon: dialog.locator('section[aria-label="cli.toml · [daemon]"]').first(),
+    workspace: dialog.locator('section[aria-label="Workspace"]').first(),
+    workflow: dialog.locator('section[aria-label="Workflow"]').first(),
   });
   const centerY = (box) => box.y + box.height / 2;
   const saveGap = async (card, label) => {
@@ -152,8 +185,12 @@ try {
     const { dialog } = desktop;
     const all = cards(dialog);
     for (const [name, card] of Object.entries(all)) assert.equal(await card.count(), 1, `${name} card is missing`);
+    // the summarize/mapping cards are gone, merged into Workspace.
+    for (const gone of ["Workspace mapping", "Summarize (.polyforge.yaml)"]) {
+      assert.equal(await dialog.locator(`section[aria-label="${gone}"]`).count(), 0, `the retired ${gone} card still renders`);
+    }
     const xs = [];
-    for (const [name, card] of [["cli.toml", all.flat], ["[daemon]", all.daemon], ["summarize", all.summarize]]) {
+    for (const [name, card] of [["cli.toml", all.flat], ["[daemon]", all.daemon], ["workspace", all.workspace]]) {
       const input = card.locator("input").first();
       const box = await input.boundingBox();
       assert.ok(box, `${name} has no editable value in its value column`);
@@ -178,8 +215,8 @@ try {
     const probes = [
       [all.flat, "api_key"],
       [all.daemon, "max_concurrent_jobs"],
-      [all.summarize, "summarize.models"],
-      [all.summarize, "summarize.interval_sec"],
+      [all.workspace, "summarize.models"],
+      [all.workspace, "summarize.interval_sec"],
     ];
     const gaps = [];
     for (const [card, label] of probes) {
@@ -197,7 +234,7 @@ try {
   });
 
   await check("summarize.models renders as individual chips, not one comma string", async () => {
-    const card = cards(desktop.dialog).summarize;
+    const card = cards(desktop.dialog).workspace;
     for (const model of MODELS) {
       assert.ok(await card.getByText(model, { exact: true }).count() >= 1, `${model} is not its own chip`);
     }
@@ -205,7 +242,21 @@ try {
       .filter((node) => node.children.length === 0)
       .map((node) => (node.textContent ?? "").trim())
       .filter((text) => (text.match(/,/g) ?? []).length >= 2));
-    assert.deepEqual(rows, [], `summarize still has a comma-joined long value: ${rows.join(" / ")}`);
+    assert.deepEqual(rows, [], `the workspace card still has a comma-joined long value: ${rows.join(" / ")}`);
+  });
+
+  // the workflow card's rows share the page's reload-class
+  // badge and its ↻ keeps the 26px #204 size.
+  await check("the workflow card renders one row per step with the localized live badge and a 26px refresh", async () => {
+    const card = cards(desktop.dialog).workflow;
+    await card.locator(".polyforge-workflow-row").first().waitFor({ state: "visible", timeout: 30_000 });
+    const ids = await card.locator(".polyforge-workflow-id").allInnerTexts();
+    assert.deepEqual(ids.map((id) => id.trim()), ["default", "code", "grill", "task"], `workflow rows: ${ids}`);
+    for (const row of await card.locator(".polyforge-workflow-row").all()) {
+      assert.equal((await row.locator(".polyforge-config-badge").innerText()).trim(), "Live", "a row lacks the localized live badge");
+    }
+    const refresh = await card.getByRole("button", { name: "Refresh", exact: true }).boundingBox();
+    assert.ok(refresh && Math.abs(refresh.width - 26) <= 1 && Math.abs(refresh.height - 26) <= 1, `the refresh button is not 26px: ${JSON.stringify(refresh)}`);
   });
 
   const zh = await open({ locale: "zh-CN" });
@@ -219,13 +270,46 @@ try {
     const { page, dialog } = desktop;
     await page.setViewportSize({ width: 390, height: 844 });
     const all = cards(dialog);
-    const card = all.summarize;
-    const overflow = await card.evaluate((node) => ({ scrollWidth: node.scrollWidth, clientWidth: node.clientWidth }));
-    assert.ok(overflow.scrollWidth <= overflow.clientWidth + 1, `summarize card overflows horizontally: ${overflow.scrollWidth} > ${overflow.clientWidth}`);
+    for (const [name, card] of [["workspace", all.workspace], ["workflow", all.workflow]]) {
+      const overflow = await card.evaluate((node) => ({ scrollWidth: node.scrollWidth, clientWidth: node.clientWidth }));
+      assert.ok(overflow.scrollWidth <= overflow.clientWidth + 1, `${name} card overflows horizontally: ${overflow.scrollWidth} > ${overflow.clientWidth}`);
+    }
     const body = await dialog.evaluate((node) => ({ scrollWidth: node.scrollWidth, clientWidth: node.clientWidth }));
     assert.ok(body.scrollWidth <= body.clientWidth + 1, `settings dialog overflows horizontally: ${body.scrollWidth} > ${body.clientWidth}`);
     const header = all.daemon.getByText("Daemon value", { exact: true }).first();
     assert.equal(await header.isVisible().catch(() => false), false, "column header is still visible on a phone");
+  });
+
+  // at <=640px a row keeps the key and its class badge on one
+  // line (badge flush right), and the file and daemon values span the row below.
+  await check("phones put the key and its class badge on one row, the values across the row below", async () => {
+    const { page } = desktop;
+    const geometry = await page.evaluate(() => {
+      const row = [...document.querySelectorAll(".polyforge-config-row")]
+        .find((node) => (node.querySelector(".polyforge-config-key")?.textContent ?? "").trim() === "step_timeout");
+      if (!row) return null;
+      const rect = (node) => { const r = node.getBoundingClientRect(); return { left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: r.width }; };
+      const style = getComputedStyle(row);
+      const box = row.getBoundingClientRect();
+      return {
+        key: rect(row.querySelector(".polyforge-config-key")),
+        badge: rect(row.querySelector(".polyforge-config-class .polyforge-config-badge")),
+        file: rect(row.querySelector(".polyforge-config-file")),
+        daemon: rect(row.querySelector(".polyforge-config-daemon")),
+        contentLeft: box.left + parseFloat(style.paddingLeft),
+        contentRight: box.right - parseFloat(style.paddingRight),
+      };
+    });
+    assert.ok(geometry, "the badged [daemon] row step_timeout did not render");
+    const { key, badge, file, daemon, contentLeft, contentRight } = geometry;
+    const rowBottom = Math.max(key.bottom, badge.bottom);
+    assert.ok(Math.abs(badge.top - key.top) <= 2, `the badge is not on the key's row (key top ${key.top}, badge top ${badge.top})`);
+    assert.ok(Math.abs(badge.right - contentRight) <= 1, `the badge is not flush right (badge ${badge.right}, row ${contentRight})`);
+    assert.ok(key.left < badge.left, "the key is not left of the badge");
+    for (const [name, value] of [["file", file], ["daemon", daemon]]) {
+      assert.ok(value.top >= rowBottom - 1, `the ${name} value is not below the key/badge row (${value.top} < ${rowBottom})`);
+      assert.ok(Math.abs(value.width - (contentRight - contentLeft)) <= 1, `the ${name} value does not span the row (${value.width} vs ${contentRight - contentLeft})`);
+    }
   });
 
   await desktop.context.close();

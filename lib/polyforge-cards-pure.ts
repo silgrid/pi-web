@@ -4,7 +4,9 @@ import type { PolyforgeJob } from "./polyforge-status";
  * Client-safe model of the Polyforge Jobs-tab card stream:
  * the wire types `GET /api/polyforge/cards` answers with, its bounds, the
  * opaque progress cursor, title truncation, step-duration text and the two
- * client merges (progress entries, last-good snapshot). No Node import may
+ * client merges (progress entries, last-good snapshot); plus the job
+ * detail's short title and its whole-job execution-progress
+ * line model, lifecycle-line composer and snapshot merge. No Node import may
  * enter this file: the panel and the hook load it in the browser.
  */
 
@@ -164,6 +166,18 @@ export function truncateCardTitle(goal: string, length: number): string {
   return `${points.slice(0, Math.max(0, length)).join("")}…`;
 }
 
+/** A running job's card-label suffix: the job's age in whole
+ *  minutes since its earliest `job_started` —
+ *  floor((now − startedAt) / 60s), never hours (`125m`). `0m` under a minute
+ *  and for a negative age (clock skew); a missing or unparsable `startedAt`
+ *  yields null, so the caller shows the bare status label. */
+export function cardRunningMinutes(startedAt: string | undefined, now: number): number | null {
+  if (!startedAt) return null;
+  const startedMs = Date.parse(startedAt);
+  if (!Number.isFinite(startedMs)) return null;
+  return Math.max(0, Math.floor((now - startedMs) / 60_000));
+}
+
 /** Truncate to `max` code points (no ellipsis; the server-side entry cap). */
 export function capCodePoints(value: string, max: number): string {
   const points = Array.from(value);
@@ -182,6 +196,24 @@ export function formatCardDuration(seconds: number): string {
   if (h > 0) return `${h}h ${pad(m)}m ${pad(s)}s`;
   if (m > 0) return `${m}m ${pad(s)}s`;
   return `${s}s`;
+}
+
+/** A conventional-commit `type(scope)!:` prefix (`feat:`, `fix(ui)!:`). */
+const COMMIT_PREFIX = /^[A-Za-z]+(?:\([^)\n]*\))?!?:\s*/;
+/** The first clause boundary: `——`, ` — `, `：`, `:`, `。` or a newline. */
+const CLAUSE_BOUNDARY = /——| — |：|:|。|\n/;
+
+/** The job detail's short title: a pure first-clause
+ *  heuristic over the goal — strip a conventional-commit prefix, cut at the
+ *  first clause boundary, trim. No model, no server title; the one-line fit
+ *  is CSS ellipsis. Undefined when nothing readable remains (the title row
+ *  then shows the slug alone, never an invented title). */
+export function shortJobTitle(goal: string | null | undefined): string | undefined {
+  if (typeof goal !== "string") return undefined;
+  const body = goal.trim().replace(COMMIT_PREFIX, "");
+  const cut = CLAUSE_BOUNDARY.exec(body);
+  const title = (cut ? body.slice(0, cut.index) : body).trim();
+  return title || undefined;
 }
 
 // ---- client merges ----
@@ -223,6 +255,216 @@ export function nextCardSnapshot(
     const entries = mergeCardProgress(before?.progress.entries ?? [], card.progress);
     return { ...card, progress: { ...card.progress, entries, reset: undefined } };
   });
+}
+
+// ---- the whole-job execution progress ----
+
+/** The newest stream lines one progress snapshot carries; `omitted` counts
+ *  the earlier ones exactly. No byte cap: under the bound every line shows. */
+export const PROGRESS_MAX_LINES = 2000;
+/** A lifecycle line's cap, in code points after masking (narration's too). */
+export const PROGRESS_EVENT_MAX = 400;
+
+/** An event line's colour; absent = neutral (`var(--text-muted)`). */
+export type PolyforgeProgressTone = "accent" | "dim" | "red" | "amber" | "green";
+
+/** One line of the whole-job stream: assistant narration, one masked tool
+ *  call (`<name>: <primary argument>`), or one server-composed lifecycle
+ *  line (`event`, with its raw daemon kind in `event` for the hover title). */
+export interface PolyforgeProgressLine {
+  /** Unique within the snapshot; never a path. */
+  id: string;
+  kind: "narration" | "tool" | "event";
+  text: string;
+  /** Event lines only; absent = neutral. */
+  tone?: PolyforgeProgressTone;
+  /** Event lines only: the raw daemon kind. */
+  event?: string;
+}
+
+/** `GET /api/polyforge/progress?wi=` — the whole job's stream, oldest first,
+ *  bounded to the newest PROGRESS_MAX_LINES; a fresh snapshot each time. */
+export interface PolyforgeProgressSnapshot {
+  /** False: no job record/capsule, nothing readable, or the read failed. */
+  available: boolean;
+  lines: PolyforgeProgressLine[];
+  /** The exact count of earlier lines left out by the bound. */
+  omitted: number;
+}
+
+/** One daemon event as the composer sees it: its time, kind and raw body
+ *  (only the whitelisted fields below are ever read from it), plus the
+ *  `step_done` duration the server pairs from the same log. */
+export interface PolyforgeProgressEventInput {
+  at: string;
+  kind: string;
+  body: Record<string, unknown>;
+  durationSec?: number;
+}
+
+/** `HH:MM:SS` in the reader's local time (the server's, for composed lines);
+ *  `--:--:--` for an unreadable time. */
+export function formatProgressClock(at: string | number): string {
+  const date = new Date(typeof at === "number" ? at : Date.parse(at));
+  if (!Number.isFinite(date.getTime())) return "--:--:--";
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+const PROGRESS_TONES = new Set<string>(["accent", "dim", "red", "amber", "green"]);
+
+/** A whitelisted body field as one-line text; anything else reads as absent. */
+function eventField(body: Record<string, unknown>, key: string): string | undefined {
+  const value = body[key];
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  if (typeof value !== "string") return undefined;
+  const text = value.replace(/\s+/g, " ").trim();
+  return text || undefined;
+}
+
+/**
+ * The one lifecycle line of a daemon event, composed
+ * server-side as `<HH:MM:SS> <glyph> <fields…>` — glyphs, no per-kind words:
+ *
+ * | kind | line | tone |
+ * |---|---|---|
+ * | step_started | `▶ <step> #<spawn_n> · <model>` | accent |
+ * | step_done | `■ <step> +<duration>` | dim |
+ * | step_failed / step_dead | `✕ <step> · <cause>` | red |
+ * | needs_input | `? <step>` | amber |
+ * | answered / gate_verdict | `✓ <step>` / `◆ <step>` | neutral |
+ * | rewind | `↺ <gate> → <target>` | neutral |
+ * | terminal | `⏹ <status>` | green completed, red failed, else neutral |
+ * | job_stopped | `⏸` | neutral |
+ * | needs_recovery | `⚠ <reason> · <detail>` | red |
+ * | push_failed | `⚠ <error>` | red |
+ *
+ * Every other kind — `published`, `transcript_missing`, `exec_init`,
+ * `job_started`, `candidate_switched`, `envelope_rejected`,
+ * `authored_tests_rebaselined` and any unknown kind — is dropped (`null`),
+ * with no aggregate row. Only the fields named above are read (`step`,
+ * `model`, `spawn_n`, `cause`, `gate`, `target`, `status`, `reason`,
+ * `detail`, `error`); the composed text goes through `mask` (the server's
+ * credential mask — this module stays Node-free) and is capped at
+ * PROGRESS_EVENT_MAX code points. Pure.
+ */
+export function composeProgressEventLine(
+  id: string,
+  event: PolyforgeProgressEventInput,
+  mask: (text: string) => string,
+): PolyforgeProgressLine | null {
+  const field = (key: string) => eventField(event.body, key);
+  const join = (separator: string, ...parts: (string | undefined)[]) => parts.filter(Boolean).join(separator);
+  const step = field("step");
+  let body: string;
+  let tone: PolyforgeProgressTone | undefined;
+  switch (event.kind) {
+    case "step_started": {
+      const spawn = field("spawn_n");
+      body = join(" · ", join(" ", "▶", step, spawn ? `#${spawn}` : undefined), field("model"));
+      tone = "accent";
+      break;
+    }
+    case "step_done": {
+      const duration = typeof event.durationSec === "number" && Number.isFinite(event.durationSec) && event.durationSec >= 0
+        ? `+${formatCardDuration(event.durationSec)}` : undefined;
+      body = join(" ", "■", step, duration);
+      tone = "dim";
+      break;
+    }
+    case "step_failed":
+    case "step_dead":
+      body = join(" · ", join(" ", "✕", step), field("cause"));
+      tone = "red";
+      break;
+    case "needs_input":
+      body = join(" ", "?", step);
+      tone = "amber";
+      break;
+    case "answered":
+      body = join(" ", "✓", step);
+      break;
+    case "gate_verdict":
+      body = join(" ", "◆", step);
+      break;
+    case "rewind": {
+      const gate = field("gate");
+      const target = field("target");
+      body = join(" ", "↺", join(" → ", gate, target));
+      break;
+    }
+    case "terminal": {
+      const status = field("status");
+      body = join(" ", "⏹", status);
+      tone = status === "completed" ? "green" : status === "failed" ? "red" : undefined;
+      break;
+    }
+    case "job_stopped":
+      body = "⏸";
+      break;
+    case "needs_recovery":
+      body = join(" · ", join(" ", "⚠", field("reason")), field("detail"));
+      tone = "red";
+      break;
+    case "push_failed":
+      body = join(" ", "⚠", field("error"));
+      tone = "red";
+      break;
+    default:
+      return null;
+  }
+  const text = capCodePoints(mask(`${formatProgressClock(event.at)} ${body}`), PROGRESS_EVENT_MAX);
+  return { id, kind: "event", text, ...(tone ? { tone } : {}), event: event.kind };
+}
+
+function isProgressLine(value: unknown): value is PolyforgeProgressLine {
+  if (!value || typeof value !== "object") return false;
+  const line = value as Record<string, unknown>;
+  if (typeof line.id !== "string" || typeof line.text !== "string") return false;
+  if (line.kind === "narration" || line.kind === "tool") return line.tone === undefined && line.event === undefined;
+  return line.kind === "event"
+    && (line.tone === undefined || (typeof line.tone === "string" && PROGRESS_TONES.has(line.tone)))
+    && (line.event === undefined || typeof line.event === "string");
+}
+
+/** The progress snapshot to render after a read (; the
+ * last-good semantics). A failed request (`body` not a
+ *  snapshot), a degraded body (`available: false`) or a malformed one keeps
+ *  the previous snapshot — no flash, no error readout; a usable body
+ *  replaces it wholesale, sliced to the newest PROGRESS_MAX_LINES (the
+ *  slice adds to `omitted`), each line reduced to its wire fields. With
+ *  nothing held yet, a degraded body is the unavailable state. Pure. */
+export function nextProgressSnapshot(
+  previous: PolyforgeProgressSnapshot | null,
+  body: unknown,
+): PolyforgeProgressSnapshot | null {
+  if (!body || typeof body !== "object") return previous;
+  const snapshot = body as Record<string, unknown>;
+  if (typeof snapshot.available !== "boolean" || !Array.isArray(snapshot.lines)) return previous;
+  if (!snapshot.available) return previous ?? { available: false, lines: [], omitted: 0 };
+  const omitted = snapshot.omitted;
+  if (typeof omitted !== "number" || !Number.isSafeInteger(omitted) || omitted < 0) return previous;
+  if (!snapshot.lines.every(isProgressLine)) return previous;
+  const all = snapshot.lines as PolyforgeProgressLine[];
+  const kept = all.slice(-PROGRESS_MAX_LINES);
+  const lines = kept.map(({ id, kind, text, tone, event }) => ({
+    id, kind, text, ...(tone ? { tone } : {}), ...(event ? { event } : {}),
+  }));
+  return { available: true, lines, omitted: omitted + (all.length - kept.length) };
+}
+
+/** How close (px) to the bottom of the detail's scroll region still counts
+ *  as "at the bottom" for the progress follow. */
+export const PROGRESS_PIN_THRESHOLD_PX = 8;
+
+/** Whether a scroll region is at its bottom (within
+ *  PROGRESS_PIN_THRESHOLD_PX), so new progress lines should keep it there;
+ *  content no taller than the viewport is at its bottom. Unreadable numbers
+ *  read as not pinned: the follow then never moves the reader. Pure. */
+export function isProgressPinnedToBottom(region: { scrollTop: number; scrollHeight: number; clientHeight: number }): boolean {
+  const { scrollTop, scrollHeight, clientHeight } = region;
+  if (![scrollTop, scrollHeight, clientHeight].every(Number.isFinite)) return false;
+  return scrollHeight - clientHeight - scrollTop <= PROGRESS_PIN_THRESHOLD_PX;
 }
 
 /** The cursor map the next request sends (wi → cursor). */

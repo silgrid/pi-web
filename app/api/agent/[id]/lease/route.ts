@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getRpcSession } from "@/lib/rpc-manager";
 import { hasUnsettledSubagentRun } from "@/lib/subagent-runtime";
+import { getClaudeSession } from "@/lib/claude-session";
 
 // POST /api/agent/[id]/lease - A page renews the session it has selected, whether or not it
 // holds the event stream: the session's idle countdown starts over (renewIdleTimer()), so it
@@ -12,6 +13,17 @@ export async function POST(
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params;
+  // A claude session's child renews the same way; nothing is started here.
+  const claude = getClaudeSession(id);
+  if (claude) {
+    claude.renewIdleTimer();
+    return NextResponse.json({
+      success: true,
+      running: claude.isRunning(),
+      awaitingInput: false,
+      subagentsActive: false,
+    }, { headers: { "Cache-Control": "no-store" } });
+  }
   const session = getRpcSession(id);
   const alive = Boolean(session?.isAlive());
   // A wrapper built before a hot reload lacks the method; its own timer still runs.

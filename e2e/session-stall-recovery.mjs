@@ -1,3 +1,5 @@
+// carries: components/ChatWindow*, components/ChatInput*, components/MessageView*, hooks/useAgentSession*, lib/agent-*, lib/stream-client*, lib/session-*, app/api/agent/*, app/api/sessions/*
+// carries: lib/page-stream-registry*
 // repro: the newest session content stays hidden when the page's
 // event stream is ESTABLISHED but silent (a weak mobile network), both while
 // the page has its own run under way and when an idle page first sees another
@@ -21,6 +23,11 @@
 //
 //   node e2e/session-stall-recovery.mjs
 //   npm run test:e2e:all -- session-stall-recovery.mjs
+//
+// e2e/all: isolated — BOUND_MS is a wall-clock responsiveness assertion, so
+// the parallel browser pool must not share the host with it: under that pool a
+// loaded box observed 20167ms against the 10000ms bound, while the suite alone
+// passes ( full-bar run).
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer as createHttpServer } from "node:http";
@@ -40,8 +47,6 @@ const artifacts = join(root, "test-results/e2e");
 mkdirSync(artifacts, { recursive: true });
 rmSync(join(root, distDir, "dev/lock"), { force: true });
 
-const agentsPath = join(root, "AGENTS.md");
-const agentsBefore = existsSync(agentsPath) ? readFileSync(agentsPath, "utf8") : null;
 const nextEnvPath = join(root, "next-env.d.ts");
 const nextEnvBefore = existsSync(nextEnvPath) ? readFileSync(nextEnvPath, "utf8") : null;
 
@@ -439,11 +444,6 @@ try {
   if (proxy) await new Promise((resolve) => proxy.close(resolve)).catch(() => {});
   model.close();
   rmSync(agentDir, { recursive: true, force: true });
-  if (agentsBefore !== null) {
-    try {
-      if (readFileSync(agentsPath, "utf8") !== agentsBefore) writeFileSync(agentsPath, agentsBefore);
-    } catch { /* AGENTS.md unavailable after the run */ }
-  }
   if (nextEnvBefore !== null) {
     try {
       if (readFileSync(nextEnvPath, "utf8") !== nextEnvBefore) writeFileSync(nextEnvPath, nextEnvBefore);

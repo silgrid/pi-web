@@ -7,6 +7,7 @@ import {
   getRunningRpcSessionIds,
 } from "@/lib/rpc-manager";
 import { getSessionIdsWithUnsettledSubagentRuns } from "@/lib/subagent-runtime";
+import { getRunningClaudeSessionIds } from "@/lib/claude-session";
 
 export const dynamic = "force-dynamic";
 
@@ -33,7 +34,7 @@ export async function GET() {
   return NextResponse.json(
     {
       sessionListVersion: getSessionListVersion(),
-      runningSessionIds: getRunningRpcSessionIds(),
+      runningSessionIds: [...getRunningRpcSessionIds(), ...getRunningClaudeSessionIds()],
       awaitingSessionIds: getAwaitingRpcSessionIds(),
       completionNotificationSuppressedSessionIds: getCompletionNotificationSuppressedRpcSessionIds(),
       recentSessionWrites: await getRecentSessionWritePayload(),

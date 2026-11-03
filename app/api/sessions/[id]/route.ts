@@ -22,6 +22,43 @@ import { readSessionToolSelection } from "@/lib/session-tool-selection";
 import { jsonResponse } from "@/lib/json-response";
 import { deleteSessions } from "@/lib/session-delete";
 import { attachTranscriptNotices, readSessionTranscriptNotices } from "@/lib/transcript-notices-server";
+import { getClaudeSessionRecord, removeClaudeSessionRecord, updateClaudeSessionRecord, type ClaudeSessionRecord } from "@/lib/claude-index";
+import { claudeSessionInfo, claudeSessionStats, getClaudeSession, readClaudeHistory } from "@/lib/claude-session";
+import { removeClaudeTranscript } from "@/lib/claude-config-dir";
+import { claudePresetTools } from "@/lib/claude-argv";
+import { CLAUDE_PROVIDER } from "@/lib/claude-shared";
+import { normalizeToolCalls } from "@/lib/normalize";
+
+/**
+ * A claude session's detail: the index's row, and the history read from
+ * claude's own transcript through the adapter. No branch tree: a claude session is linear.
+ */
+async function claudeSessionDetail(req: Request, record: ClaudeSessionRecord) {
+  const history = readClaudeHistory(record.id);
+  const [info] = await attachSessionProjectInfo([claudeSessionInfo(record, history)]);
+  const messages = history.messages.map(normalizeToolCalls);
+  return jsonResponse(req, {
+    sessionId: record.id,
+    filePath: history.file ?? "",
+    info,
+    leafId: history.entryIds.at(-1) ?? null,
+    tree: [],
+    // The transcript grows behind pi-web's back: never cached as fresh.
+    snapshotRevision: null,
+    context: {
+      messages,
+      entryIds: history.entryIds,
+      oldestEntryId: history.entryIds[0] ?? null,
+      hasMore: false,
+      turnsBefore: 0,
+      thinkingLevel: "off",
+      model: { provider: CLAUDE_PROVIDER, modelId: record.modelAlias },
+    },
+    stats: claudeSessionStats(record, history.messages),
+    totalActiveMs: 0,
+    toolNames: [...claudePresetTools(record.preset)],
+  });
+}
 
 export async function GET(
   req: Request,
@@ -30,6 +67,8 @@ export async function GET(
   const { id } = await params;
   const perf = startServerPerf("GET /api/sessions/[id]");
   try {
+    const claudeRecord = getClaudeSessionRecord(id);
+    if (claudeRecord) return await claudeSessionDetail(req, claudeRecord);
     perf?.span("resolve");
     const rpc = getRpcSession(id);
     const searchParams = new URL(req.url).searchParams;
@@ -189,13 +228,30 @@ export async function GET(
   }
 }
 
-// PATCH /api/sessions/[id]  body: { name: string }
+// PATCH /api/sessions/[id]  body: { name: string } — a claude session also { archived: boolean }
 export async function PATCH(
   req: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
   try {
+    if (getClaudeSessionRecord(id)) {
+      const { name, archived } = await req.json() as { name?: unknown; archived?: unknown };
+      if ((name !== undefined && typeof name !== "string") || (archived !== undefined && typeof archived !== "boolean") || (name === undefined && archived === undefined)) {
+        return NextResponse.json({ error: "name or archived is required" }, { status: 400 });
+      }
+      const updated = await updateClaudeSessionRecord(id, (record) => {
+        const next: ClaudeSessionRecord = { ...record };
+        if (typeof name === "string") {
+          if (name.trim()) next.name = name.trim();
+          else delete next.name;
+        }
+        if (archived === true) next.archived = true;
+        if (archived === false) delete next.archived;
+        return next;
+      });
+      return updated ? NextResponse.json({ ok: true }) : NextResponse.json({ error: "Session not found" }, { status: 404 });
+    }
     const { name } = await req.json() as { name?: string };
     if (typeof name !== "string") {
       return NextResponse.json({ error: "name is required" }, { status: 400 });
@@ -228,6 +284,13 @@ export async function DELETE(
 ) {
   const { id } = await params;
   try {
+    // A claude session: its child, its index entry and its own transcript, nothing else.
+    if (getClaudeSessionRecord(id)) {
+      await getClaudeSession(id)?.shutdown();
+      removeClaudeTranscript(id);
+      await removeClaudeSessionRecord(id);
+      return NextResponse.json({ ok: true });
+    }
     const { missing } = await deleteSessions([id]);
     if (missing.length > 0) {
       return NextResponse.json({ error: "Session not found" }, { status: 404 });

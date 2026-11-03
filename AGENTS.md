@@ -16,7 +16,7 @@ Typecheck: `node_modules/.bin/tsc --noEmit` · Lint: `npm run lint`
 - A browser-only `Module ... factory is not available` overlay usually means that tab has a stale Turbopack/HMR graph, not a broken server or source. Use the browser's explicit reload, then compare the server log and a direct HTTP/API request.
 - Restart only when the failure reproduces from a fresh page and the server-side checks fail too: stop that exact dev process gracefully, move `.next` into a `mktemp -d` backup, restart with `npm run dev`.
 - Never fall back to `next dev --webpack`: the dev graph can fail on `undici` imports such as `node:console`. Development uses Turbopack.
-- `next dev` may append a generated `BEGIN:nextjs-agent-rules` block to `AGENTS.md`. It is tooling output: check `git status` and keep it out of unrelated commits.
+- `next dev` rewrites the `BEGIN:nextjs-agent-rules` block at the end of this file only when that block differs from the text the installed Next writes. The block here is committed byte-for-byte equal to that output, so a dev or e2e run leaves `AGENTS.md` unchanged; when a Next upgrade changes the block, refresh it in that upgrade's own change (the block's last line names its generator). A unit test pins this equality (`docs/next-agent-rules.test.mjs`).
 
 ### Upgrading pi
 pi's packages depend on each other with `^` ranges, and the published pi-web's dependencies resolve afresh on install (no lockfile ships). Install every `@earendil-works/*` package the tree holds, the SDK's own dependencies included (`pi-codemode`, `pi-mcp`, `pi-telemetry`, …), with `npm install --save-exact`, so npm reuses those exact versions for the SDK's ranges. `lib/pi-packages.test.mjs` fails on any pi package that is not pinned that way; pi-web 0.12.0 pinned four, and installs after pi 1.2.0 paired pi-coding-agent 1.1.0 with pi-codemode 1.2.0.
@@ -37,8 +37,8 @@ pi's packages depend on each other with `^` ranges, and the published pi-web's d
 
 ```
 app/api/
-  sessions/route.ts               GET  list all sessions
-  sessions/[id]/route.ts          GET/PATCH/DELETE session
+  sessions/route.ts               GET  list all sessions (pi files, live pi wrappers, and pi-web's claude index rows with `harness: "claude"`)
+  sessions/[id]/route.ts          GET/PATCH/DELETE session (claude: history from claude's transcript, PATCH { name } / { archived } in the index, DELETE its transcript + entry)
   sessions/[id]/context/route.ts   GET ?leafId=&tail=&before= a page of a leaf's context (tail defaults to 50; before pages upward)
   sessions/[id]/chat-id/route.ts  GET the polyforge chat id of a live session (pi#121; 200-absent, never 5xx)
   sessions/[id]/search/route.ts   GET in-tab search: active-branch matches in earlier (unloaded) history (pi#80)
@@ -48,12 +48,13 @@ app/api/
   agent/[id]/bg-tasks/[taskId]/kill/route.ts POST kill one background task
   fs-manage/route.ts              POST guarded browse-area directory rename/delete (pi#59; typed 200 outcomes)
   sessions/[id]/export/route.ts   GET exported HTML for a session
-  sessions/stats/route.ts          POST { ids } each session's tokens, cost, tool calls, active time (the agent switcher's rows)
-  agent/new/route.ts              POST { cwd, message, toolNames?, provider?, modelId? }
-  agent/[id]/route.ts             GET state | POST any command
-  agent/[id]/events/route.ts      GET SSE stream
-  agent/[id]/lease/route.ts        POST ?holder=<page id> keep the session that page has selected alive (with or without its stream); reply: running, awaitingInput, subagentsActive
-  agent/running/route.ts          GET currently-running session ids
+  sessions/stats/route.ts          POST { ids } each session's tokens, cost, tool calls, active time (the agent switcher's rows; claude: the index's `result` totals)
+  agent/new/route.ts              POST { cwd, message, toolNames?, provider?, modelId? } | { cwd, type, message?, harness: "claude", modelAlias, claudePreset? } (guard first, then index, config dir, child)
+  agent/[id]/route.ts             GET state | POST any command (claude ids: prompt/abort/get_state/get_tools/get_commands/get_session_stats; others refused)
+  agent/[id]/events/route.ts      GET SSE stream (a claude id starts its child, `--resume`, when none is alive)
+  agent/[id]/lease/route.ts        POST ?holder=<page id> keep the session that page has selected alive (with or without its stream); reply: running, awaitingInput, subagentsActive (claude: renews the child, never spawns)
+  agent/running/route.ts          GET currently-running session ids (pi and claude)
+  claude/route.ts                 GET whether claude is on PATH, the claude config dir and the fixed alias/preset choices (reads only;)
   agent/debug/route.ts             GET ?session= the Debug panel's read-only snapshot: wrappers, streams, subagents, MCP, terminals, file watches
   auth/api-key/[provider]/route.ts POST/DELETE provider API key storage
   auth/login/[provider]/route.ts  GET OAuth/device-code SSE | POST manual code
@@ -80,7 +81,7 @@ app/api/
   web-auth/route.ts               GET status | POST login | DELETE logout (browser password)
   plugins/check/route.ts          POST check plugin package updates
   sessions/search/route.ts        GET session search
-  sessions/[id]/state/route.ts    GET live wrapper state when the session is running
+  sessions/[id]/state/route.ts    GET live wrapper state when the session is running (claude: while its child is alive)
   sessions/[id]/auto-name/route.ts POST generate a session title
   terminal/route.ts               POST create a terminal session
   terminal/[id]/route.ts          GET stream | POST input/resize | DELETE kill
@@ -101,12 +102,28 @@ app/api/
   push/subscribe/route.ts         POST register a push subscription
   tools/settings/route.ts         GET/PUT defaultTools switches: PowerShell (Windows) and Code mode (automatic / always)
   cache-miss-notices/route.ts      GET/PUT pi's global showCacheMissNotices (Settings › General)
+  polyforge/status/route.ts       GET the machine's job queue snapshot, sanitized for the panel (pi#108; 200 `status: null` + `pfPresent` on degradation, no 5xx)
+  polyforge/watch/route.ts        GET ?wi=<slug|id> one work item's workflow header, ordered steps and newest 40 events (pi#108; 400 malformed ref before any spawn, 200 `status: null` otherwise)
+  polyforge/memory/route.ts       GET ?cwd=&project=&q= the Memory tab: scope read, browse page (no q) or keyword `pf recall` search (browse; 2.20.12 floor, 400 shape refusals before any spawn, no 5xx)
+  polyforge/memory/[id]/route.ts  GET one memory via `pf memory show` (; 400 malformed id, 200 `memory: null` + capability/error otherwise)
+  polyforge/tasks/route.ts        GET the Tasks tab list: one `pf --json task list`, nine-key rows (/#163/#194; GET only, 2.20.12 floor, no 5xx)
+  polyforge/tasks/[id]/route.ts   GET one task via `pf --json task show` (; 400 malformed id, 200 `task: null` + capability/error otherwise)
+  polyforge/messages/[id]/route.ts  GET ?before=|?after= one conversation's history page (newest without a cursor, `after` is the open conversation's 3 s refresh; 4xx refusals, 200 empty + error when pf is unavailable)
+  polyforge/messages/ack/route.ts POST { conversation_id, seq } advance the caller's read cursor (JSON-only, validated before the spawn; pf's typed refusal 4xx, never 5xx)
+  polyforge/messages/analyze/route.ts  POST { message_id } read-only analyzer one-shot for one received message (JSON-only; nothing persisted; never 5xx)
   polyforge/detect/route.ts       GET ?force= — Settings Polyforge section machine detection (pi#122; 200 flat JSON, no 5xx)
   polyforge/config/route.ts       GET/POST the configuration panel read/write (; pf-only writes, JSON-only POST)
   polyforge/config/reload/route.ts       POST reload, then an independent ops-status read
   polyforge/config/history/route.ts      GET the bounded panel history; POST rollback as a new CAS write
+  polyforge/workflows/route.ts    GET ?cwd= the workflow card's read: fresh `pf --json workflows` + `pf --json config workspace` per call, 2.20.15 floor, 200 degradation (; GET only, no 5xx)
   polyforge/cards/route.ts        GET ?cursors= the Jobs tab's whole card stream in one read: goal, step durations, progress increments (; 200, no 5xx)
-  machine-load/route.ts           GET  host CPU %, cores, loadavg 1/5/15, memory used/total for the Session-info popover and the Debug panel (#168; whitelist only, 2 s shared sample, 200 { metrics: null } on failure, no 5xx)
+  polyforge/progress/route.ts     GET ?wi=wi_… the job detail's execution progress: the whole job's stream — every spawn's narration + one masked tool line, merged with the composed lifecycle/fault lines by time — newest 2000 lines + exact `omitted` (whole-job; 400 bad/unknown wi, 200 `available:false` for a missing/unreadable job index or nothing readable, no 5xx)
+  polyforge/work-items/route.ts   GET the Work › 工单列表 list: one merged `pf --json queue`, 8-key rows, whole-table 200 degradation (; no 5xx)
+  polyforge/work-items/[id]/route.ts GET one work item's detail: id-checked (400) `pf --json file show`, 18-key passport, 256 KiB content cap
+  polyforge/messages/route.ts     GET the Messages list (conversations, contacts, project `groups` from one bounded `pf projects get` per mapped project,); POST send
+  polyforge/users/route.ts        GET the Messages admin probe + membership picker: one `pf --json users list`, humans only, id + display name (; 200 admin:false on refusal, no 5xx)
+  polyforge/projects/members/route.ts  POST add (writer) / remove one user in one mapped project: JSON-only, validated before the one `pf projects members` spawn (; 4xx refusal, 200 {error} unreachable)
+  machine-load/route.ts           GET  host CPU %, cores, loadavg 1/5/15, memory used/total for the Debug panel (#168, #198; whitelist only, 2 s shared sample, 200 { metrics: null } on failure, no 5xx)
 
 lib/
   agent-client.ts      typed fetch helper for /api/agent commands
@@ -182,10 +199,24 @@ lib/
   codemode-settings.ts Code mode automatic / always as `+codemode` in the global defaultTools
   global-settings-file.ts  locked read-modify-write of the global settings.json (shared with SettingsManager's lock)
   regular-file.ts           readRegularFileText(): non-blocking read of a regular file only, optional size cap
-  polyforge-cards.ts        server: the Jobs-tab cards read straight from the daemon's files (events, job record, capsule, spawn journal, pi/claude transcript whitelist, cursor, bounds)
-  polyforge-cards-pure.ts   client-safe card wire types, bounds, cursor shape, ordering, title/duration text, progress merge and last-good snapshot
+  polyforge-cards.ts        server: the Jobs-tab cards read straight from the daemon's files (events, job record, capsule, spawn journal, pi/claude transcript whitelist, cursor, bounds); readJobIndex/readSpawnJournal/readProgressEventLog/readProgressSnapshot/progressEntries for the job detail's whole-job execution progress (#238: every spawn, read-once resumed transcripts, timestamp merge, bounds)
+  polyforge-cards-pure.ts   client-safe card wire types, bounds, cursor shape, ordering, title/duration text, progress merge and last-good snapshot; shortJobTitle; the whole-job progress snapshot (`lines`/`tone`/`event`/`omitted`), PROGRESS_MAX_LINES = 2000, the lifecycle-line composer (glyphs, tones, dropped kinds), the snapshot merge and the scroll follow's isProgressPinnedToBottom (8 px)
+  polyforge-work-items.ts   server: the 工单列表 reads (merged `pf --json queue`, `pf --json file show`), 2.19.0 floor, passports, bounded degradation
+  polyforge-work-items-pure.ts  client-safe work-item wire types, id check, seven statuses, newest-first sort, 500-cap hint, one filter predicate, running count
   polyforge-panel-preferences.ts  the two browser-stored card preferences (title length, poll interval): keys, bounds, clamp, guarded read/write, change event
+  polyforge-workflows-pure.ts  client-safe workflow card row model: default project, one row per step id with its bundles, order (default, steps A–Z, task), declared vs inherited, per-bundle effective chains, chain edit ops
+  polyforge-workflows.ts     server: the workflow card's two pf reads (`pf --json workflows`, `pf --json config workspace`), the 2.20.15 floor, sanitizers, degradation as fields
+  polyforge-disclosure.ts         Settings › Polyforge page disclosure state: one localStorage key, seven region booleans (`workflow` added, `summarize`/`candidates` retired), defaults on absent/corrupt, guarded merge-preserving write, change event
+  polyforge-messages.ts     server: the Messages pf reads/writes — conversations, contacts, the project grouping read (mapping + bounded `pf projects get`), the human-only users read, the membership write; floor, argv validation, sanitizers
+  polyforge-messages-pure.ts  client-safe Messages types, page merges, ackDecision, directRows, conversationForContact, buildProjectGroups, contactsOutsideGroups
+  polyforge-messages-collapse.ts  Messages project-group collapse state: `pi-web:polyforge-messages-collapsed`, a JSON array of collapsed projects, expanded on absent/corrupt, guarded merge-preserving write, in-memory on refusal, change event
   rpc-manager.ts      AgentSessionWrapper + registry + startRpcSession
+  claude-shared.ts          client-safe claude harness vocabulary: harness ids, the four model aliases, the two presets, validators, claudeModelFlag()
+  claude-argv.ts            the claude child's argv per preset (stream-json, bare/strict-MCP or acceptEdits, tool lists, --session-id/--resume) and its sanitized env
+  claude-config-dir.ts      <pi agent dir>/claude: created with a credential-free settings.json (never overwritten), transcript lookup/removal by id
+  claude-index.ts           <pi agent dir>/claude-sessions.json: the claude sessions pi-web created (name, alias, preset, archived, result usage); serialized atomic writes
+  claude-adapter.ts         the only claude-aware module: stream-json events and the jsonl transcript → pi events/messages, result usage, stdin lines
+  claude-session.ts         a claude child per live session: spawn from PATH, stdin prompts, lease/idle, Stop (interrupt, then SIGINT), --resume restart, process-group shutdown, list rows, stats
   session-reader.ts   SessionManager wrappers + path cache + buildSessionContext adapter
   session-delete.ts         deleteSessions(): DELETE /api/sessions/[id], session files with their subagents, re-parenting what stays, wrapper shutdown
   session-links.ts          a session's same-instance link (?session=<id>) and the plain-click rule the sidebar keeps in the page
@@ -197,14 +228,14 @@ lib/
   tool-presets.ts     PRESET_NONE/READ_ONLY/DEFAULT/FULL + getPresetFromTools()
   tool-preset-preference.ts  browser-persisted default for fresh sessions
   tool-fields.ts            a tool call's arguments as flat rows: all of them or no table
-  types.ts            shared TypeScript types
+  types.ts            shared TypeScript types (SessionInfo.harness / claude / archived for claude rows)
   worktree.ts         project/worktree resolution and git worktree operations
 
 components/
-  AppShell.tsx        layout + URL state + tab management
-  SessionSidebar.tsx  the sidebar (internal line; upstream's redesign not adopted,): session rows, pinned directories, archive, filters, multi-root FileExplorer
-  ChatWindow.tsx      chat composition + completion sound wrapper
-  ChatInput.tsx       input bar + model/thinking/tools/compact controls
+  AppShell.tsx        layout + URL state + tab management (claude sessions: export unavailable in visible text, no background tasks/subagents/title)
+  SessionSidebar.tsx  the sidebar (internal line; upstream's redesign not adopted,): session rows (claude rows carry a harness marker), pinned directories, archive (claude rows: in pi-web's index), filters, multi-root FileExplorer
+  ChatWindow.tsx      chat composition + completion sound wrapper (claude sessions: pi-only controls hidden)
+  ChatInput.tsx       input bar + model/thinking/tools/compact controls; ClaudeComposerControls: a fresh composer's pi/claude choice, alias, preset, config dir
   MessageView.tsx     renders one message (user/assistant/toolCall/toolResult)
   CodemodeToolView.tsx  codemode card body: highlighted script + the tool calls it made
   BranchNavigator.tsx in-session branch switcher
@@ -218,11 +249,14 @@ components/
   ProjectTrustDialog.tsx   trust confirmation listing the project's MCP servers
   AgentsConfig.tsx    built-in subagent toggle + agent profile editor
   SubagentViewer.tsx       read-only right-panel tab of a subagent's transcript (polls the context route)
-  DebugPanel.tsx           Debug top panel (toolbar, left of the stats): page and server state, its own tick and poll, error boundary; mounts MachineLoadSection at the top
-  MachineLoadSection.tsx   host-labelled machine-load section of the Session-info popover and the Debug panel (mounted only while one of them is open)
+  DebugPanel.tsx           Debug top panel (toolbar, left of the stats): page and server state, its own tick and poll, error boundary; mounts MachineLoadSection as the last full-width row of `.debug-cols`
+  MachineLoadSection.tsx   host-labelled machine-load section of the Debug panel (its only mount; mounted only while the panel is open)
   debug-panel-state.ts     pure helpers of DebugPanel: formatting, server clock, poller, issues, session grouping, poll samples
   PluginsConfig.tsx   modal for installed package plugins
-  PolyforgeConfig.tsx  Settings › Polyforge section: machine detection display + the pi package switch (pi#122; once-per-open, no polling) + the two browser-stored Jobs card preferences
+  PolyforgeConfig.tsx  Settings › Polyforge section: machine detection display + the pi package switch (pi#122; once-per-open, no polling) + the two browser-stored Jobs card preferences; confirmed order, one-line detection summary, seven common keys with counted read-only folds, collapsed read-outs, per-row inline feedback, browser-stored disclosure; the workflow card (per-project step rows across bundles, declared/inherited and effective chains, inline chain/attr edits through the config write route, ↻ fresh read, capability-gated writes) and the merged 工作区 card (cli.toml mapping + summarize + read-only memory_policy, per-row source-file tags, legend/header above the fold; the declared-candidates card is gone)
+  PolyforgePanel.tsx  the Polyforge dock panel: header, Work | Memory | Messages strip, Work's sub-tab rail, the Jobs card row and the job detail — one scroll region of three blocks, ① summary (title row, folded goal + expand control, facts, summarize narration, tool calls / recent files / origin) ② DAG ③ the whole-job execution progress (lines with tones, omitted marker); the region opens at the top per selection and follows new lines only for a reader at its bottom; no event-mode toggle, command row or event tail (#163, #210, #213, #238)
+  PolyforgeMessages.tsx  the Messages tab: list column (direct rows, collapsible project groups with counts and admin-only add/remove behind confirmations, 群聊) beside the bubble pane (#93, #150, #222, #223)
+  PolyforgeWorkItems.tsx  Work › 工单列表: the read-only work item list/detail surface — one read per opening and per count-key change, client-only filters/search, the 500 hint, no virtualisation
   SkillsConfig.tsx    modal for loaded/search/installable skills
   McpConfig.tsx            Settings › MCP: servers, switches, exposure, remove/undo, Test, sign-in, Code mode, trust
   mcp-config-helpers.ts    pure helpers and requests for McpConfig
@@ -250,7 +284,10 @@ hooks/
   usePrismLanguages.ts  true once the Prism languages are loaded; starts the load for a highlighter
   useTheme.ts         theme state
   useTerminalTheme.ts      the terminal's own dark/light choice (localStorage), apart from the app theme
+  usePolyforgeProgress.ts  the job detail's execution progress: fixed 2 s visible-only poll of /api/polyforge/progress while the selected job runs, one read otherwise, last-good snapshot, a failed first read is unavailable (#238)
   usePolyforgePanelPreferences.ts  the card stream's title length and poll interval, live on save (storage + preferences event)
+  usePolyforgeDisclosure.ts        the Settings › Polyforge page's stored open/closed regions (useSyncExternalStore, all-closed server snapshot, storage + change event)
+  usePolyforgeMessagesCollapse.ts  the Messages list's collapsed project groups under `pi-web:polyforge-messages-collapsed` (useSyncExternalStore, none-collapsed server snapshot, storage + change event)
 ```
 
 ---
@@ -260,6 +297,7 @@ hooks/
 Design decisions and traps live in `docs/agents/`, one note per area. Read every note whose files a change touches before making it. Add new notes to the area's file, not here.
 
 - [sessions.md](docs/agents/sessions.md): AgentSession lifecycle and shutdown, fork vs in-session branching, session file rewrites, toolCall normalization, SSE reconnect and tool events, transcript system / usage / context-edit entries, running-state polling, the manual fetch of the newest data, exported HTML. Files: `lib/rpc-manager.ts`, `lib/session-reader.ts`, `lib/normalize.ts`, `hooks/useAgentSession.ts`, `lib/manual-fetch.ts`, `app/api/agent/**`, `app/api/sessions/**`, `components/BranchNavigator.tsx`, `components/MessageView.tsx`, `components/CodemodeToolView.tsx`, `components/ChatWindow.tsx` (the manual fetch, the message list).
+- [claude-sessions.md](docs/agents/claude-sessions.md): the claude harness harness/alias/preset choice, preset-to-flag table and the per-preset `CLAUDE.md` behaviour, the dedicated config dir and credential rule, pi-web's claude index, history from claude's transcript, lease/idle/`--resume` and process-group shutdown, Stop, result-aggregate usage, the adapter and its recorded fixtures, hidden pi-only features. Files: `lib/claude-*.ts`, `lib/__fixtures__/claude-2.1.312/`, `app/api/claude/route.ts`, the claude branches of `app/api/agent/**` and `app/api/sessions/**`, `instrumentation-node.ts`, claude parts of `hooks/useAgentSession.ts`, `components/ChatInput.tsx`, `components/ChatWindow.tsx`, `components/SessionSidebar.tsx`, `components/AppShell.tsx`, `components/SettingsPanel.tsx`.
 - [tools.md](docs/agents/tools.md): tool presets and Chat only, exact system prompts, tool exposure, the codemode / tool-search / mcp built-ins, the read-only MCP policy, the Code mode and PowerShell `defaultTools` switches. Files: `lib/tool-presets.ts`, `lib/tool-preset-preference.ts`, `lib/chat-only.ts`, `lib/exact-system-prompt.ts`, `lib/builtin-extensions.ts`, `lib/mcp-read-only-policy.ts`, `lib/codemode-settings.ts`, `lib/powershell-settings.ts`, `lib/global-settings-file.ts`, `app/api/agent/new/route.ts`, `app/api/tools/settings/route.ts`, tool selection in `lib/rpc-manager.ts`.
 - [mcp-runtime.md](docs/agents/mcp-runtime.md): the per-session MCP host (when servers register and connect, reported states, trust read on every sync, idle release); `/mcp` in the composer. Files: `lib/mcp-host.ts`, `lib/mcp-transport.ts`, `lib/mcp-status.ts`, `lib/mcp-command.ts`, `lib/mcp-config-key.ts`, MCP wiring in `lib/rpc-manager.ts` and `lib/builtin-extensions.ts`, `/mcp` handling in `hooks/useAgentSession.ts`.
 - [mcp-settings.md](docs/agents/mcp-settings.md): Settings › MCP reads without running anything, masking, the trust dialog's server list, row states, notices, Code mode choice, trust from Settings, Escape stacking, every `mcp.json` write and undo. Files: `app/api/mcp/route.ts`, `app/api/project-trust/route.ts`, `lib/mcp-config-read.ts`, `lib/mcp-config-file.ts`, `lib/mcp-undo.ts`, `lib/mcp-secrets.ts`, `lib/mcp-server-display.ts`, `lib/mcp-json-error.ts`, `lib/project-trust.ts`, `lib/regular-file.ts`, `lib/stacked-dialog.ts`, `lib/settings-navigation.ts`, `components/McpConfig.tsx`, `components/mcp-config-helpers.ts`, `components/ProjectTrustDialog.tsx`, `components/SettingsPanel.tsx`.
@@ -270,8 +308,8 @@ Design decisions and traps live in `docs/agents/`, one note per area. Read every
 - [settings-ui.md](docs/agents/settings-ui.md): Plugins and Skills routes, sidebar group switches, the shared `SettingsUi` blocks every settings panel and add pane uses. Files: `app/api/plugins/**`, `app/api/skills/**`, `components/SettingsUi.tsx`, `components/settings-ui-helpers.ts`, `components/SkillsConfig.tsx`, `components/PluginsConfig.tsx`, `components/PolyforgeConfig.tsx` (the Settings › Polyforge section, pi#122); also before adding a settings section or add pane.
 - [subagents.md](docs/agents/subagents.md): the built-in subagent setting, profiles and their files, run status, completion notifications. Files: `lib/subagent*.ts`, `app/api/subagents/**`, `components/AgentsConfig.tsx`.
 - [client-platform.md](docs/agents/client-platform.md): the global shortcuts (Ctrl+Alt+N on macOS's dead-key Option+N and Windows AltGr, Esc stacking), mobile software keyboard and viewport height, the terminal's extra keys, its own dark/light theme and its font size following the chat's, completion sound, the message list's bottom pull-up that starts the manual fetch. Files: `hooks/useKeyboardShortcuts.ts`, `hooks/useViewportHeight.ts`, `hooks/useAudio.ts`, `components/TerminalExtraKeys.tsx`, `lib/terminal-extra-keys.ts`, `lib/terminal-theme.ts`, `hooks/useTerminalTheme.ts`, `terminalFontSize()` in `hooks/useChatAppearance.ts`, the keyboard-open CSS, the touch pull-up in `components/ChatWindow.tsx`.
-- [polyforge-panel.md](docs/agents/polyforge-panel.md): the Polyforge dock panel — read-only `app/api/polyforge/**` routes (degradation-first, no 5xx), pf subprocess contract (`--once --events 40`, probe TTL), response sanitization, polling cadence, the shared dock slot, the Work tab (Work | Memory | Messages top strip, order; Jobs and Tasks are Work's sub-tabs in a ~72px right rail, a two-segment bar at ≤640px; page-memory sub-tab, anchors land on Work › Jobs), the Settings section's machine detection (pi#122), the configuration panel (the config read/write/reload/history routes, CAS diff, api_key stdin-only, capability floor, bounded history) the Memory tab (browses the project's memories by default with load more and a total, a keyword switches to the `pf recall` relevance read, `pf memory show` detail, the 2.20.12 floor, hit/detail passports, the 256 KiB body cap, no polling), the read-only Tasks tab (`pf task list`/`pf task show` GET faces, 正在运行 / 全部 sections, no spawn or cancel, the 2.20.12 floor; a responsive block grid with state, project, two-line summary and durations — side by side from 340px on, —, client-side project/state filters over the one list read — running ones tick on a local 1 s render clock that never reads), the desktop dock pin (persisted, suppresses only the outside-press dismissal) and the Jobs tab card stream (block, compact side-by-side cards one GET read of the daemon's own files per tick, ordering, key information only — slug + goal, status, the emphasized needs-input marker, narration-only progress (transcript whitelist) — with the DAG step graph, step durations and reruns in the job detail, the no-Loading empty state, cursor and bounds, the daemon/capsule layout coupling, the two browser-stored preferences). Files: `lib/polyforge-status.ts`, `lib/polyforge-cards*.ts`, `lib/polyforge-panel-preferences.ts`, `lib/polyforge-detect.ts`, `lib/polyforge-config*.ts`, `lib/polyforge-memory*.ts`, `lib/polyforge-tasks*.ts`, `lib/package-settings.ts`, `app/api/polyforge/**`, `hooks/usePolyforge.ts`, `hooks/usePolyforgePanelPreferences.ts`, `components/PolyforgePanel.tsx`, `components/PolyforgeMemory.tsx`, `components/PolyforgeTasks.tsx`, `components/PolyforgeConfig.tsx`, `polyforge.*` wiring in `components/AppShell.tsx` and `lib/i18n/messages/*`.
-- [machine-load.md](docs/agents/machine-load.md): the Session-info popover's and the Debug panel's machine load (#168) — the `GET /api/machine-load` whitelist and degradation, the on-demand 2 s shared sampler and delta CPU, the host-view caveat, open + visible client polling, last-good / clear-on-close, the pinned formats. Files: `app/api/machine-load/route.ts`, `lib/machine-load.ts`, `lib/machine-load-view.ts`, `hooks/useMachineLoad.ts`, `components/MachineLoadSection.tsx`, its mounts in `components/AppShell.tsx` and `components/DebugPanel.tsx`, `session.machine*` in `lib/i18n/messages/*`.
+- [polyforge-panel.md](docs/agents/polyforge-panel.md): the Polyforge dock panel — read-only `app/api/polyforge/**` routes (degradation-first, no 5xx), pf subprocess contract (`--once --events 40`, probe TTL), response sanitization, polling cadence, the shared dock slot, the Work tab (Work | Memory | Messages top strip, order; Jobs, Tasks and 工单列表 are Work's sub-tabs in a ~72px right text rail, a 40px right-side vertical icon rail at ≤640px with aria-label/title names and the badge under the icon (; the main area stays first in the DOM, no remount); page-memory sub-tab, anchors land on Work › Jobs), the Messages tab's two panes (the list column right of the chat pane with its divider, 选择一个会话 while nothing is open and the ← back control) at every width — on desktop that divider is a resize separator, width 120px…min(480px, panel−200px), default 35% clamped 120–220px, stored globally under `pi-web:polyforge-messages-list-width`; the ≤640px sheet keeps the fixed `clamp(120px, 35%, 220px)` and no handle; the project groups (one collapsible group per `cli.toml`-mapped project between the direct rows and 群聊, contact counts, empty/failure notes, no unread on group rows, folding stored under `pi-web:polyforge-messages-collapsed`, the `pf users list` admin probe gating add (writer) / remove behind confirmations via `GET /api/polyforge/users` and `POST /api/polyforge/projects/members`, immediate re-read after a change), the read-only work item list (one merged `pf --json queue` and one `pf --json file show` GET face, the 2.19.0 floor, 8-key row / 18-key detail passports, the 256 KiB content cap, whole-table degradation, newest-first rows with the total and the exact-500-per-project hint, client-only status/project filters and slug/goal/project search, no virtualisation, a last-read running badge and one re-read per `queue.running`:terminal-jobs key change), the Settings section's machine detection (pi#122), the configuration panel (the config read/write/reload/history routes, CAS diff, api_key stdin-only, capability floor, bounded history) the Memory tab (browses the project's memories by default with load more and a total, a keyword switches to the `pf recall` relevance read, `pf memory show` detail, the 2.20.12 floor, hit/detail passports, the 256 KiB body cap, no polling), the read-only Tasks tab (`pf task list`/`pf task show` GET faces, 正在运行 / 全部 sections, no spawn or cancel, the 2.20.12 floor; a responsive block grid with state, project, two-line summary and durations — side by side,; the 150px track shared with the Jobs cards, two across at 460px and the 375px sheet, one at 340px, —, client-side project/state filters over the one list read — running ones tick on a local 1 s render clock that never reads; two-line plain-text report tail under the summary, dim 生成中… on running / 暂无报告 on finished blocks without a tail, and a client-only reporter filter (全部发起人, humans ascending, 机器发起 last; component memory only; a 26px ↻ refresh button on the search row re-reads the list once per click — disabled, aria-busy and animate-spin while the newest list read is in flight, labelled polyforge.refresh / polyforge.refreshing)), the desktop dock pin (persisted, suppresses only the outside-press dismissal) and the Jobs tab card stream (block, compact side-by-side cards, the status on the slug's row with the running job's age and no card narration, a 150px Jobs grid minimum shared with the Tasks blocks one GET read of the daemon's own files per tick, ordering, key information only — slug + goal, status, the emphasized needs-input marker, narration-only progress (transcript whitelist) — with the DAG step graph (name + dot only, the status in title/aria-label, skipped a hollow gray ring), step durations and reruns in the job detail (the detail reads summary — the one-line title row with the pure first-clause short title, the goal folded to three lines with an expand control, the job facts, the summarize narration, tool calls / recent files / origin — → DAG with a +duration/×N timing line under each node and the start time in the node title → the whole-job execution progress last via `GET /api/polyforge/progress` and `hooks/usePolyforgeProgress.ts`, lifecycle events as its lines; no event-mode toggle, command row or event tail), the no-Loading empty state, cursor and bounds, the daemon/capsule layout coupling, the two browser-stored preferences). Files: `lib/polyforge-status.ts`, `lib/polyforge-cards*.ts`, `lib/polyforge-panel-preferences.ts`, `lib/polyforge-disclosure.ts`, `lib/polyforge-messages*.ts`, `lib/polyforge-detect.ts`, `lib/polyforge-config*.ts`, `lib/polyforge-memory*.ts`, `lib/polyforge-tasks*.ts`, `lib/polyforge-work-items*.ts`, `lib/polyforge-workflows*.ts`, `lib/package-settings.ts`, `app/api/polyforge/**`, `hooks/usePolyforge.ts`, `hooks/usePolyforgePanelPreferences.ts`, `hooks/usePolyforgeDisclosure.ts`, `hooks/usePolyforgeMessagesCollapse.ts`, `components/PolyforgePanel.tsx`, `components/PolyforgeMessages.tsx`, `components/PolyforgeMemory.tsx`, `components/PolyforgeTasks.tsx`, `components/PolyforgeWorkItems.tsx`, `components/PolyforgeConfig.tsx`, `polyforge.*` wiring in `components/AppShell.tsx` and `lib/i18n/messages/*`.
+- [machine-load.md](docs/agents/machine-load.md): the Debug panel's machine load (#168; the last row of `.debug-cols`, Debug only since) — the `GET /api/machine-load` whitelist and degradation, the on-demand 2 s shared sampler and delta CPU, the host-view caveat, open + visible client polling, last-good / clear-on-close, the pinned formats. Files: `app/api/machine-load/route.ts`, `lib/machine-load.ts`, `lib/machine-load-view.ts`, `hooks/useMachineLoad.ts`, `components/MachineLoadSection.tsx`, its mount in `components/DebugPanel.tsx`, `session.machine*` in `lib/i18n/messages/*`.
 
 ---
 
@@ -317,7 +355,7 @@ Location: `~/.pi/agent/sessions/<encoded-cwd>/<timestamp>_<uuid>.jsonl`
 
 <!-- BEGIN:nextjs-agent-rules -->
 
-# This is NOT the Next.js you know
+## This is NOT the Next.js you know
 
 This version has breaking changes — APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in `node_modules/next/dist/docs/` (resolved from this file's directory; in monorepos the `next` package may not be visible from the repo root) before writing any code. Heed deprecation notices.
 

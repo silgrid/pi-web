@@ -1,3 +1,5 @@
+// carries: components/Polyforge*, components/polyforge-*, hooks/usePolyforge*, lib/polyforge*, app/api/polyforge/*
+// carries: components/AppShell*
 // pi#108 (wi_y3y9SMz4IXKg) — Polyforge dock panel: end-to-end acceptance pass.
 //
 // Authored pre-code against artifacts/spec.md (AC1–AC10; AC11's e2e half is this
@@ -8,6 +10,20 @@
 // by user-visible roles/text ("Polyforge" button/panel, mirroring bg-tasks markup).
 // Each scenario is self-guarding: it logs PASS/FAIL and the run exits 1 on any FAIL.
 //
+// (owner-intentional change, by ruling — not a regression): the
+// pi#112 event tail, its simple/verbose mode toggle, the persisted
+// `pi-web:polyforge-event-mode` preference and the collapsed `sync ×N` row are
+// gone. The N2–N9 pins below now assert the #238 destination with the same
+// fixture: each retained event of the WI112 tail is one line of the job
+// detail's execution progress (glyph + whitelisted fields, ruled tone, raw kind
+// on hover), read through the real progress route from a throwaway capsule
+// (its event log carries the same 25 events, plus a spawn journal and a pi
+// transcript); the noise and hidden kinds produce no line; no mode control
+// exists and the old stored key is never read or written. needs_recovery and
+// push_failed now show their recorded cause by ruling, so
+// their causes moved from the never-leaks sentinels to FAULT112 — still asserted
+// absent from the watch route, whose sanitizer is unchanged (N1).
+//
 //   node e2e/polyforge.mjs
 import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
@@ -17,6 +33,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
 import { startNextServer } from "./next-server.mjs";
+import { NAV_MS } from "./timeouts.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 assert.ok(!existsSync(join(root, process.env.PI_WEB_DIST_DIR || ".next", "dev/lock")), "Run in a checkout without an active dev server");
@@ -48,11 +65,13 @@ const FROM112 = "pi:glm-e2e-old-777";
 const TO112 = "claude:opus-e2e-new-888";
 const SECRETS112 = [
   "E2E-SECRET-QUESTION-112", "E2E-SECRET-DETAIL-112", "E2E-SECRET-EVIDENCE-112",
-  "E2E-SECRET-PUSH-ERROR-112", "E2E-SECRET-ANSWERED-BY-112", "E2E-SECRET-LOCAL-COMMIT-112",
+  "E2E-SECRET-ANSWERED-BY-112", "E2E-SECRET-LOCAL-COMMIT-112",
   "E2E-SECRET-FILES-112", "E2E-SECRET-ARCHIVED-112", "E2E-SECRET-REASON-112",
   "E2E-SECRET-CS-CAUSE-112", "E2E-SECRET-FROM-MODEL-112", "E2E-SECRET-TO-MODEL-112",
   "E2E-SECRET-DISPOSITION-112", "E2E-SECRET-WORKER-COMMAND-112", "fp-secret-session-112",
 ];
+// the fault causes the progress shows by ruling; the watch route never does.
+const FAULT112 = { reason: "E2E-FAULT-REASON-112", detail: "E2E-FAULT-DETAIL-112", error: "E2E-FAULT-PUSH-ERROR-112 git@10.0.0.5:internal/e2e.git" };
 const SECRETS = ["E2E_ENV_NAME_SENTINEL", "/srv/e2e-secret-workspace", "E2E-SECRET-WORKER-COMMAND", "E2E-SECRET-EVENT-BODY", "fp-secret-session", ...SECRETS112];
 const job = (id, slug, status, spawn, step, idle, candidate, owner) => ({ work_item_id: id, slug, status, spawn_n: spawn,
   session_fingerprint: "fp-secret-session", step_age_sec: step, last_work_ago_sec: idle, candidate, origin: { kind: "chat", owner } });
@@ -63,6 +82,11 @@ const JOBS = [
   { work_item_id: WI112, slug: SLUG112, status: "running", spawn_n: 2, step_age_sec: 42, last_work_ago_sec: 9,
     candidate: "codex:e2e-watch", session_fingerprint: "fp-secret-session-112", origin: { kind: "chat", owner: "u_e2e" } },
 ];
+// owner 有意变更 the selected job's progress read looks the wi up in the daemon's own job
+// record; a throwaway data root lists every fixture job (no capsule → 200 `available:false`), as a real
+// daemon lists every job it runs, instead of the host's real data root answering 400 for jobs it never ran.
+const dataRoot = join(work, "pf-data"); mkdirSync(dataRoot);
+writeFileSync(join(dataRoot, "runtime-state.json"), JSON.stringify({ version: 1, jobs: JOBS.map((j) => ({ work_item_id: j.work_item_id })) }));
 const ops = (jobs, running = 2) => ({ machine_id: "m-e2e", workspaces: ["/srv/e2e-secret-workspace"], workflows_dir: "/srv/e2e-secret-workspace/wf",
   env_names: ["POLYFORGE_V1_API_KEY", "E2E_ENV_NAME_SENTINEL"], jobs, queue: { pending: 0, running, max_concurrent: 4 } });
 const at = (n) => `2026-10-18T10:${String(n - 1).padStart(2, "0")}:00Z`;
@@ -104,8 +128,8 @@ const EVENTS_112 = [
   ev112(13, "gate_verdict", { step: "alpha-plan", spawn_n: 2 }),
   ev112(14, "rewind", { gate: "spec-review", target: "kilo-author", archived: ["E2E-SECRET-ARCHIVED-112"], spawn_n: 2 }),
   ev112(15, "envelope_rejected", { step: "bravo-code", detail: "E2E-SECRET-DETAIL-112", spawn_n: 2 }),
-  ev112(16, "needs_recovery", { reason: "E2E-SECRET-REASON-112", detail: "E2E-SECRET-DETAIL-112", spawn_n: 2 }),
-  ev112(17, "push_failed", { error: "E2E-SECRET-PUSH-ERROR-112 git@10.0.0.5:internal/e2e.git", version: 9 }),
+  ev112(16, "needs_recovery", { reason: FAULT112.reason, detail: FAULT112.detail, spawn_n: 2 }),
+  ev112(17, "push_failed", { error: FAULT112.error, version: 9 }),
   ev112(18, "job_started", { spawn_n: 2 }),
   ev112(19, "job_stopped", { spawn_n: 2 }),
   ev112(20, "authored_tests_rebaselined", { step: "kilo-author", files: ["E2E-SECRET-FILES-112"], spawn_n: 2 }),
@@ -115,6 +139,21 @@ const EVENTS_112 = [
   ev112(24, "terminal", { status: "cancelled", reason: "E2E-SECRET-REASON-112", spawn_n: 2 }),
   ev112(25, "future_kind_e2e", { step: "kilo-author", detail: "E2E-SECRET-DETAIL-112", spawn_n: 2 }),
 ];
+// the WI112 capsule the progress route reads — the same 25
+// events in the daemon's event log, one spawn in the journal, its pi transcript.
+const capsule112 = join(work, "capsules", WI112);
+mkdirSync(join(capsule112, "runtime-state"), { recursive: true });
+mkdirSync(join(capsule112, "session"), { recursive: true });
+mkdirSync(join(dataRoot, "events"), { recursive: true });
+writeFileSync(join(dataRoot, "events", `wi-${WI112}.jsonl`), EVENTS_112.map((event) => JSON.stringify(event)).join("\n") + "\n");
+const transcript112 = join(capsule112, "session", "kilo-author.jsonl");
+writeFileSync(transcript112, [
+  { type: "session", id: "s112", timestamp: at2(7) },
+  { type: "message", id: "n112", parentId: null, timestamp: "2026-10-18T11:06:30Z", message: { role: "assistant", content: [{ type: "text", text: "E2E-PI112-NARRATION" }] } },
+  { type: "message", id: "t112", parentId: null, timestamp: "2026-10-18T11:06:40Z", message: { role: "assistant", content: [{ type: "thinking", thinking: "E2E-SECRET-THINKING-112" }, { type: "toolCall", id: "c", name: "bash", arguments: { command: "echo token=E2E-SECRET-TOKEN-112" } }] } },
+].map((record) => JSON.stringify(record)).join("\n") + "\n");
+writeFileSync(join(capsule112, "runtime-state", "spawn-journal.jsonl"), JSON.stringify({ at: at2(7), work_item: WI112, step_id: "kilo-author", spawn_n: 2, started_at: at2(7), transcript: transcript112, harness: "pi" }) + "\n");
+writeFileSync(join(dataRoot, "runtime-state.json"), JSON.stringify({ version: 1, jobs: JOBS.map((j) => (j.work_item_id === WI112 ? { work_item_id: WI112, capsule_dir: capsule112 } : { work_item_id: j.work_item_id })) }));
 const WATCH_112 = { work_item: WI112, slug: SLUG112, known: true, job: { status: "running" },
   execution: { workflow_status: "running", current_step: "kilo-author", updated_at: at2(25),
     steps: { "zulu-grill": { status: "done", started_at: "2026-10-18T09:00:00Z" },
@@ -177,15 +216,15 @@ const T = {
   // pi#112 (wi_5qd5PgbQT1Gw) — readable event tail, authored pre-code against
   // artifacts/spec.md. One scenario per new-behaviour acceptance criterion.
   N1: "N1: Server whitelist exposes per-kind body fields, never non-whitelisted values",
-  N2: "N2: Key event rows render readable with whitelisted context (en)",
-  N3: "N3: Friendly labels localized in zh-CN and zh-TW with interpolated fields",
+  N2: "N2: Lifecycle lines render readable with whitelisted context (en; event rows until)",
+  N3: "N3: zh-CN and zh-TW show the same glyph lines under a localized heading",
   N4: "N4: Dead kind labels and i18n keys removed from all three locales",
-  N5: "N5: Simple mode collapses noise runs into one gray sync row",
-  N6: "N6: Verbose mode shows every event row, noise grayed, raw kind inline",
-  N7: "N7: Raw kind on hover title in both modes",
-  N8: "N8: Severity emphasis: amber, red, green, neutral",
-  N9: "N9: Mode toggle defaults to simple, persists across reload, issues no request",
-  N10: "N10: Sanitization docs describe the shipped per-kind whitelist",
+  N5: "N5: Noise kinds produce no line and no sync row (the simple-mode collapse until)",
+  N6: "N6: No event mode exists and the hidden kinds produce no line (verbose mode until)",
+  N7: "N7: Raw kind on every lifecycle line's hover title",
+  N8: "N8: Severity emphasis: amber, red, green, neutral (plus accent starts)",
+  N9: "N9: The retired event-mode preference is never read or written and changes nothing",
+  N10: "N10: Sanitization docs describe the watch whitelist and the progress line whitelist",
 };
 const failures = new Map(Object.values(T).map((title) => [title, []]));
 const ran = new Set();
@@ -207,7 +246,7 @@ async function startServer(name, path) {
     name,
     logFile,
     env: { ...process.env, PATH: path, PI_CODING_AGENT_DIR: agentDir, PI_WEB_PASSWORD: "", NEXT_TELEMETRY_DISABLED: "1",
-      PI_WEB_ALLOWED_ROOT_PREFIXES: work, POLYFORGE_V1_API_KEY: STALE_KEY },
+      PI_WEB_ALLOWED_ROOT_PREFIXES: work, POLYFORGE_V1_API_KEY: STALE_KEY, POLYFORGE_DATA_DIR: dataRoot },
   });
   base = started.base;
   stop = started.stop;
@@ -236,12 +275,13 @@ async function openPage({ viewport = { width: 1280, height: 800 }, locale } = {}
   page.on("request", (r) => { if (new URL(r.url()).pathname === "/api/polyforge/status") statusRequests.push(Date.now()); });
   // Navigation headroom only: the host is shared and other capsules' e2e
   // servers routinely push a cold page load past the page's 10s action
-  // timeout. The navigation shares the readiness wait's 60s bound: a cold
-  // `next dev` compile under host load outlasts the 10s action default.
+  // timeout. The navigation and the readiness wait use NAV_MS from
+  // e2e/timeouts.mjs: a cold `next dev` compile under host load outlasts the
+  // 10s action default.
   // Assertions below still use the 10s default.
-  await page.goto(`${base}/?session=${SESSION}`, { waitUntil: "domcontentloaded", timeout: 60_000 });
+  await page.goto(`${base}/?session=${SESSION}`, { waitUntil: "domcontentloaded", timeout: NAV_MS });
   // Locale-independent readiness: the host session's first message is mounted.
-  await page.getByText("E2E polyforge host session").first().waitFor({ state: "attached", timeout: 60_000 });
+  await page.getByText("E2E polyforge host session").first().waitFor({ state: "attached", timeout: NAV_MS });
   return page;
 }
 const pfButton = (page) => page.getByRole("button", { name: /^(?!.*close).*polyforge/i }).first();
@@ -310,154 +350,70 @@ function arrayOf(value, pred) { // first array (deep) whose object items satisfy
 const values = (o) => (o && typeof o === "object" ? Object.values(o).flatMap(values) : [o]);
 const argvCalls = () => (existsSync(argvLog) ? readFileSync(argvLog, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)) : []);
 
-// ---- pi#112 event-row helpers: the tail is driven only through what a user
-// sees (row text, hover titles, computed colour) — never through markup the
-// implementation happens to build. A row is anchored by its spec-pinned hover
-// title (raw kind) and bounded by subtree size, not by structure. ----
-const rowText = (panel, kind, index = 0) => panel.first().evaluate((root, { kind, index }) => {
-  const el = [...root.querySelectorAll(`[title*="${kind}"]`)][index];
-  if (!el) return null;
-  let node = el;
-  let row = el;
-  while (node && node !== root && node.querySelectorAll("*").length <= 20) { row = node; node = node.parentElement; }
-  return (row.textContent || "").trim();
-}, { kind, index });
-const rowFamilies = (panel, kind) => panel.first().evaluate((root, kind) => {
-  const family = (color) => {
-    const m = /rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/.exec(String(color));
-    if (!m) return null;
-    const [r, g, b] = [Number(m[1]), Number(m[2]), Number(m[3])];
-    const max = Math.max(r, g, b);
-    const min = Math.min(r, g, b);
-    if (max - min < 25) return "gray";
-    if (r >= max && r > b + 40 && g > b + 20 && r > g + 25) return "amber";
-    if (r >= max && r > g + 40 && r > b + 40) return "red";
-    if (g >= max && g > r + 25) return "green";
-    return "other";
-  };
-  return [...root.querySelectorAll(`[title*="${kind}"]`)].map((el) => {
-    const families = new Set();
-    let node = el;
-    while (node && node !== root && node.querySelectorAll("*").length <= 20) {
-      const cs = getComputedStyle(node);
-      for (const c of [cs.color, cs.backgroundColor, cs.borderLeftColor, cs.borderRightColor]) {
-        const f = family(c);
-        if (f) families.add(f);
-      }
-      node = node.parentElement;
-    }
-    return [...families];
-  });
-}, kind);
-// Luminance distance between a needle's text colour and the nearest opaque
-// background — lower means visually de-emphasized (gray).
-const textContrast = (panel, needle) => panel.first().evaluate((root, needle) => {
-  const lum = (color) => {
-    const m = /rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*(?:,\s*([\d.]+))?\s*\)/.exec(String(color));
-    if (!m || (m[4] !== undefined && Number(m[4]) === 0)) return null;
-    return (0.2126 * Number(m[1]) + 0.7152 * Number(m[2]) + 0.0722 * Number(m[3])) / 255;
-  };
-  const smallest = [...root.querySelectorAll("*")].find((el) => (el.textContent || "").includes(needle)
-    && ![...el.children].some((child) => (child.textContent || "").includes(needle)));
-  if (!smallest) return null;
-  let bg = 0.5;
-  for (let node = smallest; node; node = node.parentElement) {
-    const l = lum(getComputedStyle(node).backgroundColor);
-    if (l !== null) { bg = l; break; }
-  }
-  const fg = lum(getComputedStyle(smallest).color);
-  return fg === null ? null : Math.abs(fg - bg);
-}, needle);
-// en label for a polyforge event kind, read from the message source so the
-// contrast checks below compare like with like (label span vs label span)
-// without hardcoding wording.
-const enKindLabel = (kind) => {
-  const source = readFileSync(join(root, "lib", "i18n", "messages", "en.ts"), "utf8");
-  const m = new RegExp(`"polyforge\\.eventKind\\.${kind}":\\s*"([^"]+)"`).exec(source);
-  assert.ok(m, `en label for ${kind} not found`);
-  return m[1];
-};
+// ---- progress-line helpers (pi#112's event-row pins, moved): a
+// lifecycle line is a `[data-pf-progress-kind="event"]` element of the job
+// detail's execution progress; its hover title starts with the raw kind. The
+// colour checks read the computed colour a user sees. ----
+const eventLines = (panel, kind) => panel.first().evaluate((root, kind) => [...root.querySelectorAll('[data-pf-progress] [data-pf-progress-kind="event"]')]
+  .filter((el) => kind === null || el.getAttribute("title").split("\n")[0] === kind)
+  .map((el) => {
+    const m = /rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/.exec(getComputedStyle(el).color);
+    const [r, g, b] = m ? [Number(m[1]), Number(m[2]), Number(m[3])] : [0, 0, 0];
+    const max = Math.max(r, g, b); const min = Math.min(r, g, b);
+    const family = max - min < 25 ? "gray" : r >= max && r > b + 40 && g > b + 20 && r > g + 25 ? "amber"
+      : r >= max && r > g + 40 && r > b + 40 ? "red" : g >= max && g > r + 25 ? "green" : "other";
+    const cs = getComputedStyle(el);
+    return { kind: el.getAttribute("title").split("\n")[0], title: el.getAttribute("title"), text: (el.textContent || "").trim(),
+      tone: el.getAttribute("data-pf-progress-tone"), family, ellipsis: cs.whiteSpace === "nowrap" && cs.textOverflow === "ellipsis" };
+  }), kind ?? null);
+const lineBody = (line) => line?.text.replace(/^\d{2}:\d{2}:\d{2} /, "");
+const RETAINED112 = ["step_started", "step_failed", "step_dead", "needs_input", "answered", "gate_verdict", "rewind", "needs_recovery", "push_failed", "job_stopped", "terminal"];
+const DROPPED112 = ["published", "transcript_missing", "exec_init", "job_started", "candidate_switched", "envelope_rejected", "authored_tests_rebaselined", "future_kind_e2e"];
+// The expected line bodies (clock stripped) — glyphs and recorded field
+// values only, identical in every locale.
+const LINES112 = [
+  ["step_started", `▶ zulu-grill #2 · ${SHORT_MODEL112}`], ["step_started", `▶ kilo-author #2 · ${MODEL112}`],
+  ["step_failed", "✕ bravo-code · agent-exit-13"], ["step_dead", "✕ mike-spec · timeout-after-3-retries"],
+  ["needs_input", "? zulu-grill"], ["answered", "✓ zulu-grill"], ["gate_verdict", "◆ alpha-plan"],
+  ["rewind", "↺ spec-review → kilo-author"], ["needs_recovery", `⚠ ${FAULT112.reason} · ${FAULT112.detail}`],
+  ["push_failed", `⚠ ${FAULT112.error}`], ["job_stopped", "⏸"],
+  ["terminal", "⏹ completed"], ["terminal", "⏹ failed"], ["terminal", "⏹ cancelled"],
+];
 async function ensureDetail112(page) {
-  // The pi#112 detail is showing iff its tail renders the raw kind
-  // `future_kind_e2e` (unique to this fixture, raw before and after the change
-  // alike). The job row TOGGLES selection, so never blind-click it: verify
-  // first, click only when the detail is absent, retry bounded (a click during
-  // a select-fetch gap deselects; the next attempt re-selects).
-  // Bounded, but long enough for a post-reload status fetch on a loaded
-  // host (N9 reloads the page and expects the detail straight back).
+  // The pi#112 detail is showing iff its title row names the slug and its
+  // execution progress has rendered lifecycle lines. The job card TOGGLES
+  // selection, so never blind-click it: verify first, click only when the
+  // detail is absent, retry bounded (a click during a select-fetch gap
+  // deselects; the next attempt re-selects).
+  const showing = async (panel) => (await panel.locator("[data-pf-detail-title]").getByText(SLUG112, { exact: true }).count()) > 0
+    && (await panel.locator('[data-pf-progress] [data-pf-progress-kind="event"]').count()) > 0;
   for (let attempt = 0; attempt < 20; attempt++) {
     if ((await pfPanel(page).count()) === 0) { await openPanel(page); continue; }
     const panel = pfPanel(page).first();
-    if ((await panel.getByText("future_kind_e2e").count()) > 0) return panel;
-    // put the job list behind a tab strip; made it
-    // Work | Memory | Messages with Jobs as Work's first sub-tab. The
-    // mode-toggle probe clicks every control, including other tabs, which
-    // unmounts the detail. Return to Work (the first top-level tab at every
-    // locale), then its Jobs sub-tab (the first), before looking for the
-    // fixture row.
+    if (await showing(panel)) return panel;
+    // Work (the first top-level tab at every locale), then its Jobs sub-tab
+    // (the first), before looking for the fixture card.
     const workTab = panel.locator('[data-pf-tabstrip="top"] [role="tab"]').first();
     if ((await workTab.count()) > 0 && (await workTab.getAttribute("aria-selected")) !== "true") {
       await workTab.click({ timeout: 2000 }).catch(() => {});
-      await delay(500);
+      await panel.locator('[data-pf-tabstrip="work"]').waitFor({ timeout: 5_000 }).catch(() => {});
       continue;
     }
     const jobsTab = panel.locator('[data-pf-tabstrip="work"] [role="tab"]').first();
     if ((await jobsTab.count()) > 0 && (await jobsTab.getAttribute("aria-selected")) !== "true") {
       await jobsTab.click({ timeout: 2000 }).catch(() => {});
-      await delay(500);
+      await panel.locator(`[data-pf-card-wi="${WI112}"]`).waitFor({ timeout: 5_000 }).catch(() => {});
       continue;
     }
-    if ((await panel.getByText(SLUG112, { exact: true }).count()) === 0) { await delay(500); continue; }
-    await panel.getByText(SLUG112, { exact: true }).first().click().catch(() => {});
-    // Wait for the selection's detail fetch itself (bounded), not a fixed
-    // 500ms: under host load the fetch outlasts it and every attempt fails.
-    await panel.getByText("future_kind_e2e").first().waitFor({ state: "attached", timeout: 10_000 }).catch(() => {});
+    const card112 = panel.locator(`[data-pf-card-wi="${WI112}"]`);
+    if ((await card112.count()) === 0) { await card112.waitFor({ timeout: 5_000 }).catch(() => {}); continue; }
+    if ((await panel.locator("[data-pf-detail-title]").getByText(SLUG112, { exact: true }).count()) === 0) await card112.click().catch(() => {});
+    // Wait for the selection's own progress read (bounded), not a fixed sleep.
+    await panel.locator('[data-pf-progress] [data-pf-progress-kind="event"]').first().waitFor({ state: "attached", timeout: 10_000 }).catch(() => {});
   }
   throw new Error("the pi#112 detail did not render");
 }
-// Wording-independent discovery of the mode toggle: click panel controls
-// (repairing state after each) until the tail flips between collapsed
-// (simple) and per-event (verbose) rows; the control that flips verbosity
-// while the detail stays put is the toggle. Candidates are re-queried
-// positionally each round, so a remounted panel is still covered. Returns the
-// toggle locator with the tail left in SIMPLE mode, or null.
-async function findEventModeToggle(page) {
-  // The dock's tab strips (Work | Memory | Messages, and Work's Jobs | Tasks
-  // sub-tabs,) switch the whole
-  // surface, never the tail's mode, and a click on another tab hides the Jobs
-  // detail where ensureDetail112 cannot re-select it: tabs are not candidates.
-  const selector = ':is(button, [role="button"], [role="switch"], [role="checkbox"], [aria-pressed]):not([role="tab"])';
-  const verbose = async () => (await pfPanel(page).count()) > 0
-    && (await pfPanel(page).first().locator('[title*="exec_init"]').count()) > 0;
-  const detailShowing = async () => (await pfPanel(page).count()) > 0
-    && (await pfPanel(page).first().getByText("future_kind_e2e").count()) > 0;
-  await ensureDetail112(page);
-  // Phase 1: flip simple → verbose by trying every control.
-  for (let round = 0; round < 3 && !(await verbose()); round++) {
-    const panel = pfPanel(page).first();
-    const count = await panel.locator(selector).count();
-    for (let i = 0; i < count && !(await verbose()); i++) {
-      await panel.locator(selector).nth(i).click({ timeout: 2000 }).catch(() => {});
-      await delay(250);
-      await ensureDetail112(page);
-    }
-  }
-  if (!(await verbose())) return null;
-  // Phase 2: flip verbose → simple; the control that does it without losing
-  // the detail is the toggle.
-  for (let round = 0; round < 3 && (await verbose()); round++) {
-    const panel = pfPanel(page).first();
-    const count = await panel.locator(selector).count();
-    for (let i = 0; i < count && (await verbose()); i++) {
-      const candidate = panel.locator(selector).nth(i);
-      await candidate.click({ timeout: 2000 }).catch(() => {});
-      await delay(250);
-      if ((await detailShowing()) && !(await verbose())) return candidate;
-      await ensureDetail112(page);
-    }
-  }
-  return null;
-}
+const MODE_LABELS = /^(simple|verbose|简洁|详细|簡潔|詳細)$/i;
 
 try {
   browser = await chromium.launch();
@@ -578,7 +534,12 @@ try {
     assert.ok(!r.text.includes("E2E-PENDING-QUESTION-TEXT"), "watch route leaks the pending question");
     const panel = await openPanel(page);
     await panel.getByText("pi#109", { exact: true }).first().click();
-    await panel.getByText(/blocked/i).first().waitFor();
+    // owner 有意变更 the workflow status moved from the old header's visible text into the
+    // title row's hover title (the row shows the job status); the blocked status is read there.
+    const titleRow = panel.locator('[data-pf-detail-title][title*="Blocked" i]').first();
+    await titleRow.waitFor();
+    assert.match(await titleRow.getAttribute("title") ?? "", /blocked/i, "the detail shows the blocked workflow status");
+    assert.ok(!(await titleRow.getAttribute("title") ?? "").includes("E2E-PENDING-QUESTION-TEXT"), "the hover shows the pending question");
     assert.ok(!(await panel.innerText()).includes("E2E-PENDING-QUESTION-TEXT"), "panel shows the pending question");
   });
 
@@ -669,7 +630,8 @@ try {
   // guarding the pi#108 bar (including the E2E-SECRET-EVENT-BODY sentinel —
   // now also enforced for the widened pi#112 bodies via SECRETS112).
 
-  // N1 — server-side whitelist: per-kind body fields pass, nothing else.
+  // N1 — server-side whitelist: per-kind body fields pass, nothing else
+  // (the watch sanitizer is unchanged by).
   await check(T.N1, "watch route whitelist", async () => {
     const r = await get(`/api/polyforge/watch?wi=pi%23112`);
     assert.equal(r.status, 200, `watch route answered ${r.status}`);
@@ -687,50 +649,34 @@ try {
     }
     const switchedEvent = events.find((e) => e && e.kind === "candidate_switched");
     assert.ok(switchedEvent && JSON.stringify(switchedEvent).includes("alpha-plan"), "candidate_switched.step is not exposed by the watch route");
-    for (const secret of SECRETS112) assert.ok(!r.text.includes(secret), `watch response leaks ${secret}`);
+    for (const secret of [...SECRETS112, ...Object.values(FAULT112)]) assert.ok(!r.text.includes(secret), `watch response leaks ${secret}`);
   });
 
-  // N2 — readable rows (en): friendly label + whitelisted context, model
-  // ellipsized with the full value on hover, nothing else rendered.
-  await withPage(T.N2, "readable rows", {}, async (page) => {
+  // N2 — readable lines (en): each retained event is one line, glyph +
+  // whitelisted fields, in event order; the long model is the CSS-ellipsized
+  // line's text with the full value on hover; nothing else leaks.
+  await withPage(T.N2, "readable lines", {}, async (page) => {
     const panel = await ensureDetail112(page);
-    assert.ok((await panel.locator(`[title*="${MODEL112}"]`).count()) >= 1, "no hover title carries the full model string");
-    assert.ok((await panel.getByText("example-gateway/model-a").count()) >= 1, "the step_started row does not show the model");
-    assert.equal(await panel.getByText(MODEL112).count(), 0, "the long model is not ellipsized in the row text");
-    const started = await rowText(panel, "step_started", 0);
-    assert.ok(started?.includes("zulu-grill") && started.includes(SHORT_MODEL112), `step_started row lacks step/model: ${JSON.stringify(started)}`);
-    const started2 = await rowText(panel, "step_started", 1);
-    assert.ok(started2?.includes("kilo-author"), `second step_started row lacks its step: ${JSON.stringify(started2)}`);
-    const switched = await rowText(panel, "candidate_switched");
-    assert.ok(switched?.includes("alpha-plan"), `candidate_switched row lacks its step: ${JSON.stringify(switched)}`);
-    assert.ok(switched?.includes(FROM112) && switched.includes(TO112), `candidate_switched row lacks from/to: ${JSON.stringify(switched)}`);
-    assert.match(switched ?? "", /→|->/, "candidate_switched row shows no from → to form");
-    const failed = await rowText(panel, "step_failed");
-    assert.ok(failed?.includes("bravo-code") && failed.includes("agent-exit-13"), `step_failed row lacks step/cause: ${JSON.stringify(failed)}`);
-    const dead = await rowText(panel, "step_dead");
-    assert.ok(dead?.includes("mike-spec") && dead.includes("timeout-after-3-retries"), `step_dead row lacks step/cause: ${JSON.stringify(dead)}`);
-    const rewind = await rowText(panel, "rewind");
-    assert.ok(rewind?.includes("spec-review") && rewind.includes("kilo-author"), `rewind row lacks gate/target: ${JSON.stringify(rewind)}`);
-    const terminals = await Promise.all([0, 1, 2].map((i) => rowText(panel, "terminal", i)));
-    assert.match(terminals[0] ?? "", /completed|complete/i, `terminal completed row lacks its status: ${JSON.stringify(terminals[0])}`);
-    assert.match(terminals[1] ?? "", /failed/i, `terminal failed row lacks its status: ${JSON.stringify(terminals[1])}`);
-    assert.match(terminals[2] ?? "", /cancelled|canceled/i, `terminal cancelled row lacks its status: ${JSON.stringify(terminals[2])}`);
+    const lines = await eventLines(panel, null);
+    assert.deepEqual(lines.map((line) => [line.kind, lineBody(line)]), LINES112, `the lifecycle lines: ${JSON.stringify(lines.map((line) => line.text))}`);
+    for (const line of lines) assert.match(line.text, /^\d{2}:\d{2}:\d{2} /, `each line starts with its clock: ${line.text}`);
+    const long = lines.find((line) => line.text.includes(MODEL112));
+    assert.ok(long?.title.includes(MODEL112) && long.ellipsis, `the long model line is one ellipsized line with the full value on hover: ${JSON.stringify(long)}`);
     const text = await panel.innerText();
-    for (const secret of SECRETS112) assert.ok(!text.includes(secret), `panel leaks ${secret}`);
+    assert.ok(text.includes("E2E-PI112-NARRATION") && text.includes("bash: echo token=***"), "the spawn's transcript lines share the stream");
+    for (const secret of [...SECRETS112, "E2E-SECRET-THINKING-112", "E2E-SECRET-TOKEN-112"]) assert.ok(!text.includes(secret), `panel leaks ${secret}`);
+    const titles = JSON.stringify(lines.map((line) => line.title));
+    for (const secret of SECRETS112) assert.ok(!titles.includes(secret), `a hover title leaks ${secret}`);
   });
 
-  // N3 — friendly labels exist for the new kinds in zh-CN and zh-TW, with the
-  // whitelisted fields interpolated; no raw polyforge.* key anywhere.
-  for (const locale of ["zh-CN", "zh-TW"]) {
+  // N3 — zh-CN and zh-TW: the same lines (glyphs and recorded values need no
+  // per-kind words), a translated progress heading, no raw polyforge.* key.
+  for (const [locale, heading] of [["zh-CN", "执行进度"], ["zh-TW", "執行進度"]]) {
     await withPage(T.N3, locale, { locale }, async (page) => {
       const panel = await ensureDetail112(page);
-      for (const kind of ["candidate_switched", "step_dead", "rewind", "terminal", "push_failed"]) {
-        const row = await rowText(panel, kind);
-        assert.ok(row, `${locale}: no row carries the raw kind ${kind} on hover`);
-        assert.match(row, /[一-鿿]/, `${locale}: ${kind} row has no translated label`);
-      }
-      const switched = await rowText(panel, "candidate_switched");
-      assert.ok(switched?.includes(FROM112) && switched.includes(TO112), `${locale}: candidate_switched row lost from/to`);
+      const lines = await eventLines(panel, null);
+      assert.deepEqual(lines.map((line) => [line.kind, lineBody(line)]), LINES112, `${locale}: the lifecycle lines`);
+      assert.equal(await panel.locator("[data-pf-progress]").getByText(heading, { exact: true }).count(), 1, `${locale}: the progress heading is translated`);
       assert.doesNotMatch(await panel.innerText(), /polyforge\.[a-z]/i, `${locale} panel shows a raw i18n key`);
     });
   }
@@ -745,130 +691,107 @@ try {
     }
   });
 
-  // N5 — simple mode (the default): noise runs collapse to one gray sync row,
-  // lone noise too (sync ×1); meaningful events never collapse.
-  await withPage(T.N5, "simple mode", {}, async (page) => {
+  // N5 — (was: simple mode collapses noise runs) the noise kinds produce no
+  // line and no collapsed `sync ×N` row; meaningful events never collapse.
+  await withPage(T.N5, "no noise, no sync row", {}, async (page) => {
     const panel = await ensureDetail112(page);
-    assert.equal(await panel.getByText(/sync\s*[×x]\s*5/i).count(), 1, "a 5-event noise run did not collapse to one 'sync ×5' row");
-    assert.equal(await panel.getByText(/sync\s*[×x]\s*1\b/i).count(), 1, "a lone noise event did not render as one 'sync ×1' row");
-    assert.equal(await panel.getByText("transcript_missing").count(), 0, "noise events render individually in simple mode");
-    assert.equal(await panel.getByText("exec_init").count(), 0, "noise events render individually in simple mode");
-    assert.equal(await panel.locator('[title*="terminal"]').count(), 3, "terminal events collapsed (meaningful events must never collapse)");
-    assert.equal(await panel.locator('[title*="step_started"]').count(), 2, "step_started events collapsed (meaningful events must never collapse)");
-    assert.equal(await panel.locator('[title*="job_started"]').count(), 1, "job_started event collapsed (meaningful events must never collapse)");
-    // pi#114: the old "zulu-grill" anchor matched a step chip (now a status-coloured
-    // graph node), not an event row; compare like with like (row label vs row label).
-    const syncContrast = await textContrast(panel, "sync");
-    const anchorContrast = await textContrast(panel, enKindLabel("gate_verdict"));
-    assert.ok(syncContrast !== null && anchorContrast !== null && syncContrast < anchorContrast,
-      `the sync row is not de-emphasized (gray) against a meaningful row (sync ${syncContrast}, anchor ${anchorContrast})`);
+    for (const kind of ["published", "transcript_missing", "exec_init", "job_started"]) {
+      assert.equal((await eventLines(panel, kind)).length, 0, `${kind} produces no line`);
+    }
+    assert.equal(await panel.getByText(/sync\s*[×x]\s*\d/i).count(), 0, "no collapsed sync row");
+    assert.equal((await eventLines(panel, "terminal")).length, 3, "terminal events never collapse");
+    assert.equal((await eventLines(panel, "step_started")).length, 2, "step_started events never collapse");
   });
 
-  // N6 — verbose mode: every event its own row, noise grayed individually,
-  // raw kind inline, no collapsing.
-  await withPage(T.N6, "verbose mode", {}, async (page) => {
-    const toggle = await findEventModeToggle(page); // leaves the tail in simple mode
-    assert.ok(toggle, "no control in the panel switches the event tail to verbose mode");
-    await toggle.click();
-    await delay(300);
-    const panel = pfPanel(page).first();
-    assert.equal(await panel.locator('[title*="published"]').count(), 3, "verbose mode must render every published event");
-    assert.equal(await panel.locator('[title*="transcript_missing"]').count(), 2, "verbose mode must render every transcript_missing event");
-    assert.equal(await panel.locator('[title*="exec_init"]').count(), 1, "verbose mode must render every exec_init event");
-    assert.equal(await panel.locator('[title*="step_started"]').count(), 2, "verbose mode must render every step_started event");
-    assert.equal(await panel.locator('[title*="terminal"]').count(), 3, "verbose mode must render every terminal event");
-    assert.equal(await panel.getByText(/sync\s*[×x]\s*\d/i).count(), 0, "verbose mode must not collapse noise runs");
-    const pushed = await rowText(panel, "push_failed");
-    assert.ok(pushed?.includes("push_failed"), `the raw kind is not shown inline on verbose rows: ${JSON.stringify(pushed)}`);
-    // Like-with-like: compare the noise row's friendly label against a
-    // meaningful neutral row's label (the raw-kind spans are dim on every
-    // verbose row, so comparing those would pass even without noise styling).
-    const noiseContrast = await textContrast(panel, enKindLabel("exec_init"));
-    const anchorContrast = await textContrast(panel, enKindLabel("gate_verdict"));
-    assert.ok(noiseContrast !== null && anchorContrast !== null && noiseContrast < anchorContrast,
-      `verbose noise rows are not grayed (noise ${noiseContrast}, anchor ${anchorContrast})`);
+  // N6 — (was: verbose mode) there is no mode: no control switches the
+  // stream, and the hidden kinds produce no line in any state.
+  await withPage(T.N6, "no mode, hidden kinds", {}, async (page) => {
+    const panel = await ensureDetail112(page);
+    assert.equal(await panel.getByRole("button", { name: MODE_LABELS }).count(), 0, "no simple/verbose control exists");
+    for (const kind of DROPPED112) assert.equal((await eventLines(panel, kind)).length, 0, `${kind} produces no line`);
+    const text = await panel.locator("[data-pf-progress]").innerText();
+    for (const value of [FROM112, TO112, "future_kind_e2e"]) assert.ok(!text.includes(value), `a hidden kind's field shows: ${value}`);
   });
 
-  // N7 — the raw kind is one hover away in both modes (touch screens).
+  // N7 — the raw kind is one hover away on every lifecycle line.
   await withPage(T.N7, "hover titles", {}, async (page) => {
-    const panel = await ensureDetail112(page); // simple mode (the default)
-    for (const kind of ["step_started", "candidate_switched", "step_failed", "step_dead", "needs_input", "rewind", "terminal", "answered", "gate_verdict", "future_kind_e2e"]) {
-      assert.ok((await panel.locator(`[title*="${kind}"]`).count()) >= 1, `simple mode: no hover title carries the raw kind ${kind}`);
-    }
-    const toggle = await findEventModeToggle(page);
-    assert.ok(toggle, "no mode toggle found");
-    await toggle.click();
-    await delay(300);
-    const panel2 = pfPanel(page).first();
-    for (const kind of ["published", "transcript_missing", "exec_init"]) {
-      assert.ok((await panel2.locator(`[title*="${kind}"]`).count()) >= 1, `verbose mode: no hover title carries the raw kind ${kind}`);
+    const panel = await ensureDetail112(page);
+    for (const kind of RETAINED112) {
+      const lines = await eventLines(panel, kind);
+      assert.ok(lines.length >= 1, `no line carries the raw kind ${kind} on hover`);
+      for (const line of lines) assert.equal(line.title, `${kind}\n${line.text}`, `${kind}: the hover is the raw kind and the full line`);
     }
   });
 
-  // N8 — severity: needs_input amber; failures red; terminal completed green;
-  // terminal failed red; terminal cancelled and everything else neutral.
+  // N8 — severity: needs_input amber; failures and faults red; terminal
+  // completed green, failed red, cancelled neutral; the rest neutral; starts
+  // accent. Asserted on the tone hook and on the computed colour alike.
   await withPage(T.N8, "severity", {}, async (page) => {
     const panel = await ensureDetail112(page);
-    const first = async (kind) => (await rowFamilies(panel, kind))[0] ?? [];
-    assert.ok((await first("needs_input")).includes("amber"), "the needs_input row is not amber");
-    for (const kind of ["step_failed", "step_dead", "push_failed", "envelope_rejected", "needs_recovery"]) {
-      assert.ok((await first(kind)).includes("red"), `the ${kind} row is not red`);
+    const first = async (kind) => (await eventLines(panel, kind))[0];
+    const needsInput = await first("needs_input");
+    assert.ok(needsInput.tone === "amber" && needsInput.family === "amber", `the needs_input line is not amber: ${JSON.stringify(needsInput)}`);
+    for (const kind of ["step_failed", "step_dead", "push_failed", "needs_recovery"]) {
+      const line = await first(kind);
+      assert.ok(line.tone === "red" && line.family === "red", `the ${kind} line is not red: ${JSON.stringify(line)}`);
     }
-    const terminals = await rowFamilies(panel, "terminal");
-    assert.equal(terminals.length, 3, `expected 3 terminal rows, found ${terminals.length}`);
-    assert.ok(terminals[0].includes("green") && !terminals[0].includes("red"), "the terminal completed row is not green");
-    assert.ok(terminals[1].includes("red"), "the terminal failed row is not red");
-    assert.ok(!terminals[2].some((f) => ["red", "amber", "green"].includes(f)), "the terminal cancelled row is not neutral");
-    for (const kind of ["answered", "gate_verdict", "rewind"]) {
-      assert.ok(!(await first(kind)).some((f) => ["red", "amber", "green"].includes(f)), `the ${kind} row is not neutral`);
+    const terminals = await eventLines(panel, "terminal");
+    assert.equal(terminals.length, 3, `expected 3 terminal lines, found ${terminals.length}`);
+    assert.ok(terminals[0].tone === "green" && terminals[0].family === "green", "the terminal completed line is not green");
+    assert.ok(terminals[1].tone === "red" && terminals[1].family === "red", "the terminal failed line is not red");
+    const plainColour = (line) => !["red", "amber", "green"].includes(line.family);
+    assert.ok(terminals[2].tone === "neutral" && plainColour(terminals[2]), `the terminal cancelled line is not neutral: ${JSON.stringify(terminals[2])}`);
+    for (const kind of ["answered", "gate_verdict", "rewind", "job_stopped"]) {
+      const line = await first(kind);
+      assert.ok(line.tone === "neutral" && plainColour(line), `the ${kind} line is not neutral: ${JSON.stringify(line)}`);
+    }
+    assert.equal((await first("step_started")).tone, "accent", "a start line is accent");
+  });
+
+  // N9 — (was: the toggle persists) the toggle is gone and the old
+  // `pi-web:polyforge-event-mode` key is never read or written: a page with
+  // the key seeded renders the same lines, and the key stays as seeded.
+  await withPage(T.N9, "retired preference", {}, async (page) => {
+    const plain = await eventLines(await ensureDetail112(page), null);
+    const context = await browser.newContext({ viewport: { width: 1280, height: 800 }, locale: "en-US" });
+    try {
+      await context.addInitScript(() => {
+        try {
+          localStorage.setItem("pi-web:split-view-enabled", "false");
+          localStorage.setItem("pi-web:polyforge-event-mode", "verbose");
+          const touched = [];
+          window.__eventModeTouched = touched;
+          for (const name of ["getItem", "setItem", "removeItem"]) {
+            const original = Storage.prototype[name];
+            Storage.prototype[name] = function (key, ...rest) { if (key === "pi-web:polyforge-event-mode") touched.push(name); return original.call(this, key, ...rest); };
+          }
+        } catch { /* storage unavailable */ }
+      });
+      const seeded = await context.newPage();
+      seeded.setDefaultTimeout(10_000);
+      await seeded.goto(`${base}/?session=${SESSION}`, { waitUntil: "domcontentloaded", timeout: NAV_MS });
+      await seeded.getByText("E2E polyforge host session").first().waitFor({ state: "attached", timeout: NAV_MS });
+      const lines = await eventLines(await ensureDetail112(seeded), null);
+      assert.deepEqual(lines.map((line) => [line.kind, line.text, line.tone]), plain.map((line) => [line.kind, line.text, line.tone]), "the seeded key changes nothing");
+      assert.equal(await pfPanel(seeded).first().getByRole("button", { name: MODE_LABELS }).count(), 0, "no mode control appears for the seeded key");
+      assert.deepEqual(await seeded.evaluate(() => window.__eventModeTouched), [], "the retired key is never read, written or cleared");
+      assert.equal(await seeded.evaluate(() => localStorage.getItem("pi-web:polyforge-event-mode")), "verbose", "the seeded value stays as it was");
+    } finally {
+      await context.close();
     }
   });
 
-  // N9 — the mode toggle: default simple on a first visit, no request when
-  // toggled, and the preference survives a reload.
-  await withPage(T.N9, "toggle", {}, async (page) => {
-    const watchHits = [];
-    page.on("request", (r) => { if (new URL(r.url()).pathname === "/api/polyforge/watch") watchHits.push(Date.now()); });
-    const panel = await ensureDetail112(page);
-    assert.equal(await panel.getByText(/sync\s*[×x]\s*5/i).count(), 1, "first visit is not simple mode (no collapsed noise row)");
-    assert.equal(await panel.locator('[title*="exec_init"]').count(), 0, "first visit renders per-event noise rows (default must be simple)");
-    const toggle = await findEventModeToggle(page); // leaves the tail in simple mode
-    assert.ok(toggle, "no mode-toggle control in the event-tail area");
-    // Flip simple → verbose, synchronized just after a watch poll: the next
-    // cadence poll is ~3s away, so any request before it is the toggle's own
-    // network I/O (the spec forbids any).
-    await page.waitForRequest((r) => new URL(r.url()).pathname === "/api/polyforge/watch", { timeout: 9000 });
-    await delay(100);
-    const lastPoll = watchHits.at(-1);
-    await delay(300);
-    await toggle.click();
-    await delay(3500);
-    const early = watchHits.filter((t) => t > (lastPoll ?? 0) + 300 && t < (lastPoll ?? 0) + 2500);
-    assert.deepEqual(early, [], `the mode toggle issued ${early.length} server request(s)`);
-    assert.ok((await pfPanel(page).first().locator('[title*="exec_init"]').count()) >= 1, "the toggle did not switch to verbose mode");
-    await toggle.click();
-    await delay(300);
-    assert.equal(await panel.getByText(/sync\s*[×x]\s*5/i).count(), 1, "the toggle did not switch back to simple mode");
-    await toggle.click();
-    await delay(300);
-    assert.ok((await pfPanel(page).first().locator('[title*="exec_init"]').count()) >= 1, "the toggle did not switch back to verbose mode");
-    // Persisted globally in localStorage: a reload restores verbose without
-    // re-toggling.
-    await page.reload({ waitUntil: "domcontentloaded", timeout: 60_000 });
-    await page.getByText("E2E polyforge host session").first().waitFor({ state: "attached", timeout: 60_000 });
-    const panel2 = await ensureDetail112(page);
-    assert.ok((await panel2.locator('[title*="exec_init"]').count()) >= 1, "the verbose preference did not survive a reload");
-  });
-
-  // N10 — the Sanitization docs change with the code: the per-kind whitelist
-  // (and the never-leaks list) is described, and the old "bodies are dropped
-  // wholesale" wording is gone.
+  // N10 — the Sanitization docs change with the code: the watch route's
+  // per-kind whitelist and the progress lifecycle lines' field whitelist.
   await check(T.N10, "sanitization docs", async () => {
     const doc = readFileSync(join(root, "docs", "agents", "polyforge-panel.md"), "utf8");
     const section = /## Sanitization[\s\S]*?(?=\n## |$)/.exec(doc)?.[0] ?? "";
     assert.ok(section.length > 0, "the doc has no Sanitization section");
     for (const word of ["step_started", "model", "candidate_switched", "terminal", "status", "question", "error"]) {
       assert.ok(new RegExp(word, "i").test(section), `the Sanitization section does not mention ${word}`);
+    }
+    for (const needle of ["**Progress lifecycle lines.**", "`composeProgressEventLine`", "`needs_recovery` → `reason` + `detail`", "`push_failed` → `error`", "`candidate_switched`, `envelope_rejected`, `authored_tests_rebaselined`"]) {
+      assert.ok(section.includes(needle), `the Sanitization section does not describe ${needle}`);
     }
   });
 

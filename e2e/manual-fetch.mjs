@@ -1,3 +1,5 @@
+// carries: components/ChatWindow*, components/ChatInput*, components/MessageView*, hooks/useAgentSession*, lib/agent-*, lib/stream-client*, lib/session-*, app/api/agent/*, app/api/sessions/*
+// carries: lib/manual-fetch*, lib/i18n/*
 // the session page's manual "fetch latest" affordance.
 //
 // Authored pre-code from artifacts/spec.md (its acceptance criteria and
@@ -29,8 +31,6 @@ mkdirSync(artifacts, { recursive: true });
 const distDir = process.env.PI_WEB_DIST_DIR || ".next/e2e/manual-fetch";
 rmSync(join(root, distDir, "dev/lock"), { force: true });
 
-const agentsPath = join(root, "AGENTS.md");
-const agentsBefore = existsSync(agentsPath) ? readFileSync(agentsPath, "utf8") : null;
 const nextEnvPath = join(root, "next-env.d.ts");
 const nextEnvBefore = existsSync(nextEnvPath) ? readFileSync(nextEnvPath, "utf8") : null;
 
@@ -332,25 +332,18 @@ try {
     return created;
   }
 
-  // The ↻ control lives in the chat top toolbar, immediately before the
-  // session-stats control. Find that toolbar from the stats button, then the
-  // refresh-shaped control inside it (the ↻ glyph + its refresh label).
+  // the ↻ control is the chat's floating button in its refresh
+  // form (shown at the tail of a saved session; scrolled up the same button is
+  // ↓ "scroll to latest" and fetches nothing). The toolbar has none: find the
+  // shown floating button whose label is the manual fetch's (the ↻ glyph + its
+  // refresh label), or null when it is absent, hidden or in its ↓ form.
   async function refreshElement(page) {
     const handle = await page.evaluateHandle(() => {
-      const visible = (element) => Boolean(element.offsetWidth || element.offsetHeight || element.getClientRects().length);
+      const shown = (element) => element.getClientRects().length > 0 && getComputedStyle(element).visibility === "visible";
       const textOf = (element) => `${element.innerText ?? ""} ${element.getAttribute("aria-label") ?? ""} ${element.getAttribute("title") ?? ""}`;
-      const buttons = Array.from(document.querySelectorAll("button")).filter(visible);
-      const stats = document.querySelector('button[data-mobile-toolbar-stats="true"]')
-        ?? buttons.find((button) => /Session info|会话信息|工作階段資訊/.test(button.getAttribute("aria-label") ?? ""));
-      let scope = stats;
-      for (let depth = 0; scope && depth < 4; depth += 1) {
-        const found = Array.from(scope.querySelectorAll("button"))
-          .filter((button) => button !== stats && visible(button))
-          .find((button) => /↻|⟳|refresh|刷新|重新|更新|拉取/i.test(textOf(button)));
-        if (found) return found;
-        scope = scope.parentElement;
-      }
-      return buttons.find((button) => /↻|⟳/.test(textOf(button))) ?? null;
+      return Array.from(document.querySelectorAll(".chat-scroll-to-bottom"))
+        .filter(shown)
+        .find((button) => /↻|⟳|fetch|refresh|刷新|拉取|擷取/i.test(textOf(button))) ?? null;
     });
     const element = handle.asElement();
     if (element) return element;
@@ -459,7 +452,7 @@ try {
       await openSession(page, HALF, "initial half answer");
       const control = await refreshElement(page);
       if (!control) {
-        for (const s of [s1, s2, s15, s19]) s.fail("no refresh control in the chat top toolbar");
+        for (const s of [s1, s2, s15, s19]) s.fail("no ↻ refresh form of the chat's floating button");
         await control?.dispose();
       } else {
         await control.dispose();
@@ -532,7 +525,7 @@ try {
       const { page, requests } = created;
       await openSession(page, MAIN, "initial main answer");
       const control = await refreshElement(page);
-      s3.check(Boolean(control), "no ↻ refresh control is visible beside the session-stats control at desktop width");
+      s3.check(Boolean(control), "no ↻ refresh form of the floating button at the chat's tail at desktop width");
       await control?.dispose();
       const triggerAt = Date.now();
       if (!(await clickRefresh(page))) {
@@ -570,12 +563,16 @@ try {
       const { page, requests } = created;
       await openSession(page, HALF, "initial half answer");
       const control = await refreshElement(page);
-      s4.check(Boolean(control), "no ↻ refresh control is visible/tappable in the 390x844 toolbar");
+      s4.check(Boolean(control), "no ↻ refresh form of the floating button is visible/tappable at 390x844");
       await control?.dispose();
       const triggerAt = Date.now();
       if (!(await clickRefresh(page))) s4.fail("the mobile refresh control could not be tapped");
       else s4.check(await waitUntil(() => forceReads(requests, HALF, triggerAt) === 1, 5_000),
         "tapping the mobile control did not start the same one manual fetch");
+      // The tap's fetch must have settled first: a pull during it would join it (no
+      // new read), and a read logged in the same millisecond as beforePull would count.
+      await waitUntil(async () => !(await refreshBusy(page)), 5_000);
+      await delay(100);
 
       const beforePull = Date.now();
       const dragged = await dragUp(page);
@@ -678,7 +675,7 @@ try {
       await openSession(page, MAIN, "initial main answer");
       const control = await refreshElement(page);
       if (!control) {
-        s.fail("no refresh control in the chat top toolbar");
+        s.fail("no ↻ refresh form of the chat's floating button");
         await control?.dispose();
       } else {
         await control.dispose();
@@ -709,7 +706,7 @@ try {
       await openSession(page, RUN, "initial run answer");
       const control = await refreshElement(page);
       if (!control) {
-        s.fail("no refresh control in the chat top toolbar");
+        s.fail("no ↻ refresh form of the chat's floating button");
         await control?.dispose();
       } else {
         await control.dispose();
@@ -755,8 +752,8 @@ try {
       await openSession(page, MAIN, "initial main answer");
       const control = await refreshElement(page);
       if (!control) {
-        s13.fail("no refresh control in the chat top toolbar");
-        s14.fail("no refresh control in the chat top toolbar");
+        s13.fail("no ↻ refresh form of the chat's floating button");
+        s14.fail("no ↻ refresh form of the chat's floating button");
         await control?.dispose();
       } else {
         await control.dispose();
@@ -798,7 +795,7 @@ try {
       await openSession(page, MAIN, "initial main answer");
       const control = await refreshElement(page);
       if (!control) {
-        s.fail("no refresh control in the chat top toolbar");
+        s.fail("no ↻ refresh form of the chat's floating button");
         await control?.dispose();
       } else {
         await control.dispose();
@@ -830,7 +827,7 @@ try {
       await openSession(page, MAIN, "initial main answer");
       const control = await refreshElement(page);
       if (!control) {
-        s.fail("no refresh control in the chat top toolbar");
+        s.fail("no ↻ refresh form of the chat's floating button");
         await control?.dispose();
       } else {
         await control.dispose();
@@ -855,16 +852,19 @@ try {
   }
 
   // ---- S19/S20: reading position is preserved -------------------------------
+  // scrolled up, the floating button is ↓ (scroll to latest), not
+  // ↻: there is no fetch entry point there (owner ruling), so reading earlier
+  // content is never disturbed by one, and ↓ only scrolls down without a read.
   {
     const s = scenario("S20", "Reading earlier content keeps that content in place");
     let created;
     try {
       created = instrument(await newPage());
-      const { page } = created;
+      const { page, requests } = created;
       await openSession(page, SCROLL, "SCROLL message 159");
       const control = await refreshElement(page);
       if (!control) {
-        s.fail("no refresh control in the chat top toolbar");
+        s.fail("no ↻ refresh form of the chat's floating button");
         await control?.dispose();
       } else {
         await control.dispose();
@@ -875,24 +875,31 @@ try {
           const row = list.querySelector("[data-entry-id]");
           return { entryId: row?.dataset.entryId ?? null, top: row?.getBoundingClientRect().top ?? null };
         });
-        frozen = true;
-        await runReply(SCROLL, "REPLY-SCROLL-175");
-        await delay(200);
-        s.check(await clickRefresh(page), "the refresh control could not be clicked");
-        s.check(await waitUntil(() => shows(page, "REPLY-SCROLL-175"), 5_000), "the fetched new reply did not arrive");
+        const floating = page.locator(".chat-scroll-to-bottom").first();
+        s.check(await waitUntil(async () => (await floating.getAttribute("aria-label")) === "Scroll to latest", 5_000),
+          "scrolled up, the floating button is not the ↓ scroll-to-latest form");
+        s.check((await refreshElement(page)) === null, "scrolled up, a ↻ fetch entry point is still offered");
         const after = await page.evaluate((entryId) => {
           const row = entryId ? document.querySelector(`[data-entry-id="${CSS.escape(entryId)}"]`) : null;
           return row ? row.getBoundingClientRect().top : null;
         }, before?.entryId ?? null);
         s.check(before?.top !== null && after !== null && Math.abs(after - before.top) <= 24,
           `the content the reader was on moved (${before?.top} -> ${after})`);
+        const scrollAt = Date.now();
+        await floating.click();
+        s.check(await waitUntil(() => page.evaluate(() => {
+          const list = document.querySelector("[data-chat-focused]") ?? document.querySelector(".scrollbar-subtle.overflow-y-auto");
+          return Boolean(list) && list.scrollTop + list.clientHeight >= list.scrollHeight - 8;
+        }), 5_000), "the ↓ form did not scroll to the bottom");
+        await delay(400);
+        s.check(forceReads(requests, SCROLL, scrollAt) === 0, "the ↓ form started a fetch");
+        s.check(await waitUntil(async () => Boolean(await refreshElement(page)), 5_000), "back at the bottom the button did not become ↻");
       }
     } catch (error) {
       s.fail(`suite error: ${error?.stack ?? String(error)}`);
     } finally {
       s.end();
       await created?.context.close().catch(() => {});
-      frozen = false;
     }
   }
 
@@ -906,7 +913,7 @@ try {
       await openSession(page, HISTORY, "HISTORY message 159");
       const control = await refreshElement(page);
       if (!control) {
-        s.fail("no refresh control in the chat top toolbar");
+        s.fail("no ↻ refresh form of the chat's floating button");
         await control?.dispose();
       } else {
         await control.dispose();
@@ -921,7 +928,15 @@ try {
         const oldestLoaded = loaded[0];
         frozen = true;
         await runReply(HISTORY, "REPLY-HISTORY-175");
-        await delay(200);
+        // ↻ is the floating button's tail form; back to the bottom first,
+        // again on each poll, since entries still settling above can leave the list short of it.
+        await waitUntil(async () => {
+          await page.evaluate(() => {
+            const list = document.querySelector("[data-chat-focused]") ?? document.querySelector(".scrollbar-subtle.overflow-y-auto");
+            if (list) list.scrollTop = list.scrollHeight;
+          });
+          return Boolean(await refreshElement(page));
+        }, 5_000);
         s.check(await clickRefresh(page), "the refresh control could not be clicked");
         s.check(await waitUntil(() => shows(page, "REPLY-HISTORY-175"), 5_000), "the fetched new reply did not arrive");
         const afterLoaded = await page.evaluate(() => Array.from(document.querySelectorAll("[data-entry-id]")).map((node) => node.dataset.entryId));
@@ -954,7 +969,7 @@ try {
       await openSession(page, HALF, "initial half answer");
       const control = await refreshElement(page);
       if (!control) {
-        s.fail("no refresh control in the chat top toolbar");
+        s.fail("no ↻ refresh form of the chat's floating button");
         await control?.dispose();
       } else {
         await control.dispose();
@@ -992,7 +1007,7 @@ try {
       await openSession(page, SAME, "first answer");
       const control = await refreshElement(page);
       if (!control) {
-        s.fail("no refresh control in the chat top toolbar");
+        s.fail("no ↻ refresh form of the chat's floating button");
         await control?.dispose();
       } else {
         await control.dispose();
@@ -1075,11 +1090,6 @@ try {
   if (proxy) await new Promise((resolve) => proxy.close(resolve)).catch(() => {});
   model.close();
   rmSync(agentDir, { recursive: true, force: true });
-  if (agentsBefore !== null) {
-    try {
-      if (readFileSync(agentsPath, "utf8") !== agentsBefore) writeFileSync(agentsPath, agentsBefore);
-    } catch { /* AGENTS.md unavailable after the run */ }
-  }
   if (nextEnvBefore !== null) {
     try {
       if (readFileSync(nextEnvPath, "utf8") !== nextEnvBefore) writeFileSync(nextEnvPath, nextEnvBefore);

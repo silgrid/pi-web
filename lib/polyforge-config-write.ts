@@ -2,7 +2,10 @@ import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { hasConfigListShape, POLYFORGE_CONFIG_PANEL_MINIMUM_PF_VERSION } from "./polyforge-config";
 import { isPolyforgeVersionBelowMinimum } from "./polyforge-detect";
+import { polyforgePfBin } from "./polyforge-pf-bin";
 import { probePolyforgeVersion } from "./polyforge-status";
+import { parseStepWriteKey, stepValueError } from "./polyforge-config-schema";
+import { POLYFORGE_WORKFLOW_CARD_MINIMUM_PF_VERSION } from "./polyforge-workflows";
 import {
   appendPolyforgeConfigHistory,
   type PolyforgeConfigHistoryEntry,
@@ -25,6 +28,17 @@ export const WRITABLE_KEYS = new Set([
   "api_key",
 ]);
 
+/** The panel's allowlist: the fixed keys above plus the workspace step keys
+ *  `steps.<project>.<step-id>.models` / `.attrs.<name>`. */
+export function isPanelWritableKey(key: string): boolean {
+  return WRITABLE_KEYS.has(key) || parseStepWriteKey(key) !== null;
+}
+
+/** A key written to the workspace `.polyforge.yaml` (needs a cwd). */
+function isWorkspaceKey(key: string): boolean {
+  return key.startsWith("summarize.") || parseStepWriteKey(key) !== null;
+}
+
 const WRITE_TIMEOUT_MS = 30000;
 
 export class ConfigWriteError extends Error {
@@ -46,7 +60,7 @@ interface PfRun {
 
 function runPf(argv: string[], stdin?: string): Promise<PfRun> {
   return new Promise((resolve, reject) => {
-    const child = spawn("pf", argv, { shell: false, stdio: ["pipe", "pipe", "pipe"] });
+    const child = spawn(polyforgePfBin(), argv, { shell: false, stdio: ["pipe", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
     const timer = setTimeout(() => {
@@ -86,7 +100,7 @@ export function parsePfError(stderr: string): { status: number; message: string;
       const detail = typeof envelope.detail === "string" ? envelope.detail
         : typeof envelope.message === "string" ? envelope.message : "pf refused the write";
       const extra = envelope.extra;
-      const status = /-(409)$/.test(code) ? 409 : /-4\d\d$/.test(code) ? 400 : 400;
+      const status = /-(409)$/.test(code) ? 409 : 400;
       return { status, message: detail, diff: extra };
     } catch {
       // fall through to pf's plain stderr
@@ -100,6 +114,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function assertShape(key: string, value: unknown): void {
+  if (parseStepWriteKey(key)) {
+    const invalid = stepValueError(key, value);
+    if (invalid) throw new ConfigWriteError(`${key}: ${invalid}`);
+    return;
+  }
   if (key === "api_key") {
     if (typeof value !== "string" || value === "") throw new ConfigWriteError("api_key must be a non-empty string");
     return;
@@ -127,7 +146,7 @@ function assertShape(key: string, value: unknown): void {
 }
 
 function valueArg(key: string, value: unknown): string {
-  if (key === "summarize.models") return JSON.stringify(value);
+  if (key === "summarize.models" || (parseStepWriteKey(key) && Array.isArray(value))) return JSON.stringify(value);
   return String(value);
 }
 
@@ -178,6 +197,28 @@ async function assertWritableCapability(): Promise<void> {
   }
 }
 
+/** A step-key write also needs the workflow card's floor and the running
+ *  daemon's own fact (`write_capable` of `pf --json workflows`: it accepts
+ *  step attrs). pf refuses the same way (CORE-501) before touching the file;
+ *  this gate names the reason without a write spawn. */
+async function assertStepWriteCapability(cwd: string): Promise<void> {
+  const presence = await probePolyforgeVersion(true);
+  if (isPolyforgeVersionBelowMinimum(presence.version, POLYFORGE_WORKFLOW_CARD_MINIMUM_PF_VERSION)) {
+    throw new ConfigWriteError(`step chain and attr writes need pf ${POLYFORGE_WORKFLOW_CARD_MINIMUM_PF_VERSION} or newer (found ${presence.version ?? "an unparseable version"})`, 400);
+  }
+  const run = await runPf(["--json", "workflows", "--cwd", cwd]);
+  if (run.code !== 0) {
+    const failure = parsePfError(run.stderr);
+    throw new ConfigWriteError(failure.message, failure.status, failure.diff);
+  }
+  let doc: Record<string, unknown> = {};
+  try { doc = JSON.parse(run.stdout) as Record<string, unknown>; } catch { doc = {}; }
+  if (doc.write_capable !== true) {
+    const reason = typeof doc.write_reason === "string" && doc.write_reason ? doc.write_reason : "the running daemon does not accept step attrs";
+    throw new ConfigWriteError(reason, 400);
+  }
+}
+
 interface CurrentValue {
   class: string;
   hash: string | null;
@@ -192,6 +233,29 @@ interface CurrentValue {
  *  the CAS hash of the file the key actually lives in (cli.toml for the cli
  *  keys, the workspace yaml for summarize.*). */
 async function readCurrentValue(key: string, cwd: string): Promise<CurrentValue> {
+  const stepKey = parseStepWriteKey(key);
+  if (stepKey) {
+    const run = await runPf(["--json", "config", "workspace", "--cwd", cwd]);
+    if (run.code !== 0) {
+      const failure = parsePfError(run.stderr);
+      throw new ConfigWriteError(failure.message, failure.status, failure.diff);
+    }
+    const doc = JSON.parse(run.stdout) as Record<string, unknown>;
+    const yaml = isRecord(doc.yaml) ? doc.yaml : {};
+    const steps = isRecord(doc.steps) && isRecord(doc.steps[stepKey.project]) ? doc.steps[stepKey.project] as Record<string, unknown> : {};
+    const entry = isRecord(steps[stepKey.step]) ? steps[stepKey.step] as Record<string, unknown> : {};
+    const attrs = isRecord(entry.attrs) ? entry.attrs : {};
+    const target = stepKey.attr ? (isRecord(attrs[stepKey.attr]) ? attrs[stepKey.attr] as Record<string, unknown> : {}) : entry;
+    const declared = target.declared === true;
+    return {
+      class: typeof target.class === "string" ? target.class : "",
+      hash: typeof yaml.sha256 === "string" ? yaml.sha256 : null,
+      exists: yaml.exists !== false,
+      value: declared ? (stepKey.attr ? target.value : target.models) ?? null : null,
+      set: declared,
+      workspace: typeof doc.workspace === "string" ? doc.workspace : cwd,
+    };
+  }
   if (key.startsWith("summarize.")) {
     const run = await runPf(["--json", "config", "workspace", "--cwd", cwd]);
     if (run.code !== 0) {
@@ -249,13 +313,14 @@ function writeMessage(cls: string, reachable: boolean): { outcome: "applied" | "
 async function executeWrite(body: ConfigWriteRequest): Promise<ConfigWriteResult> {
   await assertWritableCapability();
   const key = typeof body.key === "string" ? body.key : "";
-  if (!WRITABLE_KEYS.has(key)) throw new ConfigWriteError(`key ${JSON.stringify(key)} is not writable from the panel`, 400);
+  if (!isPanelWritableKey(key)) throw new ConfigWriteError(`key ${JSON.stringify(key)} is not writable from the panel`, 400);
   const action = body.action;
   if (action !== "set" && action !== "unset") throw new ConfigWriteError("action must be set or unset");
   const cwd = typeof body.cwd === "string" ? body.cwd : "";
-  const scope: "cli" | "workspace" = key.startsWith("summarize.") ? "workspace" : "cli";
+  const scope: "cli" | "workspace" = isWorkspaceKey(key) ? "workspace" : "cli";
   if (scope === "workspace" && !cwd) throw new ConfigWriteError("a workspace write needs cwd");
   if (action === "set") assertShape(key, body.value);
+  if (parseStepWriteKey(key)) await assertStepWriteCapability(cwd);
 
   // A fresh read gives the file value before the write (the history's `old`)
   // and the file the key lives in (the CAS hash).
@@ -318,9 +383,9 @@ export interface ConfigRollbackRequest {
 export async function rollbackPolyforgeConfig(body: ConfigRollbackRequest): Promise<ConfigWriteResult> {
   const entry = body.entry;
   const key = typeof body.key === "string" ? body.key : entry?.key ?? "";
-  if (!WRITABLE_KEYS.has(key)) throw new ConfigWriteError(`key ${JSON.stringify(key)} is not writable from the panel`, 400);
+  if (!isPanelWritableKey(key)) throw new ConfigWriteError(`key ${JSON.stringify(key)} is not writable from the panel`, 400);
   if (key === "api_key") throw new ConfigWriteError("api_key entries are not rollbackable", 400);
-  const scope: "cli" | "workspace" = key.startsWith("summarize.") ? "workspace" : "cli";
+  const scope: "cli" | "workspace" = isWorkspaceKey(key) ? "workspace" : "cli";
   const workspace = scope === "workspace" ? entry?.cwd ?? "" : "";
   if (scope === "workspace" && !workspace) throw new ConfigWriteError("this workspace entry has no workspace to roll back to", 400);
   const current = await readCurrentValue(key, workspace);

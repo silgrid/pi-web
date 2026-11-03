@@ -21,6 +21,8 @@ interface Props {
   onRevealHistory: () => void;
   /** Suppressed programmatic jump (tail-stick disabled during it). */
   scrollToOffset: (top: number, viewportOffset: number) => void;
+  /** Turns of the branch before the first loaded one: loaded turns are numbered after them. */
+  turnsBefore: number;
 }
 
 export const MINIMAP_WIDTH = 24;
@@ -253,6 +255,7 @@ export const ChatMinimap = memo(function ChatMinimap({
   messageRefs,
   onRevealHistory,
   scrollToOffset,
+  turnsBefore,
 }: Props) {
   const { t } = useI18n();
   const [visible, setVisible] = useState(false);
@@ -583,6 +586,14 @@ export const ChatMinimap = memo(function ChatMinimap({
     setMinimapHovered(false);
   }, [scrollToAssistant]);
 
+  // The earlier-turns row: scroll to the top, where the message list's own
+  // sentinel pages the older history in, and close the preview like every
+  // other row. Stable, so a mid-click re-render keeps the button (#127).
+  const handleEarlierClick = useCallback(() => {
+    scrollContainer.current?.scrollTo({ top: 0, behavior: "smooth" });
+    setMinimapHovered(false);
+  }, [scrollContainer]);
+
   // Click-to-toggle preview (user-confirmed 2026-09-21): the popup opens
   // on a rail click and closes on the next click — no hover triggers.
   const showPreview = useCallback(() => {
@@ -700,6 +711,23 @@ export const ChatMinimap = memo(function ChatMinimap({
         }}
       />
 
+      {turnsBefore > 0 && (
+        // Turns before the loaded window: one dotted stub above the first node.
+        <div
+          data-minimap-earlier=""
+          style={{
+            position: "absolute",
+            left: "50%",
+            top: 0,
+            height: MINIMAP_PADDING,
+            width: 1,
+            background: "repeating-linear-gradient(to bottom, var(--text-dim) 0 2px, transparent 2px 4px)",
+            transform: "translateX(-50%)",
+            zIndex: 0,
+          }}
+        />
+      )}
+
       {positionedNodes.map((node) => {
         const isNearest = minimapHovered && nearestNode?.index === node.index;
         const isActive = activeIndex === node.index;
@@ -750,6 +778,16 @@ export const ChatMinimap = memo(function ChatMinimap({
             event.stopPropagation();
           }}
         >
+          {turnsBefore > 0 && (
+            <button
+              type="button"
+              className={styles.earlier}
+              data-minimap-preview-earlier=""
+              onClick={handleEarlierClick}
+            >
+              {t("chatMinimap.earlierTurns", { count: turnsBefore })}
+            </button>
+          )}
           {allNodes.map((node) => {
             const isLocated = nearestNodeIndex === node.index;
             return (
@@ -765,7 +803,7 @@ export const ChatMinimap = memo(function ChatMinimap({
               >
                 <span className={styles.number}>
                   <span aria-hidden="true">
-                    {String(node.index + 1).padStart(2, "0")}
+                    {String(turnsBefore + node.index + 1).padStart(2, "0")}
                   </span>
                   {node.targetTurn.toolCount > 0 && (
                     <span

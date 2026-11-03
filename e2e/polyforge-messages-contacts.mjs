@@ -1,3 +1,4 @@
+// carries: components/Polyforge*, components/polyforge-*, hooks/usePolyforge*, lib/polyforge*, app/api/polyforge/*
 // — pi-web Messages contact-list acceptance e2e (authored before code).
 //
 // Drives the spec's contact-list behaviour through the real panel against a
@@ -14,6 +15,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
 import { startNextServer } from "./next-server.mjs";
+import { NAV_MS } from "./timeouts.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 assert.ok(!existsSync(join(root, process.env.PI_WEB_DIST_DIR || ".next", "dev/lock")), "Run in a checkout without an active dev server");
@@ -169,8 +171,8 @@ async function openPage() {
   await context.addInitScript(() => { try { localStorage.setItem("pi-web:split-view-enabled", "false"); localStorage.setItem("pi-locale", "zh-CN"); } catch {} });
   const page = await context.newPage();
   page.setDefaultTimeout(10_000);
-  await page.goto(`${base}/?session=${SESSION}`, { waitUntil: "domcontentloaded", timeout: 60_000 });
-  await page.getByText("E2E pf contacts host session").first().waitFor({ state: "attached", timeout: 60_000 });
+  await page.goto(`${base}/?session=${SESSION}`, { waitUntil: "domcontentloaded", timeout: NAV_MS });
+  await page.getByText("E2E pf contacts host session").first().waitFor({ state: "attached", timeout: NAV_MS });
   return page;
 }
 const get = (path) => fetch(`${base}${path}`, { signal: AbortSignal.timeout(60_000) }).then(async (r) => ({ status: r.status, text: await r.text() }));
@@ -346,6 +348,30 @@ try {
       assert.ok(!shown.text.includes(id), `the panel text must not render the raw user id ${id}`);
       assert.ok(!shown.labels.some((value) => value.includes(id)), `no title or aria-label may carry the raw user id ${id}`);
     }
+  }));
+
+  // C9: an open silent contact's empty pane follows the peer's
+  // first message — once the list read carries BEN's direct conversation, the
+  // pane shows it without a click, and nothing is sent from the pane.
+  seed({ conversations: [DOT], contacts: [BEN], acked: { conv_dot: 0 } });
+  await check("C9", () => withPage(async (page) => {
+    await openDock(page); await messagesTab(page);
+    const panel = dock(page);
+    await (await requireVisible(panel.getByText(BEN.display_name, { exact: true }), `the silent contact ${BEN.display_name}`)).click();
+    await waitUntil(async () => await panel.getByText(BEN.display_name, { exact: true }).count() >= 2,
+      "the opened pane must show the contact in its header");
+    assert.equal(await panel.getByText("BEN-FIRST-HELLO", { exact: false }).count(), 0, "the silent contact's pane starts empty");
+    const state = readState();
+    state.conversations.push(conversation("conv_ben", BEN.id, BEN.display_name, [msg(1, "peer", "BEN-FIRST-HELLO")]));
+    save(state);
+    await waitUntil(async () => await panel.getByText("BEN-FIRST-HELLO", { exact: false }).count() > 0,
+      "the open pane must show the peer's first message without a click");
+    assert.ok(await panel.getByText(BEN.display_name, { exact: true }).count() > 0, "the opened conversation keeps the contact's display name");
+    assert.equal(await panel.getByText("DOT-UNREAD-ONE", { exact: false }).count(), 0, "the pane shows only the contact's conversation");
+    const conversations = readState().conversations;
+    assert.equal(conversations.filter((row) => row.peer === BEN.id).length, 1, "exactly one conversation with the contact exists");
+    assert.equal(conversations.length, 2, "the pane created no conversation of its own");
+    assert.equal(sends().length, 0, "the pane must send nothing");
   }));
 
   // C8: a slow `pf msg contacts` no longer holds the list

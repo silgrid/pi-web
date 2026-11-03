@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { execFileAsync } from "./exec-file";
+import { polyforgePfBin } from "./polyforge-pf-bin";
 
 /**
  * Server-side pf reads for the Polyforge dock panel (pi#108). The transport
@@ -279,7 +280,7 @@ export async function probePolyforgeVersion(force = false): Promise<PolyforgePre
  *  discarded, and the timeout kills the child. */
 function runPfVersion(timeoutMs: number): Promise<string> {
   return new Promise((resolve, reject) => {
-    const child = spawn("pf", ["--version"], { shell: false, stdio: ["ignore", "pipe", "ignore"] });
+    const child = spawn(polyforgePfBin(), ["--version"], { shell: false, stdio: ["ignore", "pipe", "ignore"] });
     let stdout = "";
     const timer = setTimeout(() => {
       child.kill("SIGKILL");
@@ -312,7 +313,7 @@ export function parsePolyforgeVersion(stdout: string): string | null {
 
 async function runPfJson(argv: string[]): Promise<unknown> {
   try {
-    const { stdout } = await execFileAsync("pf", argv, { timeout: READ_TIMEOUT_MS });
+    const { stdout } = await execFileAsync(polyforgePfBin(), argv, { timeout: READ_TIMEOUT_MS });
     return JSON.parse(stdout);
   } catch (error) {
     throw PolyforgeError.fromSpawnError(error);
