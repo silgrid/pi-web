@@ -17,6 +17,7 @@ This is the **@silgrid/pi-web** fork of the upstream pi-web project, adding spli
 | 0.1.6 | 0.12.1 | `f83b1a5` |
 | 0.1.6 | 0.12.2 | `b017cd4` |
 | 0.1.6 | 0.13.0 | `d128bae` (merge `ca5fae9`) |
+| 0.1.11 | 0.14.2 | `025e24e` (merge of piupstream/main) |
 
 Update one row per upstream merge so the table stays the mapping between the fork line and the upstream baseline.
 
@@ -216,6 +217,10 @@ PI_WEB_PASSWORD='a-long-random-password' pi-web --hostname 0.0.0.0
 Password authentication does not encrypt the connection. Do not expose Pi Web over plain HTTP to the internet; use HTTPS through a trusted reverse proxy or a trusted VPN. If a reverse proxy sends an external hostname, add that exact name to `PI_WEB_ALLOWED_HOSTS`. This allow-list does not change the address Pi Web binds to.
 
 For turnkey HTTPS exposure without your own reverse proxy, see [Expose pi-web to your phone](#expose-pi-web-to-your-phone) below.
+
+### Docker
+
+Each release publishes an image to `ghcr.io/agegr/pi-web`. See [Running Pi Web in Docker](./docs/docker.md) for it, the Compose example and which volumes to keep.
 
 ### HTTP Proxy
 

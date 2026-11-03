@@ -21,5 +21,5 @@ test("export is disabled for a claude session with visible text, not a tooltip",
 test("background tasks, title generation and the subagent switcher are hidden for a claude session", () => {
   assert.match(appShell, /\{!selectedIsClaude && <button\s+type="button"\s+onClick=\{\(\) => \{\s+setBgPanelOpen/);
   assert.match(appShell, /\{!selectedIsClaude && \(\(\) => \{\s+\/\/ 上下文压缩后/);
-  assert.match(appShell, /\{!selectedIsClaude && hasSubagentSessions && agentsBadge && \(/);
+  assert.match(appShell, /!selectedIsClaude && hasSubagentSessions && agentsBadge \? \(/);
 });
