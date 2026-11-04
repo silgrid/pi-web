@@ -36,6 +36,8 @@ import type { SessionEntry } from "./types";
 import type { DebugParentNotification, DebugSubagentRun } from "./debug-types";
 import { buildSubagentPromptPlan } from "./subagent-prompt";
 import { createSubagentSkillsBinding } from "./subagent-skills";
+import type { AgentLanguage } from "./agent-language";
+import { appendSessionAgentLanguage } from "./session-agent-language";
 import { appendSubagentInputFiles, loadSubagentInputFiles, subagentInputLimits } from "./subagent-input";
 import { projectTrustReloadOptions } from "./project-trust";
 import { createSubagentCodemodeExtension, createSubagentMcpExtensions } from "./builtin-extensions";
@@ -50,6 +52,8 @@ import { existsSync, writeFileSync } from "node:fs";
 
 interface HostSession {
   readonly inner: AgentSessionLike;
+  /** The session's Agent language, fixed by its entry when it started; absent is English. */
+  readonly agentLanguage?: AgentLanguage;
   readonly sessionFile: string;
   readonly cwd: string;
   isAlive(): boolean;
@@ -458,6 +462,8 @@ export function createSubagentController(
       const inheritedParentContext = inheritContext
         ? `The following is the active conversation context from the parent session. Use it only as background for the delegated task:\n${parentContextText(parent)}`
         : undefined;
+      // A subagent inherits its parent session's Agent language.
+      const agentLanguage = parent.agentLanguage ?? "en";
       const promptPlan = buildSubagentPromptPlan({
         profileSystemPrompt: profile.systemPrompt,
         tools: profile.tools,
@@ -466,6 +472,7 @@ export function createSubagentController(
         promptMode: profile.promptMode,
         task: appendSubagentInputFiles(request.task, inputFiles),
         inheritedParentContext,
+        agentLanguage,
       });
       const parentCodemodeEnabled = parent.inner.getActiveToolNames().includes("codemode");
       const wantsCodemode = profile.codemode === "on"
@@ -486,6 +493,7 @@ export function createSubagentController(
         loadSkills: profile.loadSkills,
         skills: profile.skills,
         exactSystemPrompt: promptPlan.exactSystemPrompt,
+        agentLanguage,
       });
       const codemodeExtension = codemodeEnabled
         ? await createSubagentCodemodeExtension({
@@ -604,10 +612,12 @@ export function createSubagentController(
           ...(profile.extensions !== undefined ? { extensions: [...profile.extensions] } : {}),
           ...(allExtensionTools ? { allExtensionTools: true } : {}),
         ...(promptPlan.exactSystemPrompt !== undefined ? { exactSystemPrompt: promptPlan.exactSystemPrompt } : {}),
+          agentLanguage,
         },
         ...(isolatedWorktree ? { worktreePath: isolatedWorktree.path, worktreeBranch: isolatedWorktree.branch } : {}),
       };
       sessionManager.appendCustomEntry(SUBAGENT_META_TYPE, metadata);
+      appendSessionAgentLanguage(sessionManager, agentLanguage);
       sessionManager.appendSessionInfo(metadata.description);
 
       // A `:level` suffix travels with its model. As with pi's `--thinking` over `--model x:level`,

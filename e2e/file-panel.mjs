@@ -41,7 +41,8 @@ document.documentElement.dataset.largeStorage = JSON.stringify({
 });
 </script><body><p>Large HTML preview ready</p><!--${"x".repeat(300 * 1024)}--></body></html>`;
 
-export async function checkFilePanel(page, filePath) {
+/** Opens the sidebar and expands the explorer section that owns filePath. */
+async function showProjectFile(page, filePath) {
   const showSidebar = page.getByRole("button", { name: "Show sidebar", exact: true });
   if (await showSidebar.isVisible()) await showSidebar.click();
   // pi#14: explorer roots are project-sectioned, not session-driven. The
@@ -59,6 +60,10 @@ export async function checkFilePanel(page, filePath) {
     const header = headers.nth(i);
     if ((await header.getAttribute("aria-expanded")) === "false") await header.click();
   }
+}
+
+export async function checkFilePanel(page, filePath) {
+  await showProjectFile(page, filePath);
   await page.locator(`[title="${filePath}"]`).click();
   const panel = page.locator("#file-panel");
   const iframe = panel.locator("iframe");
@@ -132,9 +137,8 @@ export async function checkFilePanel(page, filePath) {
 }
 
 export async function checkLargeHtmlStorage(page, filePath) {
-  const showSidebar = page.getByRole("button", { name: "Show sidebar", exact: true });
-  if (await showSidebar.isVisible()) await showSidebar.click();
-  await showSidebarFiles(page);
+  // The internal explorer is project-sectioned (pi#14), not upstream's Files tab.
+  await showProjectFile(page, filePath);
   const download = page.waitForResponse((response) => {
     const url = new URL(response.url());
     return url.pathname.endsWith("/large-storage.html") && url.searchParams.get("type") === "download";

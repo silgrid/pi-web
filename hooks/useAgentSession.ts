@@ -5,7 +5,6 @@ import type {
   AgentMessage,
   BackgroundTasksClientEvent,
   BlockingExtensionUiRequest,
-  CustomMessage,
   ExtensionStatusItem,
   ExtensionUiRequest,
   ExtensionWidgetItem,
@@ -16,15 +15,17 @@ import type {
 } from "@/lib/types";
 import { isBlockingExtensionUiRequest } from "@/lib/browser-notifications";
 import {
+  CLAUDE_EFFORT_DEFAULT,
   CLAUDE_HARNESS,
-  DEFAULT_CLAUDE_MODEL_ALIAS,
-  DEFAULT_CLAUDE_TOOL_PRESET,
+  DEFAULT_CLAUDE_MODEL,
   PI_HARNESS,
-  type ClaudeModelAlias,
-  type ClaudeToolPreset,
+  claudeFirstMessage,
+  type ClaudeEffort,
+  type ClaudeModel,
   type SessionHarness,
 } from "@/lib/claude-shared";
 import { normalizeToolCalls } from "@/lib/normalize";
+import { mergeClaudeSubagentHistory, mergeClaudeSubagentRuns, type ClaudeSubagentRun, type ClaudeSubagentRuns } from "@/lib/claude-subagent-view";
 import { AgentCommandError, agentStatusUrl, isPromptRejectedError, sendAgentCommand } from "@/lib/agent-client";
 import { missingCwdFromBody } from "@/lib/missing-cwd";
 import {
@@ -105,24 +106,53 @@ export interface SessionData {
   wrapperRebuilt?: boolean;
   /** The session's list row as the server sees it (a claude session's carries `harness`). */
   info?: SessionInfo | null;
+  /** A claude session's subagent runs, rebuilt from claude's sidecars. */
+  claudeSubagents?: ClaudeSubagentRun[];
 }
 
-/** What GET /api/claude reports: whether claude is on PATH, and the config dir it would use. */
+/** A claude subagent run with its entries' tool calls in the chat's shape (lib/normalize.ts). */
+function normalizeClaudeSubagentRun(run: ClaudeSubagentRun): ClaudeSubagentRun {
+  return {
+    ...run,
+    entries: (run.entries ?? []).map((entry) => ({ ...entry, message: normalizeToolCalls(entry.message as unknown as AgentMessage) as unknown as ClaudeSubagentRun["entries"][number]["message"] })),
+  };
+}
+
+/** The claude subagent runs a page holds, and the session they belong to. */
+interface ClaudeSubagentState {
+  sessionId: string | null;
+  runs: ClaudeSubagentRuns;
+}
+
+const NO_CLAUDE_SUBAGENTS: ClaudeSubagentRuns = {};
+
+/**
+ * Folds runs (a history read's whole list, or a live `claude_subagent` event's
+ * delta) into the page's state for `sessionId`; another session's state starts over.
+ */
+export function foldClaudeSubagents(state: ClaudeSubagentState, sessionId: string, runs: readonly ClaudeSubagentRun[] | undefined, source: "history" | "live"): ClaudeSubagentState {
+  const base = state.sessionId === sessionId ? state.runs : NO_CLAUDE_SUBAGENTS;
+  const normalized = (runs ?? []).map(normalizeClaudeSubagentRun);
+  const next = source === "history" ? mergeClaudeSubagentHistory(base, normalized) : mergeClaudeSubagentRuns(base, normalized);
+  return next === state.runs && state.sessionId === sessionId ? state : { sessionId, runs: next };
+}
+
+/** What GET /api/claude reports that the composer uses: whether claude is on PATH. */
 export interface ClaudeAvailability {
   available: boolean;
-  configDir: string;
 }
 
 /**
  * The POST /api/agent/new body a fresh composer sends to create its session. A pi
  * body is the one sent before claude sessions existed; a claude one carries only
- * the harness and its fixed alias and preset (no pi model, reasoning or tools).
+ * the harness, its full model name and a non-default effort (; no pi
+ * model, reasoning or tools).
  */
 export function newSessionRequestBody(options: {
   cwd: string;
   harness: SessionHarness;
-  modelAlias: ClaudeModelAlias;
-  claudePreset: ClaudeToolPreset;
+  claudeModel: ClaudeModel;
+  claudeEffort?: ClaudeEffort;
   toolNames?: string[];
   model?: SelectedModel | null;
   thinkingLevel?: string | null;
@@ -132,8 +162,8 @@ export function newSessionRequestBody(options: {
       cwd: options.cwd,
       type: "ensure_session",
       harness: CLAUDE_HARNESS,
-      modelAlias: options.modelAlias,
-      claudePreset: options.claudePreset,
+      model: options.claudeModel,
+      ...(options.claudeEffort && options.claudeEffort !== CLAUDE_EFFORT_DEFAULT ? { effort: options.claudeEffort } : {}),
     };
   }
   return {
@@ -153,6 +183,14 @@ interface AgentEvent {
 interface CompactCommandResult {
   tokensBefore?: number;
   estimatedTokensAfter?: number;
+}
+
+/** A claude session's answer to a model or effort switch. */
+interface ClaudeSwitchResult {
+  model?: ClaudeModel;
+  effort?: ClaudeEffort;
+  rejected?: boolean;
+  error?: string;
 }
 
 interface LastAssistantTextResponse {
@@ -227,7 +265,8 @@ export type AgentPhase =
 export interface CompactResultInfo {
   reason: "manual" | "threshold" | "overflow" | "auto" | string;
   tokensBefore: number;
-  estimatedTokensAfter: number;
+  /** Absent for claude's compaction, which reports only the pre-compaction count. */
+  estimatedTokensAfter?: number;
 }
 
 export interface SlashCommandInfo {
@@ -306,10 +345,10 @@ type ConcreteThinkingLevel = Exclude<ThinkingLevelOption, "auto">;
 export interface NewSessionChoices {
   model: { provider: string; modelId: string } | null;
   thinkingLevel: ConcreteThinkingLevel | null;
-  /** The harness picked for the new session (absent: pi), with claude's fixed alias and preset. */
+  /** The harness picked for the new session (absent: pi), with claude's full model name and effort. */
   harness?: SessionHarness;
-  modelAlias?: ClaudeModelAlias;
-  claudePreset?: ClaudeToolPreset;
+  claudeModel?: ClaudeModel;
+  claudeEffort?: ClaudeEffort;
 }
 
 function asConcreteThinkingLevel(value?: string | null): ConcreteThinkingLevel | null {
@@ -407,7 +446,10 @@ function noticeReducer(state: NoticeState, action: NoticeAction): NoticeState {
 function readCompactResult(result: unknown, reason: string): CompactResultInfo | null {
   if (!result || typeof result !== "object") return null;
   const r = result as CompactCommandResult;
-  if (typeof r.tokensBefore !== "number" || typeof r.estimatedTokensAfter !== "number") return null;
+  if (typeof r.tokensBefore !== "number") return null;
+  // claude's compaction reports only the count before; nothing is estimated for it.
+  if (r.estimatedTokensAfter === undefined) return { reason, tokensBefore: r.tokensBefore };
+  if (typeof r.estimatedTokensAfter !== "number") return null;
   return { reason, tokensBefore: r.tokensBefore, estimatedTokensAfter: r.estimatedTokensAfter };
 }
 
@@ -630,6 +672,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const initialChoices = isNew ? opts.initialNewSessionChoices ?? null : null;
 
   const [data, setData] = useState<SessionData | null>(null);
+  // a claude session's subagent runs (history seeds them, `claude_subagent` events merge in).
+  const [claudeSubagentState, setClaudeSubagentState] = useState<ClaudeSubagentState>({ sessionId: null, runs: NO_CLAUDE_SUBAGENTS });
   const [loading, setLoading] = useState(!isNew);
   const [error, setError] = useState<string | null>(null);
   const [activeLeafId, setActiveLeafId] = useState<string | null>(null);
@@ -640,8 +684,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [messageKeyAliases, setMessageKeyAliases] = useState<ReadonlyMap<string, string>>(() => new Map());
   const [historyCursor, setHistoryCursor] = useState<string | null>(null);
   const [hasEarlierMessages, setHasEarlierMessages] = useState(false);
-  // Turns before `historyCursor` (server `turnsBefore`); moves with the cursor.
-  const [earlierTurnCount, setEarlierTurnCount] = useState(0);
+  // Turns before `historyCursor` (server `turnsBefore`): one copy, the
+  // context page's own field, which moves with the cursor.
+  const earlierTurnCount = data?.context.turnsBefore ?? 0;
   // Outside React state: a streamed chunk must not re-render the whole chat (see StreamingStore).
   const [streamingStore] = useState(createStreamingStore);
   const dispatch = streamingStore.dispatch;
@@ -672,11 +717,18 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [newSessionDefaultModel, setNewSessionDefaultModel] = useState<SelectedModel | null>(null);
   const [toolPreset, setToolPreset] = useState<ToolPreset>(CONFIGURED_TOOL_PRESET);
   const [newSessionThinkingLevel, setNewSessionThinkingLevel] = useState<ConcreteThinkingLevel | null>(() => initialChoices?.thinkingLevel ?? null);
-  // A fresh composer's harness: pi by default; claude with an alias and a preset.
+  // A fresh composer's harness (#250): pi by default; claude with a full model name.
   const [newSessionHarness, setNewSessionHarness] = useState<SessionHarness>(() => initialChoices?.harness ?? PI_HARNESS);
-  const [newSessionModelAlias, setNewSessionModelAlias] = useState<ClaudeModelAlias>(() => initialChoices?.modelAlias ?? DEFAULT_CLAUDE_MODEL_ALIAS);
-  const [newSessionClaudePreset, setNewSessionClaudePreset] = useState<ClaudeToolPreset>(() => initialChoices?.claudePreset ?? DEFAULT_CLAUDE_TOOL_PRESET);
+  const [newSessionClaudeModel, setNewSessionClaudeModel] = useState<ClaudeModel>(() => initialChoices?.claudeModel ?? DEFAULT_CLAUDE_MODEL);
   const [claudeAvailability, setClaudeAvailability] = useState<ClaudeAvailability | null>(null);
+  // a fresh claude composer's effort; an open claude session's switched values
+  // (until its row catches up) and the visible line of a switch claude refused.
+  const [newSessionClaudeEffort, setNewSessionClaudeEffort] = useState<ClaudeEffort>(() => initialChoices?.claudeEffort ?? CLAUDE_EFFORT_DEFAULT);
+  const [claudeChoiceOverride, setClaudeChoiceOverride] = useState<{ sessionId: string; model?: ClaudeModel; effort?: ClaudeEffort } | null>(null);
+  const [claudeSwitchError, setClaudeSwitchError] = useState<{ sessionId: string; message: string } | null>(null);
+  // The session whose event stream said whether it is busy (`connected`): until then an open
+  // claude session's controls cannot know it is idle, so they stay disabled.
+  const [streamStateSessionId, setStreamStateSessionId] = useState<string | null>(null);
   const [newSessionDefaultThinkingLevel, setNewSessionDefaultThinkingLevel] = useState<ConcreteThinkingLevel | null>(null);
   const [savedDefaultThinkingLevel, setSavedDefaultThinkingLevel] = useState<ConcreteThinkingLevel | null>(null);
   const [currentThinkingOverride, setCurrentThinkingOverride] = useState<ConcreteThinkingLevel | null>(null);
@@ -820,7 +872,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const activeLeafIdRef = useRef<string | null>(null);
   const historyCursorRef = useRef<string | null>(null);
   const hasEarlierMessagesRef = useRef(false);
-  const earlierTurnCountRef = useRef(0);
 
   sessionPropIdRef.current = session?.id ?? null;
   dataRef.current = data;
@@ -829,7 +880,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   activeLeafIdRef.current = activeLeafId;
   historyCursorRef.current = historyCursor;
   hasEarlierMessagesRef.current = hasEarlierMessages;
-  earlierTurnCountRef.current = earlierTurnCount;
   isCompactingRef.current = isCompacting;
   extensionUiCountRef.current = extensionDialogs.length + extensionCustomUis.length;
 
@@ -878,11 +928,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         model: newSessionModel,
         thinkingLevel: newSessionThinkingLevel,
         harness: newSessionHarness,
-        modelAlias: newSessionModelAlias,
-        claudePreset: newSessionClaudePreset,
+        claudeModel: newSessionClaudeModel,
+        claudeEffort: newSessionClaudeEffort,
       });
     }
-  }, [isNew, newSessionModel, newSessionThinkingLevel, newSessionHarness, newSessionModelAlias, newSessionClaudePreset, onNewSessionChoicesChange]);
+  }, [isNew, newSessionModel, newSessionThinkingLevel, newSessionHarness, newSessionClaudeModel, newSessionClaudeEffort, onNewSessionChoicesChange]);
 
   // A fresh composer asks once whether claude is on PATH (the harness picker's state).
   useEffect(() => {
@@ -892,8 +942,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       try {
         const response = await fetch("/api/claude");
         if (!response.ok) return;
-        const body = await response.json() as { available?: unknown; configDir?: unknown };
-        if (current) setClaudeAvailability({ available: body.available === true, configDir: typeof body.configDir === "string" ? body.configDir : "" });
+        const body = await response.json() as { available?: unknown };
+        if (current) setClaudeAvailability({ available: body.available === true });
       } catch {
         // Unknown: the claude option stays unavailable.
       }
@@ -1098,7 +1148,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           setEntryIds([]);
           setHistoryCursor(null);
           setHasEarlierMessages(false);
-          setEarlierTurnCount(0);
           setError(null);
         }
         deleteSessionViewSnapshot(sid);
@@ -1182,15 +1231,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // A missing value reads as zero.
         const turnsBeforeFor = (oldestEntryId: string | null) => oldestEntryId === d.context.oldestEntryId
           ? d.context.turnsBefore ?? 0
-          : earlierTurnCountRef.current;
+          : dataRef.current?.context.turnsBefore ?? 0;
         const viewTurnsBefore = turnsBeforeFor(view.oldestEntryId);
         setData(view === freshWindow ? d : { ...d, context: { ...d.context, ...view, turnsBefore: viewTurnsBefore } });
+        setClaudeSubagentState((state) => foldClaudeSubagents(state, sid, d.claudeSubagents, "history"));
         setActiveLeafId(d.leafId);
         if (revisionUnchanged) {
-          // The kept window's offset still comes from the page owning its
-          // cursor: a snapshot written without one (a hover prefetch before
-          //) must not pin the view at zero.
-          setEarlierTurnCount(viewTurnsBefore);
+          // The kept window's offset (set on `data` above) still comes from
+          // the page owning its cursor: a snapshot written without one (a hover
+          // prefetch before) must not pin the view at zero.
           // Refresh the cached snapshot with the newest leaf/tree/stats while
           // preserving the wider loaded window.
           setSessionViewSnapshot({
@@ -1263,7 +1312,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           setEntryIds(next.entryIds);
           setHistoryCursor(view.oldestEntryId);
           setHasEarlierMessages(view.hasMore);
-          setEarlierTurnCount(viewTurnsBefore);
         }
         // Tool-preset state is independent of the view cache: it must be applied
         // on every read, cached window or not (#700).
@@ -1397,7 +1445,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       setHistoryCursor(d.context.oldestEntryId);
       setHasEarlierMessages(d.context.hasMore);
       // The page owning the new cursor carries its offset (older page or first page).
-      setEarlierTurnCount(d.context.turnsBefore ?? 0);
       setData((prev) => {
         if (!prev || prev.sessionId !== sid) return prev;
         const context = before ? {
@@ -1461,10 +1508,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       firstMessage,
       transient: true,
       ...(newSessionHarness === CLAUDE_HARNESS
-        ? { harness: CLAUDE_HARNESS, claude: { modelAlias: newSessionModelAlias, preset: newSessionClaudePreset } }
+        ? { harness: CLAUDE_HARNESS, claude: { model: newSessionClaudeModel, effort: newSessionClaudeEffort } }
         : {}),
     }, provisionalDraftKey);
-  }, [isNew, newSessionCwd, newSessionDraftKey, onSessionCreated, opts.chatInputRef, newSessionHarness, newSessionModelAlias, newSessionClaudePreset]);
+  }, [isNew, newSessionCwd, newSessionDraftKey, onSessionCreated, opts.chatInputRef, newSessionHarness, newSessionClaudeModel, newSessionClaudeEffort]);
 
   const ensureNewSession = useCallback(async () => {
     if (sessionIdRef.current) return sessionIdRef.current;
@@ -1487,8 +1534,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         body: JSON.stringify(newSessionRequestBody({
           cwd: newSessionCwd,
           harness: newSessionHarness,
-          modelAlias: newSessionModelAlias,
-          claudePreset: newSessionClaudePreset,
+          claudeModel: newSessionClaudeModel,
+          claudeEffort: newSessionClaudeEffort,
           toolNames,
           model: selectedModel,
           thinkingLevel: selectedThinkingLevel,
@@ -1531,7 +1578,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } finally {
       ensuringNewSessionRef.current = null;
     }
-  }, [isNew, newSessionCwd, toolPreset, newSessionHarness, newSessionModelAlias, newSessionClaudePreset]);
+  }, [isNew, newSessionCwd, toolPreset, newSessionHarness, newSessionClaudeModel, newSessionClaudeEffort]);
 
   // Opening the System or Tools panel may initialize an otherwise dormant
   // session. This is deliberately a non-prompt command: it creates no message
@@ -2305,6 +2352,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, [agentRunning]);
 
   const handleAgentEvent = useCallback((event: AgentEvent) => {
+    // The stream said whether the session is busy (claude's controls wait for it).
+    if (event.type === "connected") setStreamStateSessionId(sessionIdRef.current);
     switch (event.type) {
       case "connected": {
         dispatch({ type: "end" });
@@ -2539,45 +2588,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         setAgentPhase({ kind: "waiting_model" });
         break;
       }
-      case "entry_appended": {
-        // The wire forwards a displayed `custom_message` entry (an extension's
-        // decision feed, such as polyforge's `polyforge-decision`) slimmed to
-        // its text: no `message_start`/`message_end` announces it, so this
-        // event is the chat's only live view of it. A mid-run read may have
-        // loaded it from the session file already: append only a novel one.
-        const entry = event.entry as
-          | { type?: string; customType?: unknown; content?: unknown; display?: unknown; timestamp?: unknown }
-          | undefined;
-        if (!entry || entry.type !== "custom_message" || entry.display !== true) break;
-        const content = typeof entry.content === "string" ? entry.content : "";
-        if (!content.trim()) break;
-        const custom: CustomMessage = {
-          role: "custom",
-          customType: typeof entry.customType === "string" ? entry.customType : "",
-          content,
-          display: true,
-          timestamp: typeof entry.timestamp === "number" ? entry.timestamp : Date.now(),
-        };
-        setMessages((prev) => {
-          const dupe = prev.some((m) => {
-            if (m.role !== "custom") return false;
-            const c = m as CustomMessage;
-            if (c.customType !== custom.customType) return false;
-            const text = typeof c.content === "string" ? c.content : "";
-            return text === content;
-          });
-          return dupe ? prev : [...prev, custom];
-        });
-        // Follow the new card only when the user sits at the bottom, same as
-        // streaming output does.
-        if (isNearBottomRef.current && liveFollowFrameRef.current === null) {
-          liveFollowFrameRef.current = requestAnimationFrame(() => {
-            liveFollowFrameRef.current = null;
-            if (isNearBottomRef.current) scrollToBottom("auto");
-          });
-        }
-        break;
-      }
       case "tool_execution_start": {
         // A call a tool made itself (a codemode script's) belongs to its
         // parent's card; listed here it would show as a top-level running tool,
@@ -2647,6 +2657,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           if (tools.length === 0) return { kind: "waiting_model" };
           return { kind: "running_tools", tools };
         });
+        break;
+      }
+      case "claude_subagent": {
+        // A claude subagent run's header and new entries: never a main message.
+        const sid = sessionIdRef.current;
+        const run = event.run as ClaudeSubagentRun | undefined;
+        if (sid && run && typeof run.toolCallId === "string") setClaudeSubagentState((state) => foldClaudeSubagents(state, sid, [run], "live"));
         break;
       }
       case "queue_update":
@@ -2772,7 +2789,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
         if (!sid) throw new Error("Unable to create a session for the prompt");
         sentSessionId = sid;
-        // A claude session's model is its fixed alias: no pi model is set on it.
+        // A claude session's model is its fixed full name: no pi model is set on it.
         if (selectedModel && newSessionHarness !== CLAUDE_HARNESS) {
           setPendingModel(selectedModel);
           if (existingSid) {
@@ -2795,7 +2812,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         });
         notifyPromptReloadedFromDisk(queuedAck);
         if (queuedAck?.queued) dropOptimisticUserMessage();
-        promoteNewSession(1, message);
+        // A claude image-only send is listed as [Image] before the list re-read.
+        promoteNewSession(1, newSessionHarness === CLAUDE_HARNESS ? claudeFirstMessage(message, piImages?.length ?? 0) : message);
       } else if (session) {
         sentSessionId = session.id;
         await ensureEventsConnected(session.id);
@@ -2973,6 +2991,24 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       sendAgentCommand(sid, { type: "navigate_tree", targetId: leafId }).catch(() => {});
     }
   }, [isCompacting, loadContext]);
+
+  // a fresh composer's harness switch resets the destination harness's model —
+  // claude to its default full name, pi to no override (pi's default model again).
+  const chooseNewSessionHarness = useCallback((harness: SessionHarness) => {
+    if (harness === newSessionHarness) return;
+    setNewSessionHarness(harness);
+    if (harness === CLAUDE_HARNESS) {
+      setNewSessionClaudeModel(DEFAULT_CLAUDE_MODEL);
+      setNewSessionClaudeEffort(CLAUDE_EFFORT_DEFAULT);
+      return;
+    }
+    newSessionModelOverrideRef.current = null;
+    setNewSessionModel(null);
+    if (thinkingLevelOverrideRef.current === null) {
+      const pinned = newSessionDefaultModel && thinkingLevelPinsRef.current[`${newSessionDefaultModel.provider}/${newSessionDefaultModel.modelId}`];
+      setNewSessionDefaultThinkingLevel(asConcreteThinkingLevel(pinned) ?? defaultThinkingLevelRef.current);
+    }
+  }, [newSessionHarness, newSessionDefaultModel]);
 
   const handleModelChange = useCallback(async (provider: string, modelId: string) => {
     if (isNew) {
@@ -3413,6 +3449,49 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     await sendStreamingPrompt(message, "followUp", images);
   }, [sendStreamingPrompt]);
 
+  /**
+   * An open claude session's model or effort switch, sent only while idle
+   * (the composer disables the controls meanwhile). The control shows the new value only
+   * once the server accepted it; a refusal is one visible line with claude's own text,
+   * replaced by the next successful switch.
+   */
+  const switchClaudeSetting = useCallback(async (command: { type: "set_model"; model: ClaudeModel } | { type: "set_effort"; effort: ClaudeEffort }) => {
+    const sid = sessionIdRef.current;
+    if (!sid) return;
+    const prefix = command.type === "set_model" ? "claude.switchModelError" : "claude.effortError";
+    try {
+      const result = await sendAgentCommand<ClaudeSwitchResult | null>(sid, command);
+      if (result?.rejected) {
+        setClaudeSwitchError({ sessionId: sid, message: translateRef.current(prefix, { error: result.error ?? "" }) });
+        return;
+      }
+      setClaudeSwitchError(null);
+      setClaudeChoiceOverride((current) => ({
+        ...(current?.sessionId === sid ? current : {}),
+        sessionId: sid,
+        ...(command.type === "set_model" ? { model: result?.model ?? command.model } : { effort: result?.effort ?? command.effort }),
+      }));
+    } catch (e) {
+      setClaudeSwitchError({ sessionId: sid, message: translateRef.current(prefix, { error: e instanceof Error ? e.message : String(e) }) });
+    }
+  }, []);
+
+  const handleClaudeModelChange = useCallback((model: ClaudeModel) => {
+    if (isNew) {
+      setNewSessionClaudeModel(model);
+      return;
+    }
+    void switchClaudeSetting({ type: "set_model", model });
+  }, [isNew, switchClaudeSetting]);
+
+  const handleClaudeEffortChange = useCallback((effort: ClaudeEffort) => {
+    if (isNew) {
+      setNewSessionClaudeEffort(effort);
+      return;
+    }
+    void switchClaudeSetting({ type: "set_effort", effort });
+  }, [isNew, switchClaudeSetting]);
+
   const handleAbortCompaction = useCallback(async () => {
     const sid = sessionIdRef.current;
     if (!sid) return;
@@ -3739,7 +3818,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         setEntryIds(cached.entryIds);
         setHistoryCursor(cached.oldestEntryId);
         setHasEarlierMessages(cached.hasMore);
-        setEarlierTurnCount(cached.turnsBefore ?? 0);
         setError(null);
         setLoading(false);
       }
@@ -3775,7 +3853,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             leafId: activeLeafIdRef.current,
             oldestEntryId: historyCursorRef.current,
             hasMore: hasEarlierMessagesRef.current,
-            turnsBefore: earlierTurnCountRef.current,
+            turnsBefore: currentData.context.turnsBefore ?? 0,
             summaryTree: currentData.tree,
             thinkingLevel: currentData.context.thinkingLevel,
             model: currentData.context.model,
@@ -3977,6 +4055,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     [entryIds, messages.length, messageKeyAliases],
   );
 
+  // A claude session's row, with the values a switch on this page set since it was read.
+  const claudeRow = session?.claude ?? data?.info?.claude ?? null;
+  const claudeOverride = claudeChoiceOverride && claudeChoiceOverride.sessionId === (session?.id ?? data?.sessionId) ? claudeChoiceOverride : null;
+  const claudeSessionChoices = claudeRow && claudeOverride
+    ? { ...claudeRow, ...(claudeOverride.model ? { model: claudeOverride.model } : {}), ...(claudeOverride.effort ? { effort: claudeOverride.effort } : {}) }
+    : claudeRow;
+
   // a claude session (or a fresh composer set to claude).
   const isClaudeSession = isNew ? newSessionHarness === CLAUDE_HARNESS : (session?.harness ?? data?.info?.harness) === CLAUDE_HARNESS;
 
@@ -3993,10 +4078,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     defaultModel: newSessionDefaultModel,
     // a claude session (or a fresh composer set to claude) and the composer's claude choices.
     isClaudeSession,
-    claudeSessionChoices: isNew ? null : (session?.claude ?? data?.info?.claude ?? null),
-    newSessionHarness, setNewSessionHarness,
-    newSessionModelAlias, setNewSessionModelAlias,
-    newSessionClaudePreset, setNewSessionClaudePreset,
+    // the claude session's subagent runs by tool call id (empty for pi and for a session without any).
+    claudeSubagents: claudeSubagentState.sessionId !== null && claudeSubagentState.sessionId === (session?.id ?? data?.sessionId) ? claudeSubagentState.runs : NO_CLAUDE_SUBAGENTS,
+    claudeSessionChoices: isNew ? null : claudeSessionChoices,
+    newSessionHarness, chooseNewSessionHarness,
+    newSessionClaudeModel, setNewSessionClaudeModel,
+    // claude's model / effort controls and the line of a switch claude refused.
+    newSessionClaudeEffort, handleClaudeModelChange, handleClaudeEffortChange,
+    claudeSwitchError: claudeSwitchError && claudeSwitchError.sessionId === (session?.id ?? data?.sessionId) ? claudeSwitchError.message : null,
+    claudeStateKnown: streamStateSessionId !== null && streamStateSessionId === (session?.id ?? data?.sessionId),
     claudeAvailability,
     savedDefaultThinkingLevel,
     agentPhase,

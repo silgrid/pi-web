@@ -6,13 +6,19 @@ export const dynamic = "force-dynamic";
 
 /**
  * GET /api/polyforge/workflows?cwd=… — the Settings › Polyforge workflow
- * card's read: `pf --json workflows --cwd` plus
- * `pf --json config workspace --cwd`, spawned afresh on every call (each ↻
- * click is a fresh read, no module cache). Read-only: this route exports GET
- * alone, so any other method is 405; step-chain and attr writes go through
- * POST /api/polyforge/config. Degradation-first: pf absent, below the 2.20.15
- * floor, an unreachable daemon or a failed read all answer 200 with the
- * reason as a field — never 5xx; the only non-2xx answer is the gate's 403.
+ * card's read: makes it the union of every
+ * cli.toml-mapped workspace — one `pf --json config list` for the mapping,
+ * then per mapped workspace `pf --json workflows --cwd W` plus
+ * `pf --json config workspace --cwd W`, all spawned afresh on every call
+ * (each ↻ click is a fresh read, no module cache; never one spawn per
+ * project). `workspaces[]` carries each workspace's reads or its failure
+ * reason; the top-level `workflows`/`workspace` stay the settings cwd's own.
+ * A machine with no mapping reads the cwd alone. Read-only: this route
+ * exports GET alone, so any other method is 405; step-chain and attr writes
+ * go through POST /api/polyforge/config with the owning workspace's cwd.
+ * Degradation-first: pf absent, below the 2.20.15 floor, an unreachable
+ * daemon or a failed read all answer 200 with the reason as a field — never
+ * 5xx; the only non-2xx answer is the gate's 403.
  */
 export async function GET(request: Request) {
   if (!isApiRequestAllowed(request)) {

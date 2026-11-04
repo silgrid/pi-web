@@ -13,6 +13,15 @@
 // folded, the legend and column header above the fold), the workflow card after
 // the configuration cards, and no declared-candidates card. Every count is read
 // from its own element (a fold toggle, a card title), never a card's whole text.
+// replaced the cli.toml pins the same way: one cli.toml card with
+// a top-level and a [daemon] zone, eight common writable keys visible (five
+// cli.toml keys + the three summarize keys), each zone's advanced keys folded
+// behind its own counted toggle.
+// moved summarize and memory_policy into cli.toml: the three
+// summarize rows are the cli.toml card's [summarize] zone (still common), the
+// read-only memory_policy rows render inside the cli.toml card grouped per
+// workspace path (visible, never folded), and the 工作区 card folds its
+// mapping rows only.
 //
 //   node e2e/polyforge-config-simplify-212.mjs
 import assert from "node:assert/strict";
@@ -41,7 +50,7 @@ writeFileSync(join(agentDir, "sessions", "e2e", `${SESSION}.jsonl`), [
 
 const WS = `[workspace."${project}"]`;
 const MODELS = ["pi:zeta", "pi:alpha", "pi:beta"];
-const COMMON = ["max_concurrent_jobs", "step_timeout", "stall_window", "api_key", "summarize.models", "summarize.language", "summarize.interval_sec"];
+const COMMON = ["max_concurrent_jobs", "step_timeout", "stall_window", "claude_bin", "api_key", "summarize.models", "summarize.language", "summarize.interval_sec"];
 const CONFIG = {
   pfPresent: true,
   pfVersion: "v2.20.11",
@@ -71,12 +80,13 @@ const CONFIG = {
   steps: [{ project: "e2e", step: "fix", declared: true, models: MODELS }, { project: "e2e", step: "code", declared: false, models: null }],
   steps_complete: true,
   memoryPolicy: {
-    source: "file", class: "next-claim", appendToDefault: true,
-    default: { record: ["base-record"], skip: ["base-skip"], declared: true },
-    projects: { "e2e-project": { record: ["project-record"], skip: [], declared: true } },
+    [project]: {
+      default: { record: ["base-record"], skip: ["base-skip"], declared: true },
+      "e2e-project": { record: ["project-record"], skip: [], declared: true },
+    },
   },
 };
-// The memory_policy rows the 工作区 card folds (the default entry, then each project).
+// The memory_policy rows the cli.toml card shows for the workspace path (the default entry, then each project).
 const MEMORY_KEYS = ["memory_policy.default", "memory_policy.e2e-project"];
 // the workflow card's read, fixed so the page is the fixture's
 // (the card renders after the configuration cards whatever pf is installed).
@@ -243,14 +253,20 @@ try {
   await check("S212-1 default collapsed configuration set at 1100px", async () => {
     const { context, dialog } = await openPage();
     try {
-      assert.deepEqual(await visibleRowKeys(dialog), [...COMMON].sort(),
-        "the default page does not show exactly the seven common writable keys");
-      assert.equal(await foldCount(card(dialog, "cli.toml")), 5, "cli.toml's read-only toggle does not state its 5 hidden rows");
-      assert.equal(await foldCount(card(dialog, "cli.toml · [daemon]")), 2, "[daemon]'s read-only toggle does not state its 2 hidden rows");
+      assert.deepEqual(await visibleRowKeys(dialog), [...COMMON, ...MEMORY_KEYS].sort(),
+        "the default page does not show exactly the eight common writable keys and the read-only memory_policy rows");
+      assert.equal(await card(dialog, "cli.toml · [daemon]").count(), 0, "the separate [daemon] card still renders");
+      const cli = card(dialog, "cli.toml");
+      // Top-level zone: server, daemon_socket, user_id + the unknown future_knob.
+      assert.equal(await foldCount(cli.locator(".polyforge-config-zone.is-flat")), 4, "the cli.toml zone's advanced toggle does not state its 4 hidden rows");
+      assert.equal(await foldCount(cli.locator(".polyforge-config-zone.is-daemon")), 2, "the [daemon] zone's advanced toggle does not state its 2 hidden rows");
+      assert.deepEqual(await visibleRowKeys(cli.locator(".polyforge-config-zone.is-summarize")), ["summarize.interval_sec", "summarize.language", "summarize.models"],
+        "the cli.toml card's [summarize] zone does not show exactly the three summarize keys");
+      assert.deepEqual(await visibleRowKeys(cli.locator(".polyforge-config-zone.is-memory-policy")), [...MEMORY_KEYS].sort(),
+        "the cli.toml card does not show the path's memory_policy rows");
       const workspace = card(dialog, "Workspace");
-      assert.deepEqual(await visibleRowKeys(workspace), ["summarize.interval_sec", "summarize.language", "summarize.models"],
-        "the 工作区 card's visible rows are not exactly its summarize keys");
-      assert.equal(await foldCount(workspace), 1 + MEMORY_KEYS.length, "the 工作区 fold does not count its mapping and memory_policy rows");
+      assert.deepEqual(await visibleRowKeys(workspace), [], "the 工作区 card shows a row besides its folded mapping");
+      assert.equal(await foldCount(workspace), 1, "the 工作区 fold does not count its one mapping row");
       // The legend and the column header stay outside the fold: visible while it is collapsed.
       assert.equal(await workspace.locator(".polyforge-disclosure-toggle").first().getAttribute("aria-expanded"), "false");
       assert.ok(await workspace.locator(".polyforge-config-legend").first().isVisible(), "the legend is hidden inside the collapsed fold");
@@ -259,7 +275,8 @@ try {
       for (const row of await workspace.locator(".polyforge-config-row").all()) {
         const mapping = await row.locator(".polyforge-config-workspace-path").count() > 0;
         const tag = (await row.locator(".polyforge-config-file-tag").textContent() ?? "").trim();
-        assert.equal(tag, mapping ? "cli.toml" : ".polyforge.yaml", `${await rowKey(row)} carries the wrong file tag ${tag}`);
+        assert.ok(mapping, `${await rowKey(row)} is not a mapping row`);
+        assert.equal(tag, "cli.toml", `${await rowKey(row)} carries the wrong file tag ${tag}`);
       }
     } finally { await context.close(); }
   });
@@ -312,7 +329,7 @@ try {
       const landmarks = [
         ["machine status", dialog.getByText("Machine status", { exact: true }).first()],
         ["cli.toml", dialog.getByText("cli.toml", { exact: true }).first()],
-        ["cli.toml · [daemon]", dialog.getByText("cli.toml · [daemon]", { exact: true }).first()],
+        ["cli.toml [daemon]", dialog.getByText("cli.toml [daemon]", { exact: true }).first()],
         ["workspace", card(dialog, "Workspace").locator(".polyforge-config-card-title").first()],
         ["workflow", card(dialog, "Workflow").locator(".polyforge-config-card-title").first()],
         ["package switch", dialog.getByText("Polyforge package (global)", { exact: true }).first()],
@@ -445,6 +462,28 @@ try {
       await alert.waitFor({ state: "visible", timeout: 10_000 });
       assert.ok((await alert.innerText()).trim().length > 0, "the validation error has no text");
       assert.equal(state.posts.length, 1, "an invalid value reached the write path");
+
+      // a connection key writes only after its confirmation,
+      // which a cancel dismisses without a write; no save reloads the daemon.
+      await expandAll(dialog);
+      const server = dialog.locator('input[aria-label="server"]').first();
+      const serverRow = dialog.locator('.polyforge-config-row:has(input[aria-label="server"])').first();
+      await server.fill("http://127.0.0.1:2");
+      await serverRow.getByRole("button", { name: "Save", exact: true }).click();
+      const confirm = dialog.locator('[role="alertdialog"]').first();
+      await confirm.waitFor({ state: "visible", timeout: 10_000 });
+      assert.equal(state.posts.length, 1, "a connection key posted before its confirmation");
+      await confirm.getByRole("button", { name: "Cancel", exact: true }).click();
+      assert.equal(await confirm.count(), 0, "cancel did not dismiss the confirmation");
+      assert.equal(state.posts.length, 1, "a cancelled confirmation wrote");
+      await serverRow.getByRole("button", { name: "Save", exact: true }).click();
+      await Promise.all([
+        page.waitForResponse((response) => response.url().endsWith("/api/polyforge/config") && response.request().method() === "POST", { timeout: 20_000 }),
+        dialog.locator('[role="alertdialog"]').first().getByRole("button", { name: "Confirm save", exact: true }).click(),
+      ]);
+      assert.equal(state.posts.length, 2, "a confirmed connection key did not write exactly once");
+      assert.equal(state.posts[1].key, "server");
+      assert.ok(!state.requests.some((request) => /\/config\/reload/.test(request.url)), "a save called the reload route");
     } finally { await context.close(); }
   });
 } catch (error) {

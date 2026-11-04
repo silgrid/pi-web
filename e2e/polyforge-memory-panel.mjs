@@ -166,7 +166,7 @@ let browser; let base; let stop = async () => {};
 async function startServer(name, path = `${stubDir}${delimiter}${process.env.PATH}`) {
   const logFile = join(work, `server-${name}.log`); serverLogs.push(logFile);
   // One fresh dist dir per server: a restart reusing a killed server's dist dir reload-looped the page.
-  const distDir = `${process.env.PI_WEB_DIST_DIR || ".next/e2e/polyforge-memory-panel"}-${name}`;
+  const distDir = join(process.env.PI_WEB_DIST_DIR || ".next/e2e/polyforge-memory-panel", name); // nested, so e2e/all.mjs clears it with the suite dir
   rmSync(join(root, distDir), { force: true, recursive: true });
   const started = await startNextServer({ name, logFile, env: { ...process.env, PI_WEB_DIST_DIR: distDir, PATH: path, HOME: work, PI_CODING_AGENT_DIR: agentDir,
     PI_WEB_PASSWORD: "", NEXT_TELEMETRY_DISABLED: "1", PI_WEB_ALLOWED_ROOT_PREFIXES: work, POLYFORGE_V1_API_KEY: KEY_SENTINEL, [ENV_SENTINEL]: KEY_SENTINEL } });

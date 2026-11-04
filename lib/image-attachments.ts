@@ -54,3 +54,34 @@ export function validateAgentImages(value: unknown): string | null {
   }
   return null;
 }
+
+/** The media types claude accepts in an image content block. */
+export const CLAUDE_IMAGE_MIME_TYPES: readonly string[] = ["image/png", "image/jpeg", "image/gif", "image/webp"];
+
+export function isClaudeImageMimeType(value: unknown): boolean {
+  return typeof value === "string" && CLAUDE_IMAGE_MIME_TYPES.includes(value);
+}
+
+/**
+ * Return an API-safe error for a claude prompt's image array: pi's
+ * count and size limits plus claude's PNG/JPEG/GIF/WebP whitelist. `null` when valid.
+ */
+export function validateClaudeImages(value: unknown): string | null {
+  if (value === undefined) return null;
+  if (!Array.isArray(value)) return "images must be an array";
+  if (value.length > MAX_ATTACHED_IMAGES) {
+    return `A message can include at most ${MAX_ATTACHED_IMAGES} images`;
+  }
+  for (const image of value) {
+    if (!image || typeof image !== "object" || (image as { type?: unknown }).type !== "image") {
+      return "Each attachment must be an image";
+    }
+    if (!isBase64ImageWithinLimits(image)) {
+      return `Each image must be valid base64 image data of ${MAX_ATTACHED_IMAGE_BYTES / (1024 * 1024)}MB or smaller`;
+    }
+    if (!isClaudeImageMimeType(image.mimeType)) {
+      return "Only PNG, JPEG, GIF and WebP images can be sent to a claude session";
+    }
+  }
+  return null;
+}

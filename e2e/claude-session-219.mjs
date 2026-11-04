@@ -29,7 +29,7 @@
 import assert from "node:assert/strict";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 
@@ -41,13 +41,24 @@ const artifacts = join(root, "test-results/e2e");
 mkdirSync(artifacts, { recursive: true });
 const scratch = mkdtempSync(join(tmpdir(), "pi-web-claude-e2e-"));
 const agentDir = join(scratch, "agent");
+// An isolated HOME: with no CLAUDE_CONFIG_DIR inherited, claude's transcripts
+// live under this ~/.claude, never the operator's.
+const homeDir = join(scratch, "home");
 const project = join(scratch, "project");
 const stubDir = join(scratch, "bin");
 const stubLog = join(scratch, "claude-stub.jsonl");
+// The retired dedicated config dir: it must stay absent.
 const claudeDir = join(agentDir, "claude");
 mkdirSync(project, { recursive: true });
+// A sibling pi session, so S2 can prove a pi row still carries no harness marker.
+mkdirSync(join(agentDir, "sessions", "e2e"), { recursive: true });
+writeFileSync(join(agentDir, "sessions", "e2e", "e2e-claude-219-pi.jsonl"), [
+  { type: "session", version: 3, id: "e2e-claude-219-pi", timestamp: "2026-11-02T00:00:00.000Z", cwd: project },
+  { type: "message", id: "m1", parentId: null, timestamp: "2026-11-02T00:00:00.000Z", message: { role: "user", content: "E2E pi sibling session" } },
+].map((entry) => JSON.stringify(entry)).join("\n") + "\n");
 mkdirSync(stubDir, { recursive: true });
 mkdirSync(agentDir, { recursive: true });
+mkdirSync(homeDir, { recursive: true });
 writeFileSync(join(project, "e2e-probe.txt"), "E2E_TOOL_CONTENT\n");
 // The stub is copied (0755) onto the server's PATH as `claude`; the committed
 // fixture stays untouched and the scratch tree owns the executable.
@@ -55,15 +66,16 @@ copyFileSync(join(root, "e2e/claude-stub/claude.mjs"), join(stubDir, "claude"));
 chmodSync(join(stubDir, "claude"), 0o755);
 
 const FIRST = "E2E first message";
+const PI_FIRST = "E2E pi sibling session";
 const SECOND = "E2E second message";
 const THIRD = "E2E third message";
 const TITLES = {
-  S1: "Create a claude session with an explicit alias and preset",
+  S1: "Create a claude session by harness and model, with no preset",
   S2: "Sidebar shows a claude session with its harness marker",
   S3: "Message round trip renders through the adapter",
   S4: "Reopening a claude session shows its history",
   S5: "Idle expiry then reopen resumes the conversation",
-  S6: "First claude session creates a credential-free config dir",
+  S6: "No dedicated config dir, no injected CLAUDE_CONFIG_DIR, and no PI_WEB_PASSWORD/CLAUDECODE in the child",
 };
 
 let server;
@@ -184,31 +196,44 @@ async function sendMessage(text) {
   await sendButton().click();
 }
 
-/** True when the session row (found by its title) shows a visible claude marker. */
-async function rowHasHarnessMarker() {
-  const row = page.locator(`[title="${FIRST}"]`).first();
-  await row.waitFor({ state: "attached", timeout: 60_000 });
-  return row.evaluate((start) => {
-    const marker = /(^|[^a-z])claude([^a-z]|$)/i;
-    const labelled = (node) => {
-      const values = [node.getAttribute("title"), node.getAttribute("aria-label"), node.getAttribute("alt")]
-        .filter(Boolean)
-        .join(" ");
-      const harness = node.getAttribute("data-harness");
-      return marker.test(values) || (harness ?? "").toLowerCase() === "claude";
-    };
-    if (labelled(start)) return true;
-    // The marker may sit on the row itself or beside the title, not on the
-    // title node; climb a few levels, stopping once the ancestor already holds
-    // another session row (so a neighbour's marker cannot satisfy this one).
-    let node = start;
-    for (let level = 0; level < 5 && node; level += 1, node = node.parentElement) {
-      if ([...node.querySelectorAll("[title],[aria-label],[alt],[data-harness]")].some(labelled)) return true;
-      if (marker.test(node.textContent ?? "")) return true;
-      if ([...node.children].some((child) => child !== start && child.querySelector?.("a[href*='session=']"))) break;
+// Owner intentional change the claude row's marker is exactly `claude`
+// (never a model name), and it is the last element of the title line, flush with that
+// line's right edge. These helpers replace the former generic "row has a marker" pin.
+const MODEL_FULL_NAME = /claude-(?:opus|sonnet|haiku|fable)-\d+-\d+/i;
+const rowTitleLine = (first) => page.locator(`[title="${first}"]`).first();
+
+/** The claude title line, its one harness marker, and both right edges. */
+async function claudeRowHarnessGeometry() {
+  const line = rowTitleLine(FIRST);
+  await line.waitFor({ state: "attached", timeout: 60_000 });
+  return line.evaluate((titleLine) => {
+    const markers = [...titleLine.querySelectorAll('[data-harness="claude"]')];
+    const marker = markers[0] ?? null;
+    const textsAndLabels = [titleLine.textContent ?? ""];
+    for (const node of [titleLine, ...titleLine.querySelectorAll("*")]) {
+      for (const name of ["title", "aria-label", "alt"]) {
+        const value = node.getAttribute(name);
+        if (value) textsAndLabels.push(value);
+      }
     }
-    return false;
+    return {
+      markerCount: markers.length,
+      markerText: marker?.textContent?.trim() ?? "",
+      markerRight: marker?.getBoundingClientRect().right ?? null,
+      lineRight: titleLine.getBoundingClientRect().right,
+      textsAndLabels,
+    };
   });
+}
+
+/** The pi title line's marker count and text. */
+async function piRowTitleLine() {
+  const line = rowTitleLine(PI_FIRST);
+  await line.waitFor({ state: "attached", timeout: 60_000 });
+  return line.evaluate((titleLine) => ({
+    markerCount: titleLine.querySelectorAll("[data-harness]").length,
+    text: titleLine.textContent ?? "",
+  }));
 }
 
 const interrupt = () => {
@@ -221,29 +246,36 @@ process.once("SIGTERM", interrupt);
 
 try {
   const { startNextServer } = await import("./next-server.mjs");
+  const serverEnv = {
+    ...process.env,
+    PI_CODING_AGENT_DIR: agentDir,
+    // An isolated HOME and no inherited CLAUDE_CONFIG_DIR: the child's
+    // transcript lives under <scratch home>/.claude.
+    HOME: homeDir,
+    PI_WEB_PASSWORD: "",
+    // Sentinels the child must never inherit (names only are asserted).
+    CLAUDECODE: "1",
+    ANTHROPIC_API_KEY: "e2e-dummy-not-a-credential",
+    ANTHROPIC_BASE_URL: "http://127.0.0.1:9",
+    CLAUDE_TEST_INHERITED: "e2e-dummy-not-a-credential",
+    // The scratch tree lives under os.tmpdir(), which the registrable-root
+    // guard does not trust by default (pi#55's operator prefix).
+    PI_WEB_ALLOWED_ROOT_PREFIXES: scratch,
+    // Force a real idle exit during the run; `0` is never used for the
+    // resume proof (the spec's lifecycle semantics).
+    PI_WEB_IDLE_TIMEOUT_MS: "12000",
+    // Only the stub, on PATH. `claude` is resolved from PATH alone.
+    PATH: `${stubDir}:${process.env.PATH ?? ""}`,
+    PI_E2E_CLAUDE_STUB_LOG: stubLog,
+    NEXT_TELEMETRY_DISABLED: "1",
+  };
+  // The suite never inherits a config dir from whichever shell started it.
+  delete serverEnv.CLAUDE_CONFIG_DIR;
   const started = await startNextServer({
     name: "claude-session-219",
     mode: process.env.E2E_SERVER_MODE || "dev",
     logFile: join(artifacts, "claude-session-219-server.log"),
-    env: {
-      ...process.env,
-      PI_CODING_AGENT_DIR: agentDir,
-      PI_WEB_PASSWORD: "",
-      // The scratch tree lives under os.tmpdir(), which the registrable-root
-      // guard does not trust by default (pi#55's operator prefix).
-      PI_WEB_ALLOWED_ROOT_PREFIXES: scratch,
-      // Force a real idle exit during the run; `0` is never used for the
-      // resume proof (the spec's lifecycle semantics).
-      PI_WEB_IDLE_TIMEOUT_MS: "12000",
-      // Only the stub, on PATH. `claude` is resolved from PATH alone.
-      PATH: `${stubDir}:${process.env.PATH ?? ""}`,
-      PI_E2E_CLAUDE_STUB_LOG: stubLog,
-      // Sentinels the child must never inherit (names only are asserted).
-      ANTHROPIC_API_KEY: "e2e-dummy-not-a-credential",
-      ANTHROPIC_BASE_URL: "http://127.0.0.1:9",
-      CLAUDE_TEST_INHERITED: "e2e-dummy-not-a-credential",
-      NEXT_TELEMETRY_DISABLED: "1",
-    },
+    env: serverEnv,
   });
   server = started.server;
   stopServer = started.stop;
@@ -252,9 +284,8 @@ try {
   const { chromium } = await import("playwright");
   browser = await chromium.launch();
 
-  // S1 — new-behaviour criterion: "New-session surface offers harness pi /
-  // claude; claude requires a model alias … and a preset (read-only default);
-  // harness, alias and preset are fixed for the session."
+  // S1 — rewritten for a claude session is created by harness and
+  // full model name, with no preset, and its child carries the reduced argv.
   await scenario("S1", async () => {
     const response = await fetch(`${base}/api/agent/new`, {
       method: "POST",
@@ -264,13 +295,12 @@ try {
         type: "prompt",
         message: FIRST,
         harness: "claude",
-        modelAlias: "sonnet",
-        claudePreset: "read-only",
+        model: "claude-sonnet-5-5",
       }),
       signal: AbortSignal.timeout(120_000),
     });
     const body = await response.json().catch(() => ({}));
-    assert.ok(response.ok, `POST /api/agent/new with harness "claude" failed: ${response.status} ${JSON.stringify(body).slice(0, 400)}`);
+    assert.ok(response.ok, `POST /api/agent/new with harness "claude" and a full model name failed: ${response.status} ${JSON.stringify(body).slice(0, 400)}`);
     sessionId = body.sessionId ?? body.id;
     assert.ok(typeof sessionId === "string" && sessionId.length > 0, "the create route returned no session id for the claude session");
 
@@ -279,13 +309,15 @@ try {
       30_000,
       "no claude child process was launched: the PATH stub recorded no launch (harness claude not wired to a child process)",
     );
-    assert.equal(argvValue(firstLaunch.argv, "--model"), "sonnet", `the claude child's argv carries no "--model sonnet": ${firstLaunch.argv.join(" ")}`);
-    assert.equal(argvValue(firstLaunch.argv, "--permission-mode"), "dontAsk", `the read-only preset's child is not in dontAsk mode: ${firstLaunch.argv.join(" ")}`);
     const joined = firstLaunch.argv.join(" ");
-    for (const tool of ["Read", "Glob", "Grep"]) assert.ok(new RegExp(`\\b${tool}\\b`).test(joined), `the read-only tool set does not name ${tool}: ${joined}`);
-    for (const tool of ["Bash", "Edit", "Write", "WebSearch", "WebFetch", "Agent"]) {
-      assert.ok(!new RegExp(`\\b${tool}\\b`).test(joined), `the read-only tool set must not name ${tool}: ${joined}`);
+    assert.equal(argvValue(firstLaunch.argv, "--model"), "claude-sonnet-5-5", `the claude child's argv carries no "--model claude-sonnet-5-5": ${joined}`);
+    assert.equal(argvValue(firstLaunch.argv, "--permission-prompts"), "none", `the child does not carry --permission-prompts none: ${joined}`);
+    assert.equal(argvValue(firstLaunch.argv, "--session-id"), sessionId, `the first launch does not carry --session-id <the session id>: ${joined}`);
+    assert.equal(argvValue(firstLaunch.argv, "--resume"), undefined, `a first launch must not carry --resume: ${joined}`);
+    for (const flag of ["--bare", "--strict-mcp-config", "--disable-slash-commands", "--permission-mode", "--tools", "--allowedTools", "--cwd"]) {
+      assert.ok(!firstLaunch.argv.some((arg) => arg === flag || arg.startsWith(`${flag}=`)), `the claude child's argv still carries ${flag}: ${joined}`);
     }
+    assert.equal(firstLaunch.argv.filter((arg) => arg === "--model").length, 1, `the claude child's argv must carry exactly one --model: ${joined}`);
     // The session id the child reports is the one the index/list must carry.
     if (firstLaunch.sessionId) assert.ok(typeof firstLaunch.sessionId === "string", "the child reported no session id");
 
@@ -299,13 +331,29 @@ try {
   await newPage();
 
   // S2 — sidebar harness marker (same flow as the resume proof, per the
-  // ticket's acceptance).
+  // ticket's acceptance). Owner intentional change the marker is
+  // exactly `claude` and flush with the title line's right edge, while a pi row
+  // still has no marker.
   await scenario("S2", async () => {
     assert.ok(sessionId, "prerequisite: S1 did not create a claude session");
     await openSession();
     const showSidebar = page.getByRole("button", { name: "Show sidebar", exact: true });
     if (await showSidebar.isVisible().catch(() => false)) await showSidebar.click();
-    assert.ok(await rowHasHarnessMarker(), "the claude session's sidebar row shows no visible harness marker");
+    const geometry = await waitFor(async () => {
+      const row = await claudeRowHarnessGeometry();
+      const flush = row.markerCount === 1 && row.markerRight !== null && Math.abs(row.markerRight - row.lineRight) <= 1;
+      const harnessOnly = row.markerText === "claude" && row.textsAndLabels.every((value) => !MODEL_FULL_NAME.test(value));
+      return flush && harnessOnly ? row : false;
+    }, 60_000, "the claude row's harness chip is not exactly `claude`, is not flush with its title line's right edge (\u00b11px), or a model name remains in the row", 250);
+    assert.equal(geometry.markerCount, 1, "the claude session's sidebar row must show exactly one harness marker");
+    assert.equal(geometry.markerText, "claude", "the claude row's harness marker text must be exactly `claude`");
+    assert.ok(geometry.textsAndLabels.every((value) => !MODEL_FULL_NAME.test(value)), "a claude model full name remains in the row's text or tooltip");
+    assert.ok(Math.abs(geometry.markerRight - geometry.lineRight) <= 1, `the harness chip is not flush with the title line's right edge: chip ${geometry.markerRight}, line ${geometry.lineRight}`);
+    const pi = await waitFor(async () => {
+      const row = await piRowTitleLine();
+      return row.markerCount === 0 && !/(^|[^a-z])claude([^a-z]|$)/i.test(row.text) ? row : false;
+    }, 30_000, "the pi session's sidebar row carries a harness marker", 250);
+    assert.equal(pi.markerCount, 0, "the pi session's sidebar row must carry no harness marker");
     await page.screenshot({ path: join(artifacts, "claude-219-sidebar.png") });
   });
 
@@ -352,8 +400,8 @@ try {
     await page.locator(".chat-input-textarea").waitFor({ state: "visible", timeout: 180_000 });
     await page.getByText(FIRST, { exact: true }).first().waitFor({ timeout: 60_000 });
     await assertReopenedTurn(SECOND);
-    const transcript = join(claudeDir, "projects");
-    assert.ok(existsSync(transcript), "the claude transcript directory was never created under the config dir");
+    const transcript = join(homeDir, ".claude", "projects");
+    assert.ok(existsSync(transcript), "the claude transcript directory was never created under the inherited config dir (no CLAUDE_CONFIG_DIR -> ~/.claude)");
     const copied = existsSync(join(agentDir, "sessions"))
       ? readdirSync(join(agentDir, "sessions"), { recursive: true }).filter((name) => String(name).includes(sessionId))
       : [];
@@ -393,22 +441,21 @@ try {
     await page.screenshot({ path: join(artifacts, "claude-219-resumed.png") });
   });
 
-  // S6 — first claude session creates a credential-free config dir, and the
-  // child env drops PI_WEB_PASSWORD and every inherited ANTHROPIC_* / CLAUDE_*.
+  // S6 — rewritten for no dedicated config dir is created, no
+  // CLAUDE_CONFIG_DIR is injected, and PI_WEB_PASSWORD/CLAUDECODE stay out
+  // while the inherited ANTHROPIC_*/CLAUDE_* environment reaches the child.
   await scenario("S6", async () => {
-    const settingsPath = join(claudeDir, "settings.json");
-    assert.ok(existsSync(settingsPath), `the first claude session did not create ${settingsPath}`);
     assert.ok(firstLaunch, "prerequisite: no claude child process was launched, so its environment cannot be checked");
-    const settings = readFileSync(settingsPath, "utf8");
-    const parsed = JSON.parse(settings);
-    assert.ok(!/key|token|secret|password|credential/i.test(JSON.stringify(parsed)), "the default settings.json carries credential-looking keys or values");
-    assert.equal(argvValue(firstLaunch.argv, "--model"), "sonnet", "prerequisite: the recorded first launch is not the claude session's child");
-    assert.equal(resolve(String(firstLaunch.configDir)), resolve(claudeDir), `CLAUDE_CONFIG_DIR must point at <pi agent dir>/claude, got ${String(firstLaunch.configDir)}`);
-    assert.ok(firstLaunch.envKeys.includes("CLAUDE_CONFIG_DIR"), "the child environment has no CLAUDE_CONFIG_DIR");
+    assert.ok(!existsSync(claudeDir), `the first claude session created the retired dedicated config dir ${claudeDir}`);
+    assert.ok(!existsSync(join(homeDir, ".pi", "agent", "claude")), "the first claude session created ~/.pi/agent/claude");
+    assert.equal(argvValue(firstLaunch.argv, "--model"), "claude-sonnet-5-5", "prerequisite: the recorded first launch is not the claude session's child");
+    assert.ok(!firstLaunch.envKeys.includes("CLAUDE_CONFIG_DIR"), "the child environment has an injected CLAUDE_CONFIG_DIR although pi-web inherited none");
+    assert.equal(firstLaunch.configDir, join(homeDir, ".claude"), `the child's resolved config dir is not its own ~/.claude: ${String(firstLaunch.configDir)}`);
     assert.ok(!firstLaunch.envKeys.includes("PI_WEB_PASSWORD"), "the child environment inherited PI_WEB_PASSWORD");
-    assert.ok(!firstLaunch.envKeys.includes("ANTHROPIC_API_KEY"), "the child environment inherited ANTHROPIC_API_KEY");
-    assert.ok(!firstLaunch.envKeys.includes("ANTHROPIC_BASE_URL"), "the child environment inherited ANTHROPIC_BASE_URL");
-    assert.ok(!firstLaunch.envKeys.includes("CLAUDE_TEST_INHERITED"), "the child environment inherited a CLAUDE_* variable");
+    assert.ok(!firstLaunch.envKeys.includes("CLAUDECODE"), "the child environment inherited CLAUDECODE");
+    assert.ok(firstLaunch.envKeys.includes("ANTHROPIC_API_KEY"), "the child environment lost the inherited ANTHROPIC_API_KEY");
+    assert.ok(firstLaunch.envKeys.includes("ANTHROPIC_BASE_URL"), "the child environment lost the inherited ANTHROPIC_BASE_URL");
+    assert.ok(firstLaunch.envKeys.includes("CLAUDE_TEST_INHERITED"), "the child environment lost the inherited CLAUDE_* variable");
   });
 } catch (error) {
   console.error(error);

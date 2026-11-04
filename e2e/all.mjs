@@ -9,8 +9,12 @@
 // `exclude=` globs, and this file. Browser suites each start their own
 // `next dev`; the runner gives each one its own Next distDir
 // (PI_WEB_DIST_DIR=.next/e2e/<stem>) so they can share one checkout, one
-// node_modules and one Chromium install, and keep a warm Turbopack cache for
-// the next run. Suites that touch host-global resources (tmux, pgrep, ...) are
+// node_modules and one Chromium install. Once every suite has settled, the
+// dist dir of each suite that passed is removed (about 360 MB of `next dev`
+// output per suite); a failed suite keeps its dir so a re-run of it starts
+// warm, and an interrupted run removes nothing. Only
+// `.next/e2e/<stem>` is ever removed: `.next/dev` and `.next` are not the
+// runner's. Suites that touch host-global resources (tmux, pgrep, ...) are
 // not browser suites and run one at a time in a separate serial lane.
 // Suites whose assertions are wall-clock responsiveness bounds, or whose
 // scenarios are proven load-sensitive on a shared host, opt in
@@ -25,15 +29,21 @@
 // message line>` (or `FAIL e2e/<suite>: no scenario marker — <last line>` for a
 // crash, a timeout kill or a spawn error), and prints each failing suite's
 // targeted re-run, `re-run: npm run test:e2e:all -- <suite>`.
+// A suite's own tally line (`FAIL …: <n> … scenario(s) …`, a count of red
+// scenarios, not a scenario) is not listed; each failing suite also prints the
+// host's load when it settled, `host loadavg 1m/5m/15m: x / y / z`, the
+// evidence a load-sensitive flake classification needs.
 import { spawn } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
-import { cpus } from "node:os";
+import { cpus, loadavg } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { resolveJobs } from "./runner/jobs.mjs";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const self = "all.mjs";
-const jobs = Math.max(1, Number(process.env.E2E_JOBS) || Math.min(2, Math.floor(cpus().length / 2)));
+// Browser pool: E2E_JOBS, else min(6, max(2, floor(cpus / 4))) (e2e/runner/jobs.mjs).
+const jobs = resolveJobs(process.env.E2E_JOBS, cpus().length);
 const timeoutMs = Number(process.env.E2E_SUITE_TIMEOUT_MS) || 10 * 60_000;
 
 const files = readdirSync(join(root, "e2e")).filter((f) => f.endsWith(".mjs")).sort();
@@ -126,7 +136,8 @@ function runSuite(suite) {
       const ok = code === 0 && !timedOut;
       if (timedOut) output += `\n[all.mjs] killed after ${timeoutMs}ms timeout\n`;
       else if (!ok && signal) output += `\n[all.mjs] terminated by ${signal}\n`;
-      resolve({ suite, ok, seconds: Math.round((Date.now() - started) / 1000), output });
+      const load = loadavg().map((n) => n.toFixed(2));
+      resolve({ suite, ok, seconds: Math.round((Date.now() - started) / 1000), output, load });
     };
     child.once("error", (error) => { output += `\n[all.mjs] spawn error: ${error.message}\n`; finish(1, null); });
     child.once("close", finish);
@@ -166,14 +177,17 @@ for (const r of settled) {
 }
 // one line per failing scenario marker (`FAIL: <id>` with an
 // indented message below it, or `FAIL <id>: <message>` on one line), else the
-// runner's own trailer or the last output line, then the suite's re-run.
+// runner's own trailer or the last output line, then the host load when the
+// suite settled and the suite's re-run. A suite's tally of red scenarios
+// (`FAIL <suite>: 2 scenario(s) failed`) is not a scenario.
+const tally = /\b\d+\b.*\bscenario\(s\)/;
 const clip = (line) => line.replace(/\s+/g, " ").trim().slice(0, 200);
 function failureLines(r) {
   const lines = r.output.split("\n");
   const found = [];
   lines.forEach((line, i) => {
     const m = /^FAIL(?::\s*|\s+)(.+)$/.exec(line);
-    if (!m) return;
+    if (!m || tally.test(m[1])) return;
     const colon = line.startsWith("FAIL:") ? -1 : m[1].indexOf(": ");
     const scenario = clip(colon < 0 ? m[1] : m[1].slice(0, colon));
     let message = colon < 0 ? "" : clip(m[1].slice(colon + 2));
@@ -185,7 +199,7 @@ function failureLines(r) {
     const last = nonEmpty.findLast((l) => l.startsWith("[all.mjs] ")) ?? nonEmpty.at(-1) ?? "no output";
     found.push(`FAIL e2e/${r.suite}: no scenario marker — ${last}`);
   }
-  return [...found, `re-run: npm run test:e2e:all -- ${r.suite}`];
+  return [...found, `host loadavg 1m/5m/15m: ${r.load.join(" / ")}`, `re-run: npm run test:e2e:all -- ${r.suite}`];
 }
 if (settled.some((r) => !r.ok)) {
   console.log("\n===== failures =====");
@@ -195,4 +209,12 @@ console.log("\n===== summary =====");
 for (const r of settled) console.log(`${r.ok ? "PASS" : "FAIL"} ${r.suite} ${r.seconds}s`);
 const failed = settled.filter((r) => !r.ok);
 console.log(`${settled.length - failed.length}/${settled.length} passed in ${Math.round((Date.now() - started) / 1000)}s`);
+// every suite has settled; drop the passing suites' dist dirs,
+// keep the failed ones warm for their re-run. An interrupted run removes nothing.
+if (!interrupted) {
+  const passed = settled.filter((r) => r.ok);
+  for (const r of passed) rmSync(join(root, ".next/e2e", r.suite.replace(/\.mjs$/, "")), { recursive: true, force: true });
+  console.log(`e2e/all: removed ${passed.length} passing suite dist dir(s) under .next/e2e`
+    + (failed.length ? `, kept ${failed.length} failed for re-run` : ""));
+}
 process.exit(failed.length || interrupted ? 1 : 0);

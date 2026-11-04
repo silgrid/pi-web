@@ -3,6 +3,7 @@ import { getAgentDir, type LoadExtensionsResult } from "@earendil-works/pi-codin
 import { dump as stringifyYaml } from "js-yaml";
 import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync } from "fs";
 import { basename, dirname, join, resolve } from "path";
+import { isAgentLanguage, type AgentLanguage } from "./agent-language";
 import { parseFrontmatter } from "./frontmatter";
 import { parseNpmSource } from "./npm-source";
 import { writePrivateFileAtomicSync } from "./atomic-file";
@@ -84,6 +85,8 @@ export interface SubagentResourceSnapshot {
   /** Extensions load without `ext:` selectors: every tool they register is admitted (#883). */
   allExtensionTools?: true;
   exactSystemPrompt?: string;
+  /** The parent session's Agent language; absent (pre-feature) is English. */
+  agentLanguage?: AgentLanguage;
 }
 
 export interface SubagentSessionResources {
@@ -97,6 +100,8 @@ export interface SubagentSessionResources {
   mcp?: true;
   allExtensionTools?: true;
   exactSystemPrompt?: string;
+  /** Absent for a pre-feature or unknown value, which reads as English. */
+  agentLanguage?: AgentLanguage;
 }
 
 export interface SubagentResultMetadata {
@@ -702,6 +707,7 @@ export function readSubagentSessionResources(
       ...(mcp ? { mcp: true as const } : {}),
       ...(loadExtensions && snapshot.allExtensionTools === true ? { allExtensionTools: true as const } : {}),
       ...(typeof snapshot.exactSystemPrompt === "string" ? { exactSystemPrompt: snapshot.exactSystemPrompt } : {}),
+      ...(isAgentLanguage(snapshot.agentLanguage) ? { agentLanguage: snapshot.agentLanguage } : {}),
     };
   }
   return null;

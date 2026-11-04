@@ -8,7 +8,8 @@ import { writePrivateFileAtomicSync } from "./atomic-file";
 import { defaultAgentDir } from "./http-dispatcher";
 import { serializeByKey } from "./key-serializer";
 import { invalidateSessionListCache } from "./session-reader";
-import { isClaudeModelAlias, isClaudeToolPreset, type ClaudeModelAlias, type ClaudeToolPreset } from "./claude-shared";
+import { normalizeAgentLanguage, type AgentLanguage } from "./agent-language";
+import { normalizeClaudeEffort, normalizeClaudeModel, type ClaudeEffort, type ClaudeModel } from "./claude-shared";
 
 /** Token and cost totals, summed from each turn's `result` aggregate. */
 export interface ClaudeUsageTotals {
@@ -24,8 +25,18 @@ export interface ClaudeSessionRecord {
   id: string;
   cwd: string;
   name?: string;
-  modelAlias: ClaudeModelAlias;
-  preset: ClaudeToolPreset;
+  /**
+   * The full model name: the model the session runs now. A model
+   * switch rewrites it and every later child is started with it.
+   */
+  model: ClaudeModel;
+  /** The reasoning effort; the default entry passes no `--effort`. */
+  effort: ClaudeEffort;
+  /**
+   * The Agent language fixed when the session was created: every launch
+   * of a 中文 session passes `--append-system-prompt`. A pre-feature record reads as English.
+   */
+  agentLanguage: AgentLanguage;
   created: string;
   modified: string;
   firstMessage: string;
@@ -49,15 +60,21 @@ function parseRecord(value: unknown): ClaudeSessionRecord | null {
   if (typeof value !== "object" || value === null) return null;
   const raw = value as Record<string, unknown>;
   if (typeof raw.id !== "string" || !raw.id || typeof raw.cwd !== "string") return null;
-  if (!isClaudeModelAlias(raw.modelAlias) || !isClaudeToolPreset(raw.preset)) return null;
   const usage = (typeof raw.usage === "object" && raw.usage !== null ? raw.usage : {}) as Record<string, unknown>;
   const created = typeof raw.created === "string" ? raw.created : new Date(0).toISOString();
   return {
     id: raw.id,
     cwd: raw.cwd,
     ...(typeof raw.name === "string" && raw.name ? { name: raw.name } : {}),
-    modelAlias: raw.modelAlias,
-    preset: raw.preset,
+    // Tolerant: `model`, else #219's `modelAlias`, as a full name; an
+    // unrecognized value reads as the default and #219's `preset` is ignored, so no
+    // record is dropped. Reading never rewrites the file; the next index write stores
+    // every record in this shape.
+    model: normalizeClaudeModel(raw.model ?? raw.modelAlias),
+    // A pre-#272 record has no effort: it reads as the default entry.
+    effort: normalizeClaudeEffort(raw.effort),
+    // A pre-#293 record (or an unknown value) reads as English.
+    agentLanguage: normalizeAgentLanguage(raw.agentLanguage),
     created,
     modified: typeof raw.modified === "string" ? raw.modified : created,
     firstMessage: typeof raw.firstMessage === "string" ? raw.firstMessage : "",

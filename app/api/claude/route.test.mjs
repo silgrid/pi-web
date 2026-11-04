@@ -20,15 +20,13 @@ test.after(() => {
 const jiti = createJiti(import.meta.url, { alias: { "@": process.cwd() }, interopDefault: true, moduleCache: false });
 const { GET } = await jiti.import("./route.ts");
 
-test("claude on PATH: available, with the config dir path and the fixed choices; nothing is created", async () => {
+test("claude on PATH: available, with the four full model names and the default, no config dir or presets; nothing is created", async () => {
   process.env.PATH = `${binDir}${path.delimiter}${originalPath}`;
   const body = await (await GET()).json();
   assert.deepEqual(body, {
     available: true,
-    configDir: path.join(agentDir, "claude"),
-    modelAliases: ["sonnet", "opus", "haiku", "claude-default"],
-    presets: ["read-only", "writable"],
-    defaultPreset: "read-only",
+    models: ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-1"],
+    defaultModel: "claude-opus-5-5",
   });
   assert.equal(fs.existsSync(agentDir), false, "reading availability creates no directory");
 });
@@ -38,6 +36,6 @@ test("no claude on PATH: unavailable with its reason, still no side effect", asy
   const body = await (await GET()).json();
   assert.equal(body.available, false);
   assert.equal(body.reason, "not-on-path");
-  assert.equal(body.configDir, path.join(agentDir, "claude"));
+  assert.equal(body.configDir, undefined);
   assert.equal(fs.existsSync(agentDir), false);
 });

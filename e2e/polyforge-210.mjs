@@ -9,7 +9,7 @@
 // execution progress last, no fourth block; the command row and the
 // simple/verbose event-mode toggle are gone; the progress is the whole job's
 // stream (`{available, lines:[{id, kind, text, tone?, event?}], omitted}`, every
-// spawn, the newest 2000 lines) instead of the current step's newest 50
+// spawn, every line since) instead of the current step's newest 50
 // entries; a missing job index answers 200 `available:false` (N6). Every #210
 // guarantee that #238 keeps (title row, DAG timing line, 2 s cadence, last-good
 // read, whitelist, masking, 400/403/405, no path, no inner scroller) is still
@@ -41,6 +41,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
 import { startNextServer } from "./next-server.mjs";
+import { openPolyforgeDock as openDock, polyforgeDock as dock } from "./polyforge-dock.mjs";
 import { NAV_MS } from "./timeouts.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
@@ -127,7 +128,7 @@ writeFileSync(routePi, jsonl([
   { type: "session", id: "s", timestamp: EPOCH },
   { type: "message", id: "u", parentId: null, timestamp: EPOCH, message: { role: "user", content: "SECRET-PROMPT" } },
   piText("n", "E2E-ROUTE-NARRATION token=SECRET-TOKEN"),
-  pi("tc", [{ type: "thinking", thinking: "SECRET-THINKING" }, { type: "toolCall", id: "c", name: "bash", arguments: { command: "curl --token=SECRET-TOKEN https://e2e.invalid" } }]),
+  pi("tc", [{ type: "thinking", thinking: "E2E-ROUTE-THINKING" }, { type: "toolCall", id: "c", name: "bash", arguments: { command: "curl --token=SECRET-TOKEN https://e2e.invalid" } }]),
   { type: "message", id: "tr", parentId: null, timestamp: EPOCH, message: { role: "toolResult", toolName: "bash", content: [{ type: "text", text: "SECRET-TOOL-RESULT" }] } },
 ]));
 const routeReview = join(caps[routeWi(1)], "session", "review.jsonl");
@@ -161,8 +162,6 @@ async function check(id, fn) {
 }
 const errors = [];
 let browser; let base; let stop = async () => {};
-const dock = (page) => page.locator("#polyforge-dock").or(page.getByRole("dialog", { name: /polyforge/i })).first();
-const pfButton = (page) => page.getByRole("button", { name: /^(?!.*close).*polyforge/i }).first();
 const card = (page, wi) => dock(page).locator(`[data-pf-card-wi="${wi}"]`);
 const progressRequests = (page) => page.__progressRequests;
 async function openPage({ clock = false, storage = {} } = {}) {
@@ -176,10 +175,13 @@ async function openPage({ clock = false, storage = {} } = {}) {
   page.__progress = progress;
   page.__progressRequests = [];
   // The daemon drops a finished job from runtime-state.json and `pf ops
-  // status` (runtime dropJob): `__dropA` serves A's absence from both lists,
-  // the watch read failing for it and the progress route's 400 (N6: an id
-  // naming no job in a readable index), as on real data.
+  // status` (runtime dropJob): `__dropA` serves A's absence from both lists
+  // and the watch read failing for it, as on real data. Its progress read
+  // gets the route's real answer after the drop: 200 from
+  // the event log alone, lifecycle lines only (`__dropProgress`), which the
+  // open detail must merge into its held stream, never replace it with.
   page.__dropA = false;
+  page.__dropProgress = snapshot([]);
   page.__droppedReads = 0;
   page.route((url) => url.pathname.startsWith("/api/polyforge/"), (route) => {
     const path = new URL(route.request().url()).pathname;
@@ -196,7 +198,7 @@ async function openPage({ clock = false, storage = {} } = {}) {
     if (path === PROBE) return route.fulfill({ json: {} });
     if (path === ROUTE) {
       progress.hits.push(Date.now());
-      if (dropA && new URL(route.request().url()).searchParams.get("wi") === A.wi) return route.fulfill({ status: 400, json: { error: "unknown work item" } });
+      if (dropA && new URL(route.request().url()).searchParams.get("wi") === A.wi) return route.fulfill({ json: page.__dropProgress });
       if (progress.status !== 200) return route.fulfill({ status: progress.status, json: { error: "E2E stub failure" } });
       return route.fulfill({ json: progress.body });
     }
@@ -211,19 +213,6 @@ async function openPage({ clock = false, storage = {} } = {}) {
   return page;
 }
 const withPage = async (opts, fn) => { const page = await openPage(opts); try { return await fn(page); } finally { await page.context().close(); } };
-async function openDock(page) {
-  // the toggle renders only after the mount-time status probe
-  // (`pfPresent`) and, since, is resident at ≤480px / inline
-  // wider. Never open ⋯ to reveal it: ⋯'s overlay covers that slot and
-  // intercepts the click. Wait for the toggle, close ⋯ if it is open, click.
-  const more = page.locator('[data-mobile-toolbar-more="true"]');
-  await waitFor(async () => (await pfButton(page).count()) > 0, "the Polyforge toggle renders", 20_000);
-  if ((await more.count()) > 0 && (await more.getAttribute("aria-expanded")) === "true") {
-    await more.click();
-    await page.locator('[data-mobile-toolbar-actions="true"]').waitFor({ state: "hidden", timeout: 10_000 });
-  }
-  await pfButton(page).click(); await dock(page).waitFor({ timeout: 20_000 }); return dock(page);
-}
 async function openA(page) {
   await openDock(page); await card(page, A.wi).waitFor({ timeout: 30_000 }); await card(page, A.wi).click();
   await dock(page).getByRole("button", { name: /back to job list|deselect/i }).waitFor({ timeout: 10_000 });
@@ -276,7 +265,12 @@ try {
 
   await check("S210-01", () => withPage({}, async (page) => {
     await openA(page); await detail(page).waitFor({ timeout: 10_000 });
-    const result = await order(page, SUMMARY_LABELS);
+    // Bounded wait for every summary block before one ordering read: under a loaded full bar the
+    // detail mounts before its summary labels render (verification s17 of).
+    let result = await order(page, SUMMARY_LABELS);
+    for (const deadline = Date.now() + 30_000; !Object.values(result.present).every(Boolean) && Date.now() < deadline;) {
+      await delay(250); result = await order(page, SUMMARY_LABELS);
+    }
     for (const [key, present] of Object.entries(result.present)) assert.ok(present, `${key} is rendered`);
     for (const [key, ok] of Object.entries(result.order)) assert.ok(ok, `the detail block order holds at ${key}: ${JSON.stringify(result)}`);
     const text = await dock(page).innerText();
@@ -352,12 +346,32 @@ try {
     const kinds = await progressBlock(page).locator("[data-pf-progress-kind]").evaluateAll((els) => els.map((el) => el.getAttribute("data-pf-progress-kind")));
     assert.ok(kinds.includes("narration") && kinds.includes("tool"), `both whitelisted kinds render: ${JSON.stringify(kinds)}`);
     assert.match(await progressBlock(page).innerText(), /bash: curl --token=\*\*\*/, "the tool line carries the masked command");
-    assert.equal(await progressBlock(page).locator('[data-pf-progress-kind="event"]').getAttribute("data-pf-progress-tone"), "accent", "a lifecycle line carries its tone");
+    // owner 有意变更 the tool line is the shared tool card — one
+    // aria-expanded header whose title is the full masked header text.
+    const toolHeader = progressBlock(page).locator('[data-pf-progress-kind="tool"] button[aria-expanded]');
+    assert.equal(await toolHeader.count(), 1, "the tool line is one card with one header control");
+    assert.equal(await toolHeader.getAttribute("title"), "bash: curl --token=*** https://e2e.invalid", "the card header carries the full masked text on hover");
+    // owner 有意变更 the block's step_started line is absorbed into its
+    // group head (its text and raw kind on the head's title); a lifecycle line
+    // that is not absorbed (needs_input below) stays a marker row with its tone.
+    const startHead = progressBlock(page).locator("[data-pf-progress-block-toggle]").first();
+    const startTitle = await startHead.getAttribute("title");
+    assert.ok(startTitle.includes("step_started") && startTitle.includes("00:00:01 ▶ step-code #1 · pi:e2e/model"), `the head carries the absorbed start line: ${startTitle}`);
     // (reverses #210's current-step-only tail by ruling): a later
     // step's lines join the stream and the earlier step's lines stay.
-    page.__progress.body = snapshot([...CODE_LINES, eventLine(8, "00:00:20 ▶ step-review #1 · pi:e2e/model", "step_started", "accent"), entry(9, "E2E-STEP-REVIEW-NARRATION")]);
+    page.__progress.body = snapshot([...CODE_LINES, eventLine(8, "00:00:20 ▶ step-review #1 · pi:e2e/model", "step_started", "accent"), entry(9, "E2E-STEP-REVIEW-NARRATION"),
+      eventLine(10, "00:00:21 ? step-review", "needs_input", "amber")]);
     await tick(page, 2000);
     await waitFor(async () => /E2E-STEP-REVIEW-NARRATION/.test(await progressBlock(page).innerText()), "the later step's lines join");
+    assert.equal(await progressBlock(page).locator('[data-pf-progress-kind="event"]').getAttribute("data-pf-progress-tone"), "amber", "a lifecycle line carries its tone");
+    // (owner intentional change): two spawns form two folded
+    // blocks and only the newest is expanded, so the earlier block's lines are
+    // one click away rather than silently dropped. Expand it, then assert the
+    // stream order is unchanged.
+    const firstBlock = progressBlock(page).locator("[data-pf-progress-block-toggle]").first();
+    assert.match(await firstBlock.innerText(), /code #1 · 3 lines/, "the earlier block's header names its step, spawn and count");
+    await firstBlock.evaluate((el) => el.click());
+    await waitFor(async () => /E2E-STEP-CODE-NARRATION/.test(await progressBlock(page).innerText()), "the earlier step's lines expand");
     const text = await progressBlock(page).innerText();
     assert.ok(text.indexOf("E2E-STEP-CODE-NARRATION") >= 0 && text.indexOf("E2E-STEP-CODE-NARRATION") < text.indexOf("E2E-STEP-REVIEW-NARRATION"), `the earlier step's lines stay, in order: ${text}`);
   }));
@@ -377,6 +391,7 @@ try {
     assert.equal(body.available, true, "the stream is available");
     assert.equal(body.omitted, 0, "nothing omitted under the bound");
     assert.ok(body.lines.some((e) => e.kind === "narration" && e.text.includes("E2E-ROUTE-NARRATION token=***")), `narration is shown masked: ${text}`);
+    assert.ok(body.lines.some((e) => e.kind === "narration" && e.variant === "thinking" && e.text === "E2E-ROUTE-THINKING"), `non-empty thinking is a thinking narration line: ${text}`);
     assert.ok(body.lines.some((e) => e.kind === "tool" && /bash: curl --token=\*\*\*/.test(e.text)), `one tool line is shown masked: ${text}`);
     const narration = (needle) => body.lines.findIndex((e) => e.text.includes(needle));
     assert.ok(narration("E2E-ROUTE-NARRATION") >= 0 && narration("E2E-ROUTE-REVIEW-NARRATION") > narration("E2E-ROUTE-NARRATION"), `every spawn's lines, in order: ${text}`);
@@ -387,8 +402,8 @@ try {
     for (const line of body.lines) {
       if (line.kind !== "event") assert.ok(!("tone" in line) && !("event" in line), `tone/event ride event lines only: ${JSON.stringify(line)}`);
     }
-    for (const secret of ["SECRET-TOOL-RESULT", "SECRET-THINKING", "SECRET-PROMPT", "SECRET-TOKEN"]) assert.ok(!text.includes(secret), `the response leaks ${secret}`);
-    for (const kind of ["toolResult", "thinking", "user", "system"]) assert.ok(!text.includes(kind), `the response carries no ${kind} record`);
+    for (const secret of ["SECRET-TOOL-RESULT", "SECRET-PROMPT", "SECRET-TOKEN"]) assert.ok(!text.includes(secret), `the response leaks ${secret}`);
+    for (const kind of ["toolResult", "user", "system"]) assert.ok(!text.includes(kind), `the response carries no ${kind} record`);
     assert.ok(!text.includes(work), "no path leaves the read face");
   });
 
@@ -422,8 +437,8 @@ try {
   }));
 
   await check("S210-10", async () => {
-    // (reverses #210's newest-50 cap by ruling): under the
-    // 2000-line bound every line of the job is served and rendered.
+    // (reverses #210's newest-50 cap by ruling) and
+    // (removed the 2000-line window): every line of the job is served and rendered.
     const response = await fetch(`${base}${ROUTE}?wi=${routeWi(5)}`, { signal: AbortSignal.timeout(30_000) });
     const body = await response.json();
     assert.equal(response.status, 200); assert.equal(body.lines.length, 60, "the read face serves every line under the bound");
@@ -435,9 +450,18 @@ try {
       await openA(page); await progressBlock(page).waitFor({ timeout: 10_000 });
       await waitFor(async () => (await progressBlock(page).locator("[data-pf-progress-kind]").count()) === 60, "all 60 lines render");
       assert.equal(await progressBlock(page).locator("[data-pf-progress-omitted]").count(), 0, "no omitted marker under the bound");
-      const first = progressBlock(page).locator("[data-pf-progress-kind]").first();
-      assert.equal(await first.getAttribute("title"), "E2E-LINE-01", "each line carries its full text on hover");
-      const nested = await progressBlock(page).evaluate((scope) => [scope, ...scope.querySelectorAll("*")].some((el) => /(auto|scroll)/.test(getComputedStyle(el).overflowY)));
+      // owner 有意变更 narration renders as Markdown in full (no cap, no
+      // ellipsis), so its full text is the visible text itself rather than a hover
+      // title; the guarantee — every line's full text is reachable — is unchanged.
+      const all = await progressBlock(page).locator("[data-pf-progress-kind]").evaluateAll((els) => els.map((el) => el.innerText.trim()));
+      assert.deepEqual(all, Array.from({ length: 60 }, (_, i) => `E2E-LINE-${String(i + 1).padStart(2, "0")}`), "each line shows its full text");
+      // owner 有意变更 the Markdown body clips horizontal overflow, which
+      // CSS reports as overflow-y auto; no element may still be a vertical scroller —
+      // none with a height bound or vertical overflow, and never the area itself.
+      const nested = await progressBlock(page).evaluate((scope) => [scope, ...scope.querySelectorAll("*")].some((el) => {
+        const style = getComputedStyle(el);
+        return /(auto|scroll)/.test(style.overflowY) && (el === scope || style.maxHeight !== "none" || el.scrollHeight > el.clientHeight + 1);
+      }));
       assert.equal(nested, false, "the progress area has no inner vertical scroller");
     });
   });
@@ -506,11 +530,11 @@ try {
     // N7: exact strings, not vacuous alternations.
     const read = (path) => import("node:fs/promises").then((fs) => fs.readFile(join(root, path), "utf8"));
     const docs = await read("docs/agents/polyforge-panel.md");
-    for (const needle of ["`GET /api/polyforge/progress?wi=<wi_id>` (; whole-job since", "`PROGRESS_POLL_MS` = 2000", "`PROGRESS_MAX_LINES` = 2000", "`PROGRESS_TOOL_MAX` = 200", "**Order ("]) {
+    for (const needle of ["`GET /api/polyforge/progress?wi=<wi_id>` (; whole-job since", "`PROGRESS_POLL_MS` = 2000", "no per-line length cap", "`variant:\"thinking\"`", "`PROGRESS_RENDER_CHUNK` = 200", "**Order ("]) {
       assert.ok(docs.includes(needle), `the panel note documents ${needle}`);
     }
     const map = await read("AGENTS.md");
-    assert.ok(map.includes("  polyforge/progress/route.ts     GET ?wi=wi_… the job detail's execution progress: the whole job's stream"), "the file map names the progress route and its whole-job face");
+    assert.ok(map.includes("  polyforge/progress/route.ts     GET ?wi=wi_… the job detail's execution progress: the whole job's complete stream"), "the file map names the progress route and its whole-job face");
     const expected = {
       en: ['"polyforge.progress.title": "Execution progress"', '"polyforge.progress.empty": "No progress yet"', '"polyforge.progress.unavailable": "Progress unavailable"'],
       "zh-CN": ['"polyforge.progress.title": "执行进度"', '"polyforge.progress.empty": "暂无进度"', '"polyforge.progress.unavailable": "进度不可用"'],
@@ -527,17 +551,28 @@ try {
   await check("S210-15", () => withPage({ clock: true }, async (page) => {
     // the review finding: the open detail of a job that finishes keeps
     // its last progress after the daemon drops the job from both lists.
-    const finished = [...CODE_LINES, eventLine(9, "00:00:30 ■ terminal · done", "terminal", "green")];
-    page.__progress.body = snapshot(finished);
+    // the route then answers from the event log alone
+    // (lifecycle lines only, the same event ids); the detail keeps its
+    // narration and tool lines and gains the terminal line it lacked.
+    const done = eventLine(8, "00:00:25 ✓ step-code · done-8s", "step_done");
+    const terminal = eventLine(9, "00:00:30 ■ terminal · done", "terminal", "green");
+    page.__progress.body = snapshot([...CODE_LINES, done]);
+    page.__dropProgress = snapshot([CODE_LINES[0], done, terminal]);
     await openA(page); await progressBlock(page).waitFor({ timeout: 10_000 });
-    await waitFor(async () => /terminal · done/.test(await progressBlock(page).innerText()), "the finished job's last lines render");
+    // owner 有意变更 the block's step_done line is absorbed into its
+    // group head — its text and raw kind are on the head's title, not a body row.
+    const head = progressBlock(page).locator("[data-pf-progress-block-toggle]").first();
+    const headTitle = async () => ((await head.count()) ? (await head.getAttribute("title")) ?? "" : "");
+    await waitFor(async () => /done-8s/.test(await headTitle()) && /E2E-STEP-CODE-NARRATION/.test(await progressBlock(page).innerText()), "the finished job's last lines render");
     page.__dropA = true;
     // Both lists answer without A at least twice (the dock's 3 s cadence), and
     // the progress read the status change triggers has settled.
     await waitFor(async () => { if (page.__droppedReads < 4) await tick(page, 3000); return page.__droppedReads >= 4; }, "both lists answer without the finished job");
     await settle(page);
     const text = await progressBlock(page).innerText();
-    for (const needle of ["E2E-STEP-CODE-NARRATION", "bash: curl --token=***", "terminal · done"]) assert.ok(text.includes(needle), `the last stream stays visible (${needle}): ${text}`);
+    for (const needle of ["E2E-STEP-CODE-NARRATION", "bash: curl --token=***", "terminal · done"]) assert.ok(text.includes(needle), `the last stream stays visible and gains the terminal line (${needle}): ${text}`);
+    assert.ok((await headTitle()).includes("done-8s") && (await headTitle()).includes("step_done"), `the absorbed step_done line stays on the head: ${await headTitle()}`);
+    assert.ok(text.indexOf("bash: curl --token=***") < text.indexOf("terminal · done"), `the terminal line follows the held stream: ${text}`);
     assert.doesNotMatch(text, /Progress unavailable|Loading/, "the stream is not replaced by a state line");
     assert.equal(await detail(page).count(), 1, "the detail stays open");
   }));

@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { isPolyforgeVersionBelowMinimum } from "./polyforge-detect";
 import { polyforgePfBin } from "./polyforge-pf-bin";
-import type { PolyforgeConfigSchema } from "./polyforge-config-schema";
+import { POLYFORGE_CONFIG_SUMMARIZE_MINIMUM_PF_VERSION, type PolyforgeConfigSchema } from "./polyforge-config-schema";
 import {
   probePolyforgeVersion,
   type PolyforgeOpsStatus,
@@ -20,6 +20,11 @@ import {
  *  next release after the v2.20.5 baseline. The dock's older floor is
  *  unchanged; this one gates only the new config verbs. */
 export const POLYFORGE_CONFIG_PANEL_MINIMUM_PF_VERSION = "2.20.6";
+
+/** The summarize/memory_policy floor (`2.20.21`), defined
+ *  once in the browser-safe schema module and re-exported for the server
+ *  read and write paths; the rest of the panel keeps the panel floor above. */
+export { POLYFORGE_CONFIG_SUMMARIZE_MINIMUM_PF_VERSION };
 
 const READ_TIMEOUT_MS = 15000;
 
@@ -67,14 +72,11 @@ export interface PolyforgeMemoryPolicyEntry {
   declared: boolean;
 }
 
-/** The workspace yaml's memory_policy block (read-only). */
-export interface PolyforgeMemoryPolicy {
-  source: string;
-  class: string;
-  appendToDefault: boolean;
-  default: PolyforgeMemoryPolicyEntry;
-  projects: Record<string, PolyforgeMemoryPolicyEntry>;
-}
+/** `pf config list`'s memory_policy object (read-only):
+ *  workspace path → entry (`default` or a project of that path) → its lists.
+ *  `default` carries its effective lists (declared, else built-in); a
+ *  project's are its own (appended to default's at a claim). */
+export type PolyforgeMemoryPolicy = Record<string, Record<string, PolyforgeMemoryPolicyEntry>>;
 
 export interface PolyforgeConfigReload {
   pending: string[];
@@ -94,9 +96,10 @@ export interface PolyforgeConfigRead {
   reload?: PolyforgeConfigReload;
   steps?: PolyforgeConfigStep[];
   steps_complete?: boolean;
-  summarize?: Record<string, { value: unknown; source: string; class?: string; schema?: PolyforgeConfigSchema }>;
   workspaceFile?: { sha256: string | null; exists: boolean };
   memoryPolicy?: PolyforgeMemoryPolicy;
+  /** Why the summarize rows are hidden (pf below the summarize floor). */
+  summarizeReason?: string;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -232,20 +235,21 @@ function sanitizePolicyEntry(raw: unknown): PolyforgeMemoryPolicyEntry {
   return { record: stringList(entry.record), skip: stringList(entry.skip), declared: entry.declared === true };
 }
 
-/** pf's memory_policy block → the read shape; null when pf reported none. */
+/** `pf config list`'s memory_policy object → the read shape (path →
+ *  entry → lists); null when pf reported none (a pf older than the
+ *  summarize floor). */
 export function sanitizeMemoryPolicy(raw: unknown): PolyforgeMemoryPolicy | null {
   if (!isRecord(raw)) return null;
-  const projects: Record<string, PolyforgeMemoryPolicyEntry> = {};
-  if (isRecord(raw.projects)) {
-    for (const [project, entry] of Object.entries(raw.projects)) projects[project] = sanitizePolicyEntry(entry);
+  const out: PolyforgeMemoryPolicy = {};
+  for (const [path, block] of Object.entries(raw)) {
+    if (!path || !isRecord(block)) continue;
+    const entries: Record<string, PolyforgeMemoryPolicyEntry> = {};
+    for (const [entry, value] of Object.entries(block)) {
+      if (isRecord(value)) entries[entry] = sanitizePolicyEntry(value);
+    }
+    out[path] = entries;
   }
-  return {
-    source: str(raw.source) || "default",
-    class: str(raw.class),
-    appendToDefault: raw.append_to_default === true,
-    default: sanitizePolicyEntry(raw.default),
-    projects,
-  };
+  return out;
 }
 
 function scalarValue(value: unknown): string | number | undefined {
@@ -284,37 +288,20 @@ export function sanitizeStepEntry(project: string | undefined, step: string, ent
   return out;
 }
 
+/** pf's workspace read → the step facts. summarize and memory_policy are
+ *  cli.toml facts read from `pf config list` only: a
+ *  drifted workspace document carrying them is ignored. */
 export function sanitizeWorkspace(raw: unknown): {
   mapped: boolean;
-  summarize?: Record<string, { value: unknown; source: string; class?: string; schema?: PolyforgeConfigSchema }>;
   steps?: PolyforgeConfigStep[];
   steps_complete?: boolean;
   workspaceFile?: { sha256: string | null; exists: boolean };
-  memoryPolicy?: PolyforgeMemoryPolicy;
 } {
   if (!isRecord(raw)) return { mapped: false };
   if (raw.mapped !== true) return { mapped: false };
   const yaml = isRecord(raw.yaml)
     ? { sha256: typeof raw.yaml.sha256 === "string" ? raw.yaml.sha256 : null, exists: raw.yaml.exists !== false }
     : undefined;
-  const summarize: Record<string, { value: unknown; source: string; class?: string; schema?: PolyforgeConfigSchema }> = {};
-  if (isRecord(raw.summarize)) {
-    for (const name of ["models", "language", "interval_sec"] as const) {
-      const entry = raw.summarize[name];
-      if (!isRecord(entry)) continue;
-      const source = str(entry.source) || "default";
-      const cls = str(entry.class);
-      const schema = isRecord(entry.schema) && typeof entry.schema.kind === "string"
-        ? entry.schema as PolyforgeConfigSchema
-        : undefined;
-      summarize[name] = {
-        value: entry.value,
-        source,
-        ...(cls ? { class: cls } : {}),
-        ...(schema ? { schema } : {}),
-      };
-    }
-  }
   const steps: PolyforgeConfigStep[] = [];
   if (isRecord(raw.steps)) {
     for (const [outer, value] of Object.entries(raw.steps)) {
@@ -331,14 +318,29 @@ export function sanitizeWorkspace(raw: unknown): {
       }
     }
   }
-  const memoryPolicy = sanitizeMemoryPolicy(raw.memory_policy);
   return {
     mapped: true,
-    summarize,
     steps,
     steps_complete: raw.steps_complete !== false,
     ...(yaml ? { workspaceFile: yaml } : {}),
-    ...(memoryPolicy ? { memoryPolicy } : {}),
+  };
+}
+
+/** The summarize rows' one source: the `summarize.*` items
+ *  of `pf config list`, at or above the summarize floor. Below it — a null
+ *  or unparseable version counts as below — and for a list that carries no
+ *  `summarize.*` item at all, every `summarize.*` item is dropped and the
+ *  reason names the floor and the found version; no `config workspace` read
+ *  stands in for them. Pure; the read assembly below calls it. */
+export function withListSummarize(
+  items: PolyforgeConfigItem[],
+  pfVersion: string | null,
+): { items: PolyforgeConfigItem[]; reason?: string } {
+  const below = isPolyforgeVersionBelowMinimum(pfVersion, POLYFORGE_CONFIG_SUMMARIZE_MINIMUM_PF_VERSION, true);
+  if (!below && items.some((item) => item.key.startsWith("summarize."))) return { items };
+  return {
+    items: items.filter((item) => !item.key.startsWith("summarize.")),
+    reason: `the summarize settings need pf ${POLYFORGE_CONFIG_SUMMARIZE_MINIMUM_PF_VERSION} or newer (found ${pfVersion ?? "an unparseable version"}) — upgrade pf to read and edit them`,
   };
 }
 
@@ -414,58 +416,24 @@ export async function readPolyforgeConfig(cwd: string): Promise<PolyforgeConfigR
     }
   }
 
+  const summarize = withListSummarize(items, presence.version);
+  const memoryPolicy = summarize.reason ? null : sanitizeMemoryPolicy((list as Record<string, unknown>).memory_policy);
+
   let mapped = false;
-  let summarize: PolyforgeConfigRead["summarize"];
   let steps: PolyforgeConfigStep[] | undefined;
   let stepsComplete: boolean | undefined;
   let workspaceFile: PolyforgeConfigRead["workspaceFile"];
-  let memoryPolicy: PolyforgeMemoryPolicy | undefined;
   if (cwd) {
+    let ws: ReturnType<typeof sanitizeWorkspace> | null = null;
     try {
-      const ws = sanitizeWorkspace(await runPfJson(["--json", "config", "workspace", "--cwd", cwd]));
-      mapped = ws.mapped;
-      summarize = ws.summarize;
-      steps = ws.steps;
-      stepsComplete = ws.steps_complete;
-      workspaceFile = ws.workspaceFile;
-      memoryPolicy = ws.memoryPolicy;
-      if (ws.mapped && ws.summarize) {
-        for (const name of ["models", "language", "interval_sec"] as const) {
-          const entry = ws.summarize[name];
-          if (!entry) continue;
-          const key = `summarize.${name}`;
-          const existing = items.find((item) => item.key === key);
-          if (existing) {
-            // The list already reported this key (and its pf schema); the
-            // workspace read contributes the effective value/source and
-            // pf's own class (never a UI copy).
-            existing.value = entry.value;
-            existing.source = entry.source;
-            if (entry.class) existing.class = entry.class;
-            continue;
-          }
-          items.push({
-            key,
-            value: entry.value,
-            source: entry.source,
-            class: entry.class ?? "",
-            ...(entry.schema ? { schema: entry.schema } : {}),
-          });
-        }
-      } else {
-        // An unmapped cwd still renders the workspace controls (read-only),
-        // so the panel can state why they are unavailable instead of hiding
-        // them. No class is invented: pf reported none for an unmapped cwd.
-        for (const name of ["models", "language", "interval_sec"] as const) {
-          items.push({ key: `summarize.${name}`, value: null, class: "" });
-        }
-      }
+      ws = sanitizeWorkspace(await runPfJson(["--json", "config", "workspace", "--cwd", cwd]));
     } catch {
-      mapped = false;
-      for (const name of ["models", "language", "interval_sec"] as const) {
-        items.push({ key: `summarize.${name}`, value: null, class: "" });
-      }
+      ws = null;
     }
+    mapped = ws?.mapped === true;
+    steps = ws?.steps;
+    stepsComplete = ws?.steps_complete;
+    workspaceFile = ws?.workspaceFile;
   }
 
   return {
@@ -473,14 +441,14 @@ export async function readPolyforgeConfig(cwd: string): Promise<PolyforgeConfigR
     pfVersion: presence.version,
     capable: true,
     file: { sha256: list.file.sha256, exists: list.file.exists !== false },
-    items,
+    items: summarize.items,
     mapped,
     daemonReachable: isRecord(opsRaw),
     ...(reload ? { reload } : {}),
-    ...(summarize ? { summarize } : {}),
     ...(steps ? { steps } : {}),
     ...(stepsComplete !== undefined ? { steps_complete: stepsComplete } : {}),
     ...(workspaceFile ? { workspaceFile } : {}),
     ...(memoryPolicy ? { memoryPolicy } : {}),
+    ...(summarize.reason ? { summarizeReason: summarize.reason } : {}),
   };
 }

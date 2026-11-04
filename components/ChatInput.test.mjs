@@ -16,7 +16,7 @@ const { isBareMcpCommand } = await jiti.import("@/lib/mcp-command");
 const { ModelSelector } = await jiti.import("./ModelSelector.tsx");
 // As ChatInput.tsx imports it: on Windows jiti loads "@/lib/draft-store.ts"
 // as a second copy, and ChatInput would never see the drafts set here (#1211).
-const { clearDraft, getDraft, mergeRestoredSubmissionDraft, mergeRestoredSubmissionText, rekeyDraft, setDraft } = await jiti.import("@/lib/draft-store");
+const { appendDraftText, appendPromptText, clearDraft, getDraft, mergeRestoredSubmissionDraft, mergeRestoredSubmissionText, rekeyDraft, setDraft } = await jiti.import("@/lib/draft-store");
 const { I18nProvider } = await jiti.import("@/hooks/useI18n");
 
 test("preserves pasted HTML links as Markdown without changing plain text layout", () => {
@@ -1219,4 +1219,40 @@ test("grows the composer to its text and hides the scrollbar until the text is t
   autoGrowTextarea(tall);
   assert.equal(tall.style.height, "200px", "the box caps at 200 px");
   assert.equal(tall.style.overflowY, "auto", "capped text scrolls");
+});
+
+// ---- the Messages 「@」 fill ----
+
+const PROMPT_281 = "Fix the login timeout.\nKeep the API stable.";
+
+test("the 「@」 fill appends after one blank line and gives an empty draft the prompt alone", () => {
+  assert.equal(appendPromptText("", PROMPT_281), PROMPT_281, "an empty draft gets no leading blank line");
+  assert.equal(appendPromptText("   \n", PROMPT_281), PROMPT_281, "a blank draft counts as empty");
+  assert.equal(appendPromptText("my draft", PROMPT_281), `my draft\n\n${PROMPT_281}`, "old draft, one blank line, prompt");
+  assert.equal(appendPromptText("line one\n\nline two", PROMPT_281), `line one\n\nline two\n\n${PROMPT_281}`, "the old draft is kept byte for byte");
+});
+
+test("the 「@」 fill on a stored draft keeps its images exactly", () => {
+  const key = "fill-281-draft";
+  const images = [{ data: "aGVsbG8=", mimeType: "image/png" }];
+  setDraft(key, { value: "stored", images });
+  assert.deepEqual(appendDraftText(key, PROMPT_281), { value: `stored\n\n${PROMPT_281}`, images });
+  assert.deepEqual(getDraft(key), { value: `stored\n\n${PROMPT_281}`, images }, "the store holds the appended draft");
+  clearDraft(key);
+  assert.deepEqual(appendDraftText(key, PROMPT_281), { value: PROMPT_281, images: [] }, "no stored draft is an empty one");
+  assert.deepEqual(getDraft(key), { value: PROMPT_281, images: [] });
+  clearDraft(key);
+});
+
+test("the composer's appendText writes text only: no image, toolbar, submit or focus path", () => {
+  const source = readFileSync(new URL("./ChatInput.tsx", import.meta.url), "utf8");
+  const start = source.indexOf("    appendText(text: string) {");
+  assert.ok(start >= 0, "the handle carries appendText");
+  const body = source.slice(start, source.indexOf("\n    },\n", start));
+  assert.match(body, /appendPromptText\(valueRef\.current, text\)/, "the one append rule over the current value");
+  assert.match(body, /setValue\(combined\)/);
+  for (const forbidden of [/Image/i, /attached/i, /submit/i, /onSend|send\(/i, /\.focus\(/, /model|effort|compact/i]) {
+    assert.doesNotMatch(body, forbidden, `appendText must not touch ${forbidden}`);
+  }
+  assert.match(source, /draftKey\(\) \{\s*return draftKeyRef\.current;\s*\}/, "the handle reports its current draft key");
 });

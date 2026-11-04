@@ -23,6 +23,38 @@ export interface PolyforgeConfigSchema {
   [key: string]: unknown;
 }
 
+/** The cli.toml keys the panel writes, one fact for the
+ *  client form (rows, folds, confirmation) and the write route's allowlist.
+ *  Common keys are visible without expanding; advanced keys fold per file
+ *  zone (the top-level zone and the `[daemon]` zone). pf stays the authority
+ *  on every value; these lists only decide where a key renders and which
+ *  keys the panel may hand to `pf config set`. */
+export const CLI_COMMON_KEYS: readonly string[] = ["max_concurrent_jobs", "step_timeout", "stall_window", "claude_bin", "api_key"];
+export const CLI_ADVANCED_TOP_LEVEL_KEYS: readonly string[] = ["server", "daemon_socket", "user_id"];
+export const CLI_ADVANCED_DAEMON_KEYS: readonly string[] = ["harness_root", "operator_agent_dir"];
+export const CLI_WRITABLE_KEYS: readonly string[] = [...CLI_COMMON_KEYS, ...CLI_ADVANCED_TOP_LEVEL_KEYS, ...CLI_ADVANCED_DAEMON_KEYS];
+/** The connection/credential keys: a save needs a second confirmation, since
+ *  the panel's next pf call uses the new value while the running daemon keeps
+ *  the old one until it restarts. */
+export const CONNECTION_KEYS: readonly string[] = ["server", "api_key", "daemon_socket", "user_id"];
+/** The cli.toml [summarize] keys the panel writes (flat
+ *  machine-level cli.toml keys, written without a workspace and read only
+ *  from `pf config list`; the cli.toml card's `[summarize]` zone, all common
+ *  rows) — never the workspace `.polyforge.yaml`. */
+export const SUMMARIZE_KEYS: readonly string[] = ["summarize.models", "summarize.language", "summarize.interval_sec"];
+/** The summarize/memory_policy floor: the pf release that
+ *  first carries summarize.* and the per-path memory_policy on
+ *  `pf config list` (`docs/upgrade.md` v2.20.21). Below it —
+ *  a null or unparseable version included — both groups are hidden with one
+ *  upgrade hint and summarize writes answer 400; nothing is read for them
+ *  from `config workspace`. Defined here (browser-safe) so the server read,
+ *  the write gate and the client hint share one value; a release tagged
+ *  differently changes only this value and its fixtures. */
+export const POLYFORGE_CONFIG_SUMMARIZE_MINIMUM_PF_VERSION = "2.20.21";
+/** String/path keys that must not be saved empty (the only guard the panel
+ *  adds besides pf's own schema kinds). */
+export const NON_EMPTY_STRING_KEYS: readonly string[] = ["server", "daemon_socket", "user_id", "claude_bin", "harness_root", "operator_agent_dir"];
+
 /** Parse a Go duration (the `supervision` keys' syntax) to milliseconds, or
  *  null when the text is not one. Pure and exported so the form can enforce
  *  pf's duration schema client-side. */

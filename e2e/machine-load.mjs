@@ -1,7 +1,9 @@
 // carries: components/MachineLoadSection*, components/DebugPanel*, components/debug-panel-state*, hooks/useMachineLoad*, lib/machine-load*, app/api/machine-load/*
 // (wi_p2nDPX2BoBAp) — pi-web machine load, since
-// in the Debug panel only (the last full-width row of its `.debug-cols` grid);
-// the Session-info popover no longer carries it (ML01 pins both halves).
+// in the Debug panel only (the grid's narrow rightmost column
+// on a wide panel, the right column under the sessions between that width and
+// 760px, the last block of the phone stack); the Session-info popover carries
+// none of it any more (ML01 pins both halves).
 //
 // End-to-end acceptance pass authored PRE-CODE by e2e-author against
 // artifacts/spec.md (Acceptance criteria + `#### Scenario` blocks) and the
@@ -40,6 +42,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
 import { startNextServer } from "./next-server.mjs";
+import { settlePolyforgeToggle } from "./polyforge-dock.mjs";
 import { COLD_MS, NAV_MS } from "./timeouts.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
@@ -218,6 +221,9 @@ async function loadSession(state, { clock = false, cold = false } = {}) {
 
 async function revealDebugButton(page) {
   if (await debugButton(page).isVisible().catch(() => false)) return;
+  ///#247: let the resident Polyforge toggle settle (bounded)
+  // before opening ⋯, so its late render cannot land under the open sheet.
+  await settlePolyforgeToggle(page);
   const more = page.locator('[data-mobile-toolbar-more="true"]');
   if ((await more.count()) > 0 && (await more.getAttribute("aria-expanded")) !== "true") await more.click();
 }
@@ -245,8 +251,8 @@ async function closePanel(state) {
  * The machine-load section, found without depending on an implementation-only
  * class or an unpinned label: the deepest element containing every expected
  * value, then the largest ancestor that still holds them below the Debug
- * panel's column grid (its row there) and has not pulled in a neighbouring
- * section (the session file / project-path sentinels).
+ * panel's column grid (the load's own column there) and has not pulled in a
+ * neighbouring section (the session file / project-path sentinels).
  */
 async function machineScope(state, values = VALUES) {
   const { page } = state;

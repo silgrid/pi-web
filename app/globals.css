@@ -1110,6 +1110,13 @@ button.extension-widget-trigger:focus-visible {
     --file-row-height: 36px;
   }
 }
+/* A 360px-or-narrower phone keeps the 36px bar: its toolbar also holds the
+   Polyforge button, and at 44px the session-stats strip gets too narrow to
+   show each item whole at one end of its scroll (; owner ruling
+). */
+@media (max-width: 360px) {
+  :root { --top-bar-height: 36px; }
+}
 
 :root {
   --font-ui-default: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
@@ -2856,5 +2863,143 @@ span.token.table {
 @media (prefers-reduced-motion: reduce) {
   .pf-step-node-pulse {
     animation: none;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* The one Polyforge search bar: Work › 工单列表, Memory
+   and Tasks. Row 1 = search input + square icon action; row 2 = filters.
+   Desktop geometry is the 26px control Tasks used; ≤640px keeps row 1 on
+   one line, turns the filters into a two-column grid and gives every
+   control a 40px touch target. Existing CSS variables only. */
+
+.pf-searchbar {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+/* The Memory form owns its surface padding/border; the Work sub-tabs
+   already sit inside their padded header row. */
+.pf-searchbar--padded {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.pf-searchbar-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex-wrap: nowrap;
+}
+
+.pf-searchbar-input {
+  flex: 1 1 0;
+  min-width: 0;
+  width: 100%;
+  height: 26px;
+  box-sizing: border-box;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0 6px;
+  font-size: 12px;
+  line-height: 1;
+}
+
+.pf-searchbar-action {
+  width: 26px;
+  height: 26px;
+  flex: 0 0 26px;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  background: var(--bg);
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.pf-searchbar-action:disabled {
+  cursor: default;
+  color: var(--text-dim);
+}
+
+.pf-searchbar-action:focus-visible,
+.pf-searchbar-control:focus-visible,
+.pf-searchbar-input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.pf-searchbar-filters {
+  display: flex;
+  gap: 6px;
+  min-width: 0;
+}
+
+.pf-searchbar-control {
+  flex: 1 1 0;
+  min-width: 0;
+  width: 100%;
+  height: 26px;
+  box-sizing: border-box;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0 4px;
+  font-size: 12px;
+}
+
+/* The any-word checkbox keeps its visible text; its whole label cell is
+   the click target, so the phone layout can give it the same height. */
+.pf-searchbar-check {
+  flex: 1 1 0;
+  min-width: 0;
+  height: 26px;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+@media (max-width: 640px) {
+  .pf-searchbar-input,
+  .pf-searchbar-control,
+  .pf-searchbar-action {
+    height: 40px;
+  }
+
+  .pf-searchbar-action {
+    width: 40px;
+    flex-basis: 40px;
+  }
+
+  .pf-searchbar-filters {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px;
+  }
+
+  .pf-searchbar-filters > * {
+    min-width: 0;
+    min-height: 40px;
+    height: 40px;
+  }
+
+  /* An odd last control spans the full filter row. */
+  .pf-searchbar-filters > :last-child:nth-child(odd) {
+    grid-column: 1 / -1;
   }
 }

@@ -34,52 +34,10 @@ export type ClientMessageUpdateEvent = Omit<JsonMessageUpdateEvent, "assistantMe
 const OMITTED_EVENT_TYPES = new Set([
   "turn_start",
   "turn_end",
+  // Carries the whole appended entry (an extension's custom entry, such as a
+  // codemode `store()` write, can be 1 MiB), and nothing in the browser reads it.
+  "entry_appended",
 ]);
-
-/**
- * How many characters of a displayed `custom_message` entry's text the wire
- * forwards (see `toClientAgentEvent`).
- */
-export const CUSTOM_MESSAGE_TEXT_BUDGET = 4096;
-
-/**
- * A displayed `custom_message` entry (an extension's decision feed, such as
- * polyforge's `polyforge-decision`) has no `message_start`/`message_end`:
- * `entry_appended` is the chat's only live view of it. Forward a slimmed
- * copy so an open chat can render it in real time; cap the text so a chatty
- * entry cannot cost the browser megabytes (the original reason the wire
- * dropped `entry_appended` wholesale). Everything else stays dropped.
- */
-function toClientEntryAppendedEvent(event: AgentEventLike): AgentEventLike | null {
-  const raw = isObject(event.entry) ? event.entry : null;
-  const entry = raw !== null && raw.type === "custom_message" ? raw : null;
-  if (entry === null || entry.display !== true) return null;
-  const customType = typeof entry.customType === "string" ? entry.customType : "";
-  const content = entry.content;
-  let text: string;
-  if (typeof content === "string") {
-    text = content;
-  } else if (Array.isArray(content)) {
-    text = content
-      .filter((block) => isObject(block) && block.type === "text" && typeof block.text === "string")
-      .map((block) => block.text as string)
-      .join("\n");
-  } else {
-    text = "";
-  }
-  if (text.length > CUSTOM_MESSAGE_TEXT_BUDGET) {
-    text = text.slice(0, CUSTOM_MESSAGE_TEXT_BUDGET);
-  }
-  const slimmed: Record<string, unknown> = {
-    type: "custom_message",
-    customType,
-    content: text,
-    display: true,
-  };
-  if (typeof entry.id === "string") slimmed.id = entry.id;
-  if (typeof entry.timestamp === "number") slimmed.timestamp = entry.timestamp;
-  return { type: "entry_appended", entry: slimmed };
-}
 
 /**
  * How many nested calls a codemode progress snapshot keeps. The script
@@ -191,7 +149,6 @@ export function isSystemMessageEvent(event: AgentEventLike): boolean {
 export function toClientAgentEvent(
   event: AgentEventLike,
 ): AgentEventLike | ClientMessageUpdateEvent | null {
-  if (event.type === "entry_appended") return toClientEntryAppendedEvent(event);
   if (OMITTED_EVENT_TYPES.has(event.type)) return null;
   // Pi >= 0.86 appends the prompt and tool loadout to the transcript as system
   // messages, which the agent loop announces like any message. They carry the

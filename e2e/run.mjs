@@ -2,6 +2,10 @@
 // carries: app/page.tsx, app/layout.tsx, app/globals.css, components/AppShell*, components/SessionSidebar*, components/SplitPaneLayout*, components/PaneHeader*, components/TabBar*, components/MarkdownBody*, components/FileViewer*, components/FileExplorer*, components/ModelSelector*, components/ModelContextWindow*, components/FontSettings*
 // carries: lib/pane-state*, lib/pane-tab-state*, lib/tab-order*, lib/model-*, lib/font-preferences*, lib/markdown*, hooks/useChatAppearance*, hooks/useFontPreferences*, app/api/files/*, app/api/models/*
 // Adapted from @Nuctori's script-style CI/E2E fixtures in PR #617 (issue #599).
+//
+// e2e/all: isolated — the minimap jump's scroll wait (heading at 30% of the
+// viewport, 5px) timed out in the parallel bar in both full-bar
+// runs, while every isolated re-run passed: proven load-sensitive.
 import assert from "node:assert/strict";
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -42,6 +46,10 @@ const RICH = "e2e-rich-session";
 const COMPACTED = "e2e-compacted-session";
 const APPEND = "e2e-external-append-session";
 const CODE_BACKGROUND = "e2e-code-background";
+// (#232 ledger): a session that scrolls (so the minimap rail
+// renders) and holds every turn on its first page (`turnsBefore` 0).
+const ZERO = "e2e-minimap-zero-session";
+const zeroText = (i) => `E2E zero message ${String(i).padStart(2, "0")}`;
 // wi_tN1cVXKf1VIr (sidebar A1: Archive) e2e fixtures: two non-running
 // sessions in two distinct projects so the archive pass can verify
 // project grouping and external-delete pruning. Authored pre-code against
@@ -346,13 +354,18 @@ async function checkMinimapTurns({ browser, base }) {
         assert.ok(stubRect.y + stubRect.height <= firstNodeRect.y + firstNodeRect.height / 2 + 1,
           "the stub must sit above the first node");
 
-        // the owner answer (S4): the 3-entry BRANCH
-        // session does not scroll, so no rail renders there; assert only that
-        // zero unloaded turns show no stub.
-        await page.goto(`${base}/?session=${BRANCH}`, { waitUntil: "domcontentloaded" });
-        await page.getByText("Active branch answer", { exact: true }).waitFor();
+        // (#232 ledger): the zero gate runs where the rail
+        // renders — the ZERO session scrolls and its first page holds all 20
+        // turns (`turnsBefore` 0) — so its absence assertions are not vacuous.
+        await openSession(page, ZERO, zeroText(39));
+        const zeroNodes = page.locator("[data-minimap-node-index]");
+        assert.equal(await zeroNodes.count(), 20, "the zero session's rail renders every turn");
         assert.equal(await page.locator("[data-minimap-earlier]").count(), 0,
           "zero unloaded turns must show no stub");
+        const zeroPreview = await openPreviewAt(page, 0);
+        assert.equal(Number(await readTurnNumber(zeroPreview, zeroText(0))), 1, "with no earlier turn the first turn is turn 1");
+        assert.equal(await zeroPreview.locator("[data-minimap-preview-earlier]").count(), 0,
+          "zero unloaded turns must show no earlier-turns row");
       },
     );
   } finally {
@@ -381,6 +394,9 @@ try {
     message(`e${i}`, i ? `e${i - 1}` : null, i % 2 ? "assistant" : "user", text(i)));
   longEntries.splice(1, 0, message("alternate", "e0", "user", "E2E alternate history branch"));
   writeSession(LONG, longEntries);
+  writeSession(ZERO, Array.from({ length: 40 }, (_, i) =>
+    message(`z${i}`, i ? `z${i - 1}` : null, i % 2 ? "assistant" : "user",
+      i % 2 ? `${zeroText(i)}\n\n${"E2E zero answer paragraph.\n\n".repeat(3)}` : zeroText(i))));
   writeSession(BRANCH, [
     message("root", null, "user", "Branch root"),
     message("old", "root", "assistant", "Inactive branch answer"),
@@ -503,7 +519,7 @@ try {
   }
 
   const { sessions } = await api("/api/sessions");
-  assert.deepEqual(sessions.map((session) => session.id).sort(), [LONG, BRANCH, RICH, COMPACTED, APPEND, CODE_BACKGROUND, ARCHIVE_ALPHA, ARCHIVE_BETA].sort());
+  assert.deepEqual(sessions.map((session) => session.id).sort(), [LONG, BRANCH, RICH, COMPACTED, APPEND, CODE_BACKGROUND, ARCHIVE_ALPHA, ARCHIVE_BETA, ZERO].sort());
 
   const detail = await api(`/api/sessions/${LONG}?deferThinking=1&deferMedia=1`);
   assert.deepEqual(detail.context.entryIds, ids(4950, 5000));

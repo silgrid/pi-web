@@ -333,10 +333,11 @@ export function DebugPanelView({ page, server, samples = EMPTY_DEBUG_SAMPLES, se
         <div className="debug-panel-scroll">
           {issues.length > 0 && <IssueList issues={issues} />}
           {/* What this page holds and measures; what the server holds (its totals and the pages
-              connected to it); the sessions it holds, the chat's details under its own row. Three
+              connected to it); the sessions it holds, the chat's details under its own row. Four
               columns on a wide panel, the sessions under the server's on a narrower one, all one
-              above the other on a phone. The host's load is the grid's last row, across every
-              column at each width: its own 2 s visible-only poll, mounted with the open panel, so
+              above the other on a phone. The host's load is the narrow rightmost column on a wide
+              panel, under the sessions in that same right column on a middle one, and the foot of
+              the phone stack: its own 2 s visible-only poll, mounted with the open panel, so
               closing it stops the poll and drops the values. */}
           <div className="debug-cols">
             <PageColumn page={page} samples={samples} reply={reply} ctx={ctx} />
@@ -1616,14 +1617,19 @@ const DEBUG_PANEL_CSS = `
     overflow-wrap: anywhere;
   }
 
-  /* Three columns when the panel is wide: the page's as wide as its table, the server's and the
-     sessions' each capped, so names never stretch and push the badges to the far edge. The machine
-     load is the last row across them all; the grid is as wide as its columns (fit-content), so that
-     row ends where the last column does. */
+  /* Four columns when the panel is wide enough for all of them: the page's as wide as its table, the
+     server's and the sessions' each capped, so names never stretch and push the badges to the far
+     edge, and the host's load's narrow and rightmost beside them: its own track is capped at 280px
+     (a 239px block behind the 20px gutter, the rule and the 20px padding), so it never stretches with
+     the panel. Each column but the page's starts after the same 20px gutter + 20px padding + left
+     rule; the load's rule separates it from the sessions' column, so it carries no top rule of its
+     own here. The grid is as wide as its columns (fit-content), so it ends where the last column
+     does. Measured: the four columns keep their minimums from a 1412px panel down to no horizontal
+     scroll; below that width the load drops under the sessions (the width query below). */
   .debug-cols {
     display: grid;
-    grid-template-areas: "page server sessions" "load load load";
-    grid-template-columns: minmax(320px, max-content) minmax(340px, 480px) minmax(360px, 560px);
+    grid-template-areas: "page server sessions load";
+    grid-template-columns: minmax(320px, max-content) minmax(340px, 480px) minmax(360px, 560px) minmax(240px, 280px);
     gap: 0;
     width: fit-content;
     max-width: 100%;
@@ -1646,6 +1652,16 @@ const DEBUG_PANEL_CSS = `
   .debug-load {
     grid-area: load;
     min-width: 0;
+    margin-left: 20px;
+    padding-left: 20px;
+    border-left: 1px solid var(--border);
+  }
+  /* The load's top rule is its row separator where it sits under the sessions' column (the middle
+     widths) or at the foot of the phone stack; as the rightmost column its left rule separates it. */
+  .debug-load .machine-load-section {
+    margin-top: 0;
+    padding-top: 0;
+    border-top: 0;
   }
   .debug-col-server,
   .debug-col-sessions {
@@ -2214,16 +2230,22 @@ const DEBUG_PANEL_CSS = `
     gap: 3px 4px;
   }
 
-  /* Narrower: the sessions under the server's pages, one border down both; the page's column
-     beside them, its height going to the sessions' row rather than opening a gap under the pages. */
-  @container debug-panel (max-width: 1239px) {
+  /* Narrower than four columns: the sessions under the server's pages, the load under the sessions
+     in the same right column, one border down both; the page's column beside them, its height going
+     to the sessions' row rather than opening a gap under the pages. */
+  @container debug-panel (max-width: 1411px) {
     .debug-cols {
-      grid-template-areas: "page server" "page sessions" "load load";
+      grid-template-areas: "page server" "page sessions" "page load";
       grid-template-columns: minmax(320px, max-content) minmax(0, 560px);
       grid-template-rows: auto 1fr auto;
     }
     .debug-col-sessions {
       padding-top: 10px;
+    }
+    .debug-load .machine-load-section {
+      margin-top: 16px;
+      padding-top: 12px;
+      border-top: 1px solid var(--border);
     }
   }
   @container debug-panel (max-width: 760px) {
@@ -2239,7 +2261,8 @@ const DEBUG_PANEL_CSS = `
       border-top: 1px solid var(--border);
     }
     .debug-col-server,
-    .debug-col-sessions {
+    .debug-col-sessions,
+    .debug-load {
       margin-left: 0;
       padding-left: 0;
       border-left: 0;

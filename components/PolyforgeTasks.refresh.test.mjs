@@ -66,13 +66,16 @@ function walk(node, parent = null, out = []) {
     return out;
   }
   if (!node || typeof node !== "object" || !("props" in node)) return out;
+  // the search bar and its action are function components.
+  // Expand them in place (they use no React hooks the shim must own) so the
+  // same element-tree assertions reach the rendered input and button.
+  if (typeof node.type === "function") return walk(node.type(node.props), parent, out);
   out.push({ node, parent });
   walk(node.props.children, node, out);
   return out;
 }
 const nodes = (hook) => walk(hook.result);
 const refreshButton = (hook) => nodes(hook).find(({ node }) => node.type === "button" && "data-pf-tasks-refresh" in node.props)?.node;
-const searchInput = (hook) => nodes(hook).find(({ node }) => node.type === "input" && node.props.type === "search")?.node;
 const spinClass = (button) => button.props.children.props.className;
 const listedIds = (hook) => nodes(hook)
   .filter(({ node }) => node.type === "button" && "data-pf-task" in node.props)
@@ -131,16 +134,19 @@ test("(a) the tab reads the list exactly once on mount, and the refresh button r
     assert.ok(nodes(state.hook).some(({ node }) => node.type === "span" && node.props.children === "polyforge.tasks.empty"),
       "the empty list shows 暂无任务");
 
-    const button = refreshButton(state.hook);
-    assert.ok(button, "the list view carries the refresh button");
-    const input = searchInput(state.hook);
-    assert.ok(input, "the search box is still a searchbox");
-    const inputEntry = nodes(state.hook).find(({ node }) => node === input);
-    const buttonEntry = nodes(state.hook).find(({ node }) => node === button);
+    const tree = nodes(state.hook);
+    const buttonEntry = tree.find(({ node }) => node.type === "button" && "data-pf-tasks-refresh" in node.props);
+    const inputEntry = tree.find(({ node }) => node.type === "input" && node.props.type === "search");
+    assert.ok(buttonEntry && inputEntry, "the list view carries the refresh button beside the searchbox");
+    const button = buttonEntry.node;
+    const input = inputEntry.node;
     assert.equal(inputEntry.parent, buttonEntry.parent, "the button sits on the search box's own row");
-    assert.deepEqual(button.props.style.width, 26, "a 26px icon button");
-    assert.deepEqual(button.props.style.height, 26);
-    assert.equal(input.props.style.flex, 1, "the search box takes the remaining width");
+    // owner 有意变更 the action is the shared 26px/40px
+    // control (the geometry is browser-pinned by e2e); its busy contract is
+    // unchanged.
+    assert.equal(button.props.className, "pf-searchbar-action", "the shared square action");
+    assert.equal(button.props["data-pf-searchbar-action"], "", "the shared action marker");
+    assert.equal(input.props.className, "pf-searchbar-input", "the shared search input");
     assert.equal(button.props.disabled, false);
     assert.equal(button.props["aria-busy"], false);
     assert.equal(spinClass(button), undefined, "no spin while idle");

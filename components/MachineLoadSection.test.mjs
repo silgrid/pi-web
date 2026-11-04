@@ -41,7 +41,11 @@ test("first open (no good value yet) renders the heading, the host badge and 不
   assert.equal((html.match(/>不可用</g) || []).length, 4);
   assert.doesNotMatch(html, /\d%|0\.00|GiB/, "no fabricated value before the first success");
   assert.doesNotMatch(html, /<input|<select|<textarea/, "no interval control");
-  assert.match(html, /grid-template-columns:auto minmax\(0, 1fr\)/, "the grid wraps at phone width");
+  // The rows wrap inside the panel instead of widening it: the label may shrink (its longest is
+  // "Memory (used / total)"), while the value keeps its own width, so a narrow column wraps the
+  // label rather than the reading apart (owner 有意变更 the load is a narrow column
+  // in the wide-panel grid, so values must not be the part that breaks).
+  assert.match(html, /grid-template-columns:minmax\(0, max-content\) minmax\(max-content, 1fr\)/, "the label shrinks before the value does");
 });
 
 test("all three locales resolve every section key", () => {

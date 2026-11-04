@@ -28,7 +28,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
 import { startNextServer } from "./next-server.mjs";
-import { NAV_MS } from "./timeouts.mjs";
+import { COLD_MS, NAV_MS } from "./timeouts.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 assert.ok(!existsSync(join(root, process.env.PI_WEB_DIST_DIR || ".next", "dev/lock")), "Run in a checkout without an active dev server");
@@ -167,6 +167,10 @@ const withPage = (title, label, opts, fn) => check(title, label, async () => {
 });
 
 let browser; let base; const serverLogs = [];
+// The first page load and first Settings open after each dev-server start pay
+// the cold compile; later ones are warm. Other suites keep that warm-up load
+// out of their scenarios the same way (polyforge-panels-123, memory-panel).
+let coldPage = true; let coldSettings = true;
 let stop = async () => {};
 async function startServer(name, path) {
   const logFile = join(work, `server-${name}.log`); serverLogs.push(logFile);
@@ -178,6 +182,7 @@ async function startServer(name, path) {
   });
   base = started.base;
   stop = started.stop;
+  coldPage = true; coldSettings = true;
 }
 async function stopServer() {
   await stop();
@@ -216,10 +221,11 @@ async function openPage({ viewport = { width: 1280, height: 800 }, session = tru
   const context = await browser.newContext({ viewport, locale: "en-US" });
   await context.grantPermissions(["clipboard-read", "clipboard-write"]);
   const page = await context.newPage();
-  // 30s is the action ceiling for the warm path; the first settings open after a
-  // cold page load waits with NAV_MS instead (openSettings below), because 30s
-  // was still exceeded once under the parallel full bar on a loaded 32-core host
-  // ( verification, S1's Polyforge-tab wait). Action ceiling only;
+  // The first page load after a fresh dev-server start compiles the route cold,
+  // so it gets COLD_MS (the warm-up ceiling other suites use); later loads use
+  // NAV_MS. The first Settings open once exceeded the 30 s action default under
+  // a loaded 32-core host ( verification), so that click and its
+  // dialog wait share the same load-bound ceiling. Action ceiling only;
   // assertions and their polling unchanged (same reasoning as e2e/run.mjs's
   // settle poll).
   page.setDefaultTimeout(30_000);
@@ -236,20 +242,33 @@ async function openPage({ viewport = { width: 1280, height: 800 }, session = tru
       detectHits.push({ at: Date.now(), url: request.url(), method: request.method(), body: request.postData() });
     }
   });
-  await page.goto(session ? `${base}/?session=${SESSION}` : `${base}/`, { waitUntil: "domcontentloaded", timeout: NAV_MS });
-  if (session) await page.getByText("E2E polyforge settings host session").first().waitFor({ state: "attached", timeout: NAV_MS });
-  else await page.getByRole("button", { name: "Settings", exact: true }).first().waitFor({ state: "attached", timeout: NAV_MS });
+  const timeout = coldPage ? COLD_MS : NAV_MS;
+  coldPage = false;
+  await page.goto(session ? `${base}/?session=${SESSION}` : `${base}/`, { waitUntil: "domcontentloaded", timeout });
+  if (session) await page.getByText("E2E polyforge settings host session").first().waitFor({ state: "attached", timeout });
+  else await page.getByRole("button", { name: "Settings", exact: true }).first().waitFor({ state: "attached", timeout });
   return page;
 }
 const openSettings = async (page) => {
   const show = page.getByRole("button", { name: "Show sidebar", exact: true });
   if (await show.isVisible().catch(() => false)) await show.click();
   // The first open after a cold page load compiles/renders the Settings dialog,
-  // so the click and the wait for the dialog use the repo's load-bound first-text
-  // ceiling (e2e/timeouts.mjs) instead of the warm 30 s action default.
-  await page.getByRole("button", { name: "Settings", exact: true }).first().click({ timeout: NAV_MS });
+  // so the click and the wait for the dialog use COLD_MS; later opens use the
+  // warm NAV_MS first-text ceiling (e2e/timeouts.mjs), never the 30 s default.
+  // The button is server-rendered, so it is `attached` before React hydrates it:
+  // a click in that gap is dropped and nothing retries, which burned the whole
+  // COLD_MS under load. Wait for hydration (the node carries
+  // React's own props) before the one click.
+  const timeout = coldSettings ? COLD_MS : NAV_MS;
+  coldSettings = false;
+  await page.waitForFunction(() => {
+    const button = [...document.querySelectorAll("button")]
+      .find((candidate) => candidate.getAttribute("aria-label") === "Settings" || candidate.textContent.trim() === "Settings");
+    return !!button && Object.keys(button).some((key) => key.startsWith("__reactFiber$") || key.startsWith("__reactProps$"));
+  }, null, { timeout });
+  await page.getByRole("button", { name: "Settings", exact: true }).first().click({ timeout });
   const dialog = page.getByRole("dialog", { name: "Settings", exact: true });
-  await dialog.waitFor({ timeout: NAV_MS });
+  await dialog.waitFor({ timeout });
   return dialog;
 };
 const pfTab = (dialog) => dialog.getByRole("button", { name: "Polyforge", exact: true });
@@ -293,7 +312,7 @@ try {
   await withPage(T.S1, "pf absent: 未安装 section", { session: false }, async (page) => {
     const dialog = await openSettings(page);
     const tab = pfTab(dialog);
-    await tab.waitFor({ timeout: NAV_MS });
+    await tab.waitFor({ timeout: COLD_MS });
     assert.equal(await tab.isDisabled(), false, "the Polyforge section is project-gated (must open with no project)");
     await tab.click();
     await page.waitForRequest((request) => new URL(request.url()).pathname === "/api/polyforge/detect", { timeout: 15_000 }).catch(() => {});
@@ -408,6 +427,14 @@ try {
     await page.waitForRequest((request) => new URL(request.url()).pathname === "/api/polyforge/detect", { timeout: 15_000 }).catch(() => {});
     const switches = dialog.locator("main").getByRole("switch");
     assert.equal(await switches.count(), 1, "the section must offer exactly one switch (the pi package switch; the Claude rows are read-only)");
+    // The switch renders as soon as detection reports the package, but it stays
+    // disabled until the section's package read (/api/plugins) answers. That
+    // first read is a cold route compile, which a loaded host can push past the
+    // 30 s action default; the one click then times out ( full-1
+    // S10). Wait for the enabled switch under the suite's warm-open ceiling,
+    // before the write audit starts, so background session-lease writes during
+    // the wait are not counted against the toggle.
+    for (const deadline = Date.now() + NAV_MS; Date.now() < deadline && !(await switches.first().isEnabled().catch(() => false));) await delay(100);
     const before = detectHits.length;
     const posts = [];
     const otherWrites = [];

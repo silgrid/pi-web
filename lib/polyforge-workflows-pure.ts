@@ -1,6 +1,7 @@
 import type {
   PolyforgeWorkflowChain,
   PolyforgeWorkflowsDoc,
+  PolyforgeWorkflowsRead,
   PolyforgeWorkflowWorkspace,
 } from "./polyforge-workflows";
 
@@ -54,6 +55,55 @@ export interface WorkflowRow {
 
 export const DEFAULT_ROW_ID = "default";
 export const TASK_ROW_ID = "task";
+
+/** One workspace of the card's union: its yaml path (the
+ *  projects' source label) and its two reads; `reason` marks a failed read. */
+export interface WorkflowWorkspaceEntry {
+  workspace: string;
+  yamlPath: string;
+  workflows: PolyforgeWorkflowsDoc | null;
+  declared: PolyforgeWorkflowWorkspace | null;
+  reason?: string;
+}
+
+/** The union of every read workspace's projects: each project with the
+ *  workspace that owns it (the first to list it), the readable workspaces in
+ *  the mapping's order, and the failed ones (no project, so no write). */
+export interface WorkflowUnion {
+  projects: { project: string; owner: WorkflowWorkspaceEntry }[];
+  sources: WorkflowWorkspaceEntry[];
+  failures: WorkflowWorkspaceEntry[];
+}
+
+function yamlPathOf(workspace: string, declared: PolyforgeWorkflowWorkspace | null): string {
+  return declared?.yaml.path || (workspace ? `${workspace.replace(/\/+$/, "")}/.polyforge.yaml` : ".polyforge.yaml");
+}
+
+/** The read → the union. A route answer without `workspaces` (an older
+ *  server or a single-workspace fixture) is one entry built from its
+ *  top-level `workflows`/`workspace` fields. */
+export function workflowUnion(read: Pick<PolyforgeWorkflowsRead, "workflows" | "workspace" | "workspaces"> | null): WorkflowUnion {
+  const raw = read?.workspaces
+    ?? (read?.workflows ? [{ workspace: read.workflows.workspace ?? read.workspace?.workspace ?? "", workflows: read.workflows, declared: read.workspace }] : []);
+  const union: WorkflowUnion = { projects: [], sources: [], failures: [] };
+  for (const item of raw) {
+    const entry: WorkflowWorkspaceEntry = { ...item, yamlPath: yamlPathOf(item.workspace, item.declared) };
+    if (entry.reason || !entry.workflows) {
+      union.failures.push({ ...entry, reason: entry.reason || "unreadable" });
+      continue;
+    }
+    union.sources.push(entry);
+    for (const project of entry.workflows.projects) {
+      if (!union.projects.some((known) => known.project === project)) union.projects.push({ project, owner: entry });
+    }
+  }
+  return union;
+}
+
+/** The workspace that owns a project in the union (null: no such project). */
+export function projectOwner(union: WorkflowUnion, project: string | null): WorkflowWorkspaceEntry | null {
+  return union.projects.find((entry) => entry.project === project)?.owner ?? null;
+}
 
 /** The card's project: the first project the cwd mapping lists. */
 export function defaultProject(projects: readonly string[]): string | null {

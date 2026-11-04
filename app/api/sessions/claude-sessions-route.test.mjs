@@ -11,6 +11,9 @@ const agentDir = path.join(scratch, "agent");
 const project = path.join(scratch, "project");
 fs.mkdirSync(project, { recursive: true });
 process.env.PI_CODING_AGENT_DIR = agentDir;
+// The inherited claude config dir the transcripts live under.
+const configDir = path.join(scratch, "claude-config");
+process.env.CLAUDE_CONFIG_DIR = configDir;
 
 const jiti = createJiti(import.meta.url, { alias: { "@": process.cwd() }, interopDefault: true });
 const list = await jiti.import("./route.ts");
@@ -25,7 +28,7 @@ const MINE = "11111111-1111-4111-8111-111111111111";
 const OTHER = "22222222-2222-4222-8222-222222222222";
 const OUTSIDER = "33333333-3333-4333-8333-333333333333";
 const transcriptText = fs.readFileSync(new URL("../../../lib/__fixtures__/claude-2.1.312/transcript.jsonl", import.meta.url), "utf8");
-const projects = path.join(agentDir, "claude", "projects", "-tmp-project");
+const projects = path.join(configDir, "projects", "-tmp-project");
 const transcriptOf = (id) => path.join(projects, `${id}.jsonl`);
 fs.mkdirSync(projects, { recursive: true });
 for (const id of [MINE, OTHER, OUTSIDER]) fs.writeFileSync(transcriptOf(id), transcriptText.replaceAll(RECORDED, id));
@@ -35,8 +38,7 @@ for (const id of [MINE, OTHER]) {
   await index.upsertClaudeSessionRecord({
     id,
     cwd: project,
-    modelAlias: "sonnet",
-    preset: "read-only",
+    model: "claude-sonnet-5-5",
     created: "2026-11-01T00:00:00.000Z",
     modified: "2026-11-01T00:00:00.000Z",
     firstMessage: `first of ${id}`,
@@ -56,7 +58,7 @@ test("the list carries the index's claude rows with their harness marker, never 
     assert.ok(!ids.includes(OUTSIDER), "a claude transcript pi-web did not create is not listed");
     const row = sessions.find((session) => session.id === MINE);
     assert.equal(row.harness, "claude");
-    assert.deepEqual(row.claude, { modelAlias: "sonnet", preset: "read-only" });
+    assert.deepEqual(row.claude, { model: "claude-sonnet-5-5", effort: "default" });
     assert.equal(row.cwd, project);
     assert.equal(row.firstMessage, `first of ${MINE}`);
     assert.equal(row.messageCount, 4);
@@ -79,10 +81,29 @@ test("the detail renders history from claude's transcript and writes no parallel
   });
   assert.equal(body.context.entryIds.length, 4);
   assert.equal(body.context.hasMore, false);
-  assert.deepEqual(body.context.model, { provider: "claude", modelId: "sonnet" });
+  assert.deepEqual(body.context.model, { provider: "claude", modelId: "claude-sonnet-5-5" });
   assert.equal(body.snapshotRevision, null);
-  assert.deepEqual(body.toolNames, ["Read", "Glob", "Grep"]);
+  assert.deepEqual(body.toolNames, [], "claude's tools are the user's claude config's, not pi-web's");
   assert.equal(fs.existsSync(path.join(agentDir, "sessions")), false, "nothing mirrored into the pi sessions store");
+});
+
+test("the detail carries the subagent runs rebuilt from claude's sidecars; a session without any carries none", async () => {
+  const plain = await (await detail.GET(new Request(`http://localhost/api/sessions/${MINE}`), params(MINE))).json();
+  assert.deepEqual(plain.claudeSubagents, []);
+  const SUB = "55555555-5555-4555-8555-555555555555";
+  const recording = new URL("../../../lib/__fixtures__/claude-2.1.312/subagent/", import.meta.url);
+  fs.copyFileSync(new URL("transcript.jsonl", recording), transcriptOf(SUB));
+  fs.mkdirSync(path.join(projects, SUB, "subagents"), { recursive: true });
+  for (const name of ["agent-a9fb2ff3aa8e8ff40.jsonl", "agent-a9fb2ff3aa8e8ff40.meta.json"]) {
+    fs.copyFileSync(new URL(`subagents/${name}`, recording), path.join(projects, SUB, "subagents", name));
+  }
+  await index.upsertClaudeSessionRecord({ id: SUB, cwd: project, model: "claude-haiku-5-5", created: "2026-11-02T00:00:00.000Z", modified: "2026-11-02T00:00:00.000Z", firstMessage: "sub", usage });
+  const body = await (await detail.GET(new Request(`http://localhost/api/sessions/${SUB}`), params(SUB))).json();
+  assert.equal(body.claudeSubagents.length, 1);
+  assert.equal(body.claudeSubagents[0].toolCallId, "toolu_01F1YZd2Gseivs4hckhQVw5s");
+  assert.equal(body.claudeSubagents[0].entries.length, 3);
+  assert.ok(!JSON.stringify(body.context.messages).includes("toolu_012N7brUKegpGiA36sdi1ApH"), "the sidecar's Read is not a main message");
+  assert.ok(!body.context.messages.some((message) => message.role === "user" && JSON.stringify(message).includes("<task-notification>")));
 });
 
 test("usage on every face is the result aggregate, not the streamed per-message sum", async () => {
@@ -97,7 +118,23 @@ test("usage on every face is the result aggregate, not the streamed per-message 
   }))).json();
   assert.equal(summary.stats[MINE].tokens.output, 283);
   assert.notEqual(summary.stats[MINE].tokens.output, 2 + 5, "not the streamed per-message output tokens");
-  assert.deepEqual(summary.stats[MINE].model, { provider: "claude", modelId: "sonnet" });
+  assert.deepEqual(summary.stats[MINE].model, { provider: "claude", modelId: "claude-sonnet-5-5" });
+});
+
+test("a legacy #219 record (alias + preset) is listed with its full model name and no preset", async () => {
+  const legacy = "55555555-5555-4555-8555-555555555555";
+  const file = index.claudeIndexPath();
+  const before = fs.readFileSync(file, "utf8");
+  const parsed = JSON.parse(before);
+  parsed.sessions.push({ id: legacy, cwd: project, modelAlias: "haiku", preset: "writable", created: "2026-11-01T00:00:00.000Z" });
+  fs.writeFileSync(file, JSON.stringify(parsed));
+  try {
+    const row = (await getList("?summary=1")).sessions.find((session) => session.id === legacy);
+    assert.ok(row, "the legacy record is still listed");
+    assert.deepEqual(row.claude, { model: "claude-haiku-5-5", effort: "default" }, "a pre-#272 record reads as the default effort");
+  } finally {
+    fs.writeFileSync(file, before);
+  }
 });
 
 test("rename and archive persist in the index and the row follows", async () => {

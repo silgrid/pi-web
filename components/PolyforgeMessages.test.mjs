@@ -34,7 +34,11 @@ test("the panel is two columns: the list column right of the chat pane", () => {
   // layout at every width (was a single-view switch), and owner 有意变更
   // desktop replaces the fixed clamp with the resizer's stored
   // width; mobile keeps the clamp and gets no handle.
-  assert.match(source, /width: isMobile \? "clamp\(120px, 35%, 220px\)" : "var\(--pf-messages-list-width\)"/, "desktop width is the resizer variable; mobile keeps the clamp");
+  // the column may also be folded to its 28px desktop strip,
+  // and owner 有意变更（reverses #252 mobile unchanged）: the
+  // ≤640px sheet folds to a 40px strip too (its own test below); expanded,
+  // desktop is still the resizer variable and mobile its fixed clamp.
+  assert.match(source, /width: listCollapsed \? \(isMobile \? 40 : 28\)\n          : isMobile \? "clamp\(120px, 35%, 220px\)" : "var\(--pf-messages-list-width\)"/, "desktop width is the resizer variable; mobile keeps the clamp expanded, and the desktop/mobile strips are 28/40px");
   assert.match(source, /borderLeft: "1px solid var\(--border\)",\s*overflowY: "auto"/, "the list column's divider stays at every width");
   assert.match(source, /flexDirection: "row-reverse" \}\}>\n      \{listColumn\}\n      \{chatPane\}\n    <\/div>/, "the column and the pane are always the two children");
   assert.doesNotMatch(source, /showListColumn|showChatPane/, "no single-view switch remains");
@@ -120,11 +124,35 @@ test("a loaded original renders as a quote and an unloaded one as its id", () =>
   assert.match(source, /\{original \? <span>\{original\.text\}<\/span> : message\.reply_to\}/, "the history quotes the loaded original as its own text leaf, falling back to the id only when unloaded");
 });
 
-test("the analyzer control exists only on received messages and its conclusion is transient UI state", () => {
+test("the analyzer control exists only on received messages and its result is transient UI state", () => {
   assert.match(source, /\{!message\.mine && \(/);
-  assert.match(source, /\{analyses\[message\.id\] && \(/);
-  assert.doesNotMatch(source, /localStorage|sessionStorage\./, "the conclusion never reaches browser storage");
+  // the card replaces the retired one-line gray conclusion.
+  assert.match(source, /\{!message\.mine && analyses\[message\.id\] && \(\s*<PolyforgeAnalysisCard/);
+  assert.doesNotMatch(source, /fontSize: 11, color: "var\(--text-muted\)" \}\}>\{analyses\[message\.id\]\}/, "the gray line is gone");
+  assert.doesNotMatch(source, /conclusion/);
+  assert.doesNotMatch(source, /localStorage|sessionStorage\./, "the analysis never reaches browser storage");
   assert.doesNotMatch(source, /fetch\(/, "the panel reads only through the hook's actions");
+});
+
+test("the Analyze entry is an icon+text button in the normal foreground with per-message in-flight state", () => {
+  const start = source.indexOf("void analyze(message.id)");
+  const button = source.slice(start, source.indexOf("</button>", start));
+  assert.match(button, /disabled=\{Boolean\(analyzing\[message\.id\]\)\}/, "only that message's control is disabled");
+  assert.match(button, /color: "var\(--text\)"/, "the normal foreground, not the muted colour");
+  assert.match(button, /<svg aria-hidden="true"/, "the entry carries an icon");
+  assert.match(button, /t\("polyforge\.messages\.analyze"\)/, "and its text");
+  assert.match(source, /const analyzingRef = useRef\(new Set<string>\(\)\);/);
+  assert.match(source, /if \(analyzingRef\.current\.has\(messageId\)\) return;/, "a second click on an in-flight message starts nothing");
+  assert.doesNotMatch(source, /if \(analyzing\) return;/, "no panel-wide single-flight");
+  assert.doesNotMatch(source, /onMouseEnter|:hover|role="menu"/, "no hover-only control or menu");
+});
+
+test("a refusal renders in the message's own slot; below the floor the upgrade text", () => {
+  assert.match(source, /\{!message\.mine && analysisErrors\[message\.id\] && \(/);
+  assert.match(source, /t\("polyforge\.messages\.analysisUpgrade", \{ version: POLYFORGE_ANALYZE_MINIMUM_PF_VERSION \}\)/);
+  const start = source.indexOf("const analyze = useCallback(");
+  const body = source.slice(start, source.indexOf("}, [onAnalyze]);", start));
+  assert.doesNotMatch(body, /setSendError/, "an analysis refusal never lands in the composer's send-error line");
 });
 
 test("only the work-item part of an anchor is clickable and the rest is plain text", () => {
@@ -140,10 +168,11 @@ test("unanchored messages are de-emphasized but keep their place in the list", (
 });
 
 test("the composer, reply and analyzer controls carry the tested accessible labels", () => {
-  for (const key of ["anchor", "text", "send", "reply", "analyze"]) {
+  for (const key of ["text", "textPlaceholder", "send", "reply", "quoteMessage", "analyze"]) {
     assert.match(source, new RegExp(`polyforge\\.messages\\.${key}`), `${key} label exists`);
   }
   assert.match(source, /<textarea/, "the message body is a textarea");
+  assert.match(source, /placeholder=\{t\("polyforge\.messages\.textPlaceholder"\)\}/, "the textarea carries the @project#number placeholder");
   assert.match(source, /onSubmit=\{\(event\) => void submit\(event\)\}/, "the one composer form submits");
 });
 
@@ -173,12 +202,12 @@ test("opening the tab renders the select-a-conversation empty state and nothing 
 test("the composer clears on submit and restores the attempt on a refusal", () => {
   // A rendered message body must always mean the message reached the
   // history — never an in-flight composer echo — and a refusal (pf's 4xx
-  // text) restores the attempt.
-  assert.match(source, /const attempt = \{ text: draftText, anchor: draftAnchor \};/);
-  assert.match(source, /setDraftText\(""\);\s*setDraftAnchor\(""\);/, "the draft clears when its send is accepted for submission");
+  // text) restores the attempt. the attempt is the text alone.
+  assert.match(source, /const attempt = \{ text: draftText \};/);
+  assert.match(source, /setDraftText\(""\);/, "the draft clears when its send is accepted for submission");
   assert.match(source, /setDraftText\(attempt\.text\);/, "a refusal restores the attempt");
   assert.match(source, /setSendError\(submitError instanceof Error \? submitError\.message : String\(submitError\)\);/, "the refusal text shows");
-  assert.match(source, /<textarea value=\{draftText\}/, "the textarea reads the draft");
+  assert.match(source, /<textarea ref=\{composerTextRef\} value=\{draftText\}/, "the textarea reads the draft");
 });
 
 test("project groups render between the direct area and 群聊", () => {
@@ -259,4 +288,82 @@ test("every change is confirmed by name first; cancel sends nothing; a refusal i
     "pf's refusal text is kept for its group");
   assert.doesNotMatch(body, /setGroups|groups\.(push|splice|filter)/, "no optimistic membership change");
   assert.match(source, /\{t\("polyforge\.messages\.membershipFailed"\)\}: \{membershipError\.text\}/);
+});
+
+test("【回复】 sets the reply target and fills a draft only when there is one; it never sends", () => {
+  const start = source.indexOf("const replyFromAnalysis = useCallback(");
+  const body = source.slice(start, source.indexOf("}, []);", start));
+  assert.match(body, /setReplyTo\(messageId\);/);
+  assert.match(body, /if \(analysis\.reply_draft\) setDraftText\(analysis\.reply_draft\);/, "no draft leaves the composer untouched");
+  assert.doesNotMatch(body, /onSend|submit/, "【回复】 never sends");
+});
+
+test("【建票】 opens the dialog over the mapped projects and names the created slug; the task link is handed up", () => {
+  assert.match(source, /onFileTicket=\{\(\) => setTicketFor\(message\.id\)\}/);
+  assert.match(source, /projects=\{groups\.map\(\(group\) => group\.project\)\}/);
+  assert.match(source, /t\("polyforge\.messages\.ticketCreated", \{ slug: ticketNotices\[message\.id\] \}\)/);
+  assert.match(source, /onOpenTask=\{onOpenTask\}/);
+});
+
+test("the contact column folds at every width — desktop 28px, ≤640px a 40px strip with 40×40 controls in a 40px 单聊 header row (owner 有意变更（reverses #252 mobile unchanged）)", () => {
+  assert.match(source, /const \{ listCollapsed, setListCollapsed \} = usePolyforgeMessagesListCollapse\(\);/, "the strip exists at every width");
+  assert.match(source, /width: listCollapsed \? \(isMobile \? 40 : 28\)/, "the desktop strip stays 28px; the mobile strip is 40px");
+  assert.match(source, /: isMobile \? "clamp\(120px, 35%, 220px\)" : "var\(--pf-messages-list-width\)"/,
+    "expanded, the sheet keeps its fixed clamp and desktop its stored width");
+  const strip = source.slice(source.indexOf("{listCollapsed ? ("), source.indexOf("{...listResizer.separatorProps}"));
+  assert.match(strip, /data-pf-messages-strip=""/);
+  assert.match(strip, /aria-label=\{t\("polyforge\.messages\.expandList"\)\}/);
+  assert.match(strip, /onClick=\{\(\) => setListCollapsed\(false\)\}/);
+  assert.match(strip, /width: isMobile \? 40 : undefined/, "the mobile expand control is 40px wide");
+  assert.match(strip, /height: isMobile \? 40 : undefined/, "the mobile expand control is 40px tall");
+  assert.match(strip, /background: unreadTotal > 0 \? "var\(--accent\)" : "none"/, "the dot reads the panel's total unread");
+  assert.match(strip, /aria-label=\{t\("polyforge\.messages\.unreadTotal", \{ count: unreadTotal \}\)\}/);
+  assert.doesNotMatch(strip, /listResizer\.|writeStoredWidth|localStorage/, "no width is written while collapsed");
+  const header = source.slice(source.indexOf("data-pf-messages-column-header"), source.indexOf('id="pf-messages-list"'));
+  assert.match(header, /height: 40/, "the mobile header row is 40px tall");
+  assert.match(header, /t\("polyforge\.messages\.sectionDirect"\)/, "the 单聊 heading shares the mobile header row");
+  assert.match(header, /aria-label=\{t\("polyforge\.messages\.collapseList"\)\}/, "the mobile collapse control sits in that header row");
+  assert.match(header, /width: 40, height: 40/, "the mobile collapse control is 40×40");
+  assert.match(source, /\{!isMobile && \(\s*<button\s+type="button"\s+aria-label=\{t\("polyforge\.messages\.collapseList"\)\}/,
+    "the desktop collapse button keeps its own rendering");
+});
+
+test("the composer field is named by its label alone, never by the draft it holds", () => {
+  assert.match(source, /<label htmlFor=\{textFieldId\}>\{t\("polyforge\.messages\.text"\)\}<\/label>\s*<textarea ref=\{composerTextRef\} value=\{draftText\} id=\{textFieldId\}/);
+});
+
+test("the anchor field is gone; a send binds about_wi from the text's first known token", () => {
+  assert.doesNotMatch(source, /polyforge\.messages\.anchor|anchorFieldId|draftAnchor|setDraftAnchor/,
+    "no anchor key, field, state or setter survives");
+  assert.match(source, /const aboutWi = firstWorkItemBinding\(attempt\.text, groups\.map\(\(group\) => group\.project\)\);/,
+    "the binding reads the known project groups");
+  assert.match(source, /\.\.\.\(aboutWi \? \{ aboutWi \} : \{\}\)/, "only a match adds the unchanged about_wi wire field");
+  assert.match(source, /text: attempt\.text,/, "the typed text (with its @ token) is sent unchanged");
+});
+
+test("own messages carry 引用 (plain-text append, reply target untouched) and peers keep 回复", () => {
+  const start = source.indexOf("const quoteOwnMessage = useCallback(");
+  const body = source.slice(start, source.indexOf("}, []);", start));
+  assert.ok(start > 0);
+  assert.match(body, /setDraftText\(\(previous\) => appendQuoteBlock\(previous, text\)\)/, "the block is appended, never overwritten");
+  assert.match(body, /field\.focus\(\);/, "the textarea is focused");
+  assert.match(body, /field\.setSelectionRange\(field\.value\.length, field\.value\.length\);/, "the caret sits at the end");
+  assert.doesNotMatch(body, /setReplyTo|onSend|submit/, "引用 never touches the reply target or sends");
+  const actions = source.slice(source.indexOf("message.mine ? ("), source.indexOf("t(\"polyforge.messages.reply\")"));
+  assert.match(actions, /quoteOwnMessage\(message\.text\)/, "own bubbles call the quote action");
+  assert.match(actions, /t\("polyforge\.messages\.quoteMessage"\)/);
+  assert.doesNotMatch(actions, /t\("polyforge\.messages\.reply"\)/, "an own bubble carries no 回复");
+  assert.match(source, /\{message\.mine \? \([\s\S]*?quoteOwnMessage\(message\.text\)[\s\S]*?\) : \([\s\S]*?setReplyTo\(message\.id\)/,
+    "the peer branch keeps the unchanged reply target");
+});
+
+test("every valid token renders inline as a link and a duplicated anchor line is hidden", () => {
+  assert.match(source, /const bodySegments = splitWorkItemLinks\(message\.text\);/);
+  assert.match(source, /const anchorIsInline = Boolean\(message\.about_wi\) && bodySegments\.some\(\(segment\) => segment\.ref === message\.about_wi\);/);
+  assert.match(source, /\{message\.about_wi && !anchorIsInline && \(/, "the separate anchor line renders only when it is not inline");
+  assert.match(source, /segment\.ref \? \(/, "a token segment becomes a control");
+  assert.match(source, /onOpenAnchor\(segment\.ref!\)/, "clicking uses the existing watch-read ref (without @)");
+  assert.match(source, /aria-label=\{segment\.ref\}/);
+  assert.match(source, /event\.stopPropagation\(\); onOpenAnchor\(segment\.ref!\)/, "a link click never acks the bubble");
+  assert.match(source, /\{segment\.text\}/, "the link shows the @ text");
 });

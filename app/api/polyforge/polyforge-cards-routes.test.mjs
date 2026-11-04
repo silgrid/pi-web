@@ -58,7 +58,7 @@ test("the route runs end to end against a fixture: decodable 200 with cards, mal
   writeFileSync(join(root, "events", "wi-wi_route01.jsonl"), `${JSON.stringify({ at: "2026-10-30T01:00:00Z", kind: "job_started" })}\n`);
   const job = { wi: "wi_route01", slug: "w#1", status: "queued", stepAgeSec: 0, idleAgeSec: 0, candidate: "", spawnN: 0 };
   for (const raw of [null, "not-json", JSON.stringify({ "../x": "../y" }), JSON.stringify({ wi_route01: "../../etc/passwd" })]) {
-    const cards = lib.readPolyforgeCards([job], pure.parseCardCursors(raw), Date.now(), root);
+    const cards = await lib.readPolyforgeCards([job], pure.parseCardCursors(raw), Date.now(), root);
     const body = JSON.parse(JSON.stringify({ pfPresent: true, cards }));
     assert.equal(body.cards.length, 1);
     assert.equal(body.cards[0].startedAt, "2026-10-30T01:00:00Z");
@@ -86,7 +86,7 @@ test("the response carries narration only: no tool entry, name or command reache
     { type: "message", id: "r", message: { role: "toolResult", toolName: "ROUTE-TOOL-NAME", content: [{ type: "text", text: "ROUTE-RESULT" }] } },
   ].map((row) => JSON.stringify(row)).join("\n") + "\n");
   const job = { wi: "wi_route02", slug: "w#2", status: "running", stepAgeSec: 0, idleAgeSec: 0, candidate: "", spawnN: 1 };
-  const body = JSON.stringify({ pfPresent: true, cards: lib.readPolyforgeCards([job], new Map(), Date.now(), root) });
+  const body = JSON.stringify({ pfPresent: true, cards: await lib.readPolyforgeCards([job], new Map(), Date.now(), root) });
   const parsed = JSON.parse(body);
   assert.deepEqual(parsed.cards[0].progress.entries.map((entry) => entry.text), ["NARRATION-ONE"]);
   assert.equal(parsed.cards[0].currentStep, "code");

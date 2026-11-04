@@ -32,7 +32,10 @@ export const DAEMON_TABLE_KEYS: readonly string[] = [
 
 export type ConfigGroupId = "flat" | "daemon" | "workspace" | "summarize";
 
-/** Fixed card order: cli.toml flat keys, `[daemon]`, workspace mapping, summarize. */
+/** Fixed group order: cli.toml flat keys, `[daemon]`, workspace mapping,
+ *  `[summarize]`. The flat, daemon and summarize groups are the cli.toml
+ *  card's zones (summarize is a cli.toml table); the
+ *  workspace group is the 工作区 card's mapping rows. */
 export const CONFIG_GROUPS: readonly ConfigGroupId[] = ["flat", "daemon", "workspace", "summarize"];
 
 /** The card an item renders in; an unknown key falls into the flat card (never dropped). */
@@ -91,4 +94,13 @@ export function groupStepsByProject<T extends ConfigStepLike>(steps: readonly T[
   return [...byProject.entries()]
     .sort(([a], [b]) => (a === null ? 1 : b === null ? -1 : a.localeCompare(b)))
     .map(([project, bucket]) => ({ project, steps: [...bucket].sort((x, y) => x.step.localeCompare(y.step)) }));
+}
+
+/**
+ * One workspace path's memory_policy entries in display order: `default`
+ * first, then the projects sorted (pf builds the block from a Go map, so its
+ * key order is unstable).
+ */
+export function policyEntryNames(entries: Record<string, unknown>): string[] {
+  return Object.keys(entries).sort((a, b) => (a === "default" ? -1 : b === "default" ? 1 : a.localeCompare(b)));
 }

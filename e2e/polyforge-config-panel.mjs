@@ -15,6 +15,10 @@
 // an assertion-level red (404/405, a missing class/schema/daemon fact, a write
 // that does not reach pf) — never a build or fixture error.
 //
+// summarize and memory_policy are cli.toml facts — the stub's
+// `config list` carries summarize.* and the per-path memory_policy, its
+// `config workspace` neither; the workspace yamls carry step chains only.
+//
 //   node e2e/polyforge-config-panel.mjs
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
@@ -43,8 +47,8 @@ const API_SENTINEL = "E2E-W22-API-KEY-SENTINEL";
 const sha = (path) => createHash("sha256").update(readFileSync(path)).digest("hex");
 const writeCli = (max) => writeFileSync(cliToml, `server = "http://127.0.0.1:1"\napi_key = "e2e-current-key"\nuser_id = "usr_root"\n\n[daemon]\nmax_concurrent_jobs = ${max}\n\n[workspace."${wsA}"]\nprojects = ["e2e"]\n\n[workspace."${wsB}"]\nprojects = ["e2e"]\n`);
 writeCli(6);
-writeFileSync(yamlA, `summarize:\n  models: ["pi:zeta", "pi:alpha"]\n  language: "English"\n  interval_sec: 30\n`);
-writeFileSync(yamlB, `summarize:\n  models: ["pi:alpha"]\n  language: "中文"\n  interval_sec: 90\n`);
+writeFileSync(yamlA, `steps:\n  e2e:\n    fix: { models: ["pi:zeta", "pi:alpha"] }\n`);
+writeFileSync(yamlB, `steps:\n  e2e:\n    fix: { models: ["pi:alpha"] }\n`);
 const BASELINE_CLI = sha(cliToml);
 const BASELINE_A = sha(yamlA);
 const BASELINE_B = sha(yamlB);
@@ -55,7 +59,7 @@ mkdirSync(stubDir);
 const stateFile = join(stubDir, "state.json");
 const listFile = join(stubDir, "list.json");
 const argvLog = join(stubDir, "argv.log");
-let stubState = { mode: "ok", version: "v2.20.6", listShape: "new", daemon: "up", afterReload: false, fileMax: 6, daemonMax: 6, maxConfigured: 6, pending: [] };
+let stubState = { mode: "ok", version: "v2.20.21", listShape: "new", daemon: "up", afterReload: false, fileMax: 6, daemonMax: 6, maxConfigured: 6, pending: [] };
 const listDocument = () => ({
   file: { path: cliToml, sha256: sha(cliToml), exists: true },
   items: [
@@ -69,11 +73,16 @@ const listDocument = () => ({
     { key: "step_timeout", value: "30m0s", source: "file", class: "live", schema: { kind: "duration" } },
     { key: "stall_window", value: "10m0s", source: "file", class: "live", schema: { kind: "duration" } },
     { key: "max_concurrent_jobs", value: stubState.fileMax, source: "file", class: "live", schema: { kind: "int", min: 1 } },
-    { key: "summarize.interval_sec", value: 30, source: "file", class: "live", schema: { kind: "int", min: 10, max: 3600 } },
-    { key: "summarize.language", value: "English", source: "file", class: "live", schema: { kind: "string" } },
+    // summarize.* is a cli.toml table read here only.
     { key: "summarize.models", value: ["pi:zeta", "pi:alpha"], source: "file", class: "live", schema: { kind: "model-list" } },
+    { key: "summarize.language", value: "English", source: "file", class: "live", schema: { kind: "string" } },
+    { key: "summarize.interval_sec", value: 30, source: "file", class: "live", schema: { kind: "int", min: 10, max: 3600 } },
     { key: "future_knob", value: "x", source: "file", class: "brand-new-class" },
   ],
+  memory_policy: {
+    [wsA]: { default: { record: ["policy-a"], skip: [], declared: true }, e2e: { record: [], skip: [], declared: false } },
+    [wsB]: { default: { record: ["policy-b"], skip: [], declared: true }, e2e: { record: [], skip: [], declared: false } },
+  },
 });
 const setStub = (patch = {}) => {
   stubState = { ...stubState, ...patch };
@@ -100,15 +109,10 @@ if (rest[0] === "config" && rest[1] === "list") {
 }
 if (rest[0] === "config" && rest[1] === "workspace") {
   const at = rest.indexOf("--cwd"); const cwd = at >= 0 ? rest[at + 1] : "";
-  if (cwd !== WS.wsA && cwd !== WS.wsB) { process.stdout.write(JSON.stringify({ mapped: false, workspace: null, yaml: null, summarize: null, steps: null }) + "\\n"); process.exit(0); }
+  if (cwd !== WS.wsA && cwd !== WS.wsB) { process.stdout.write(JSON.stringify({ mapped: false, workspace: null, yaml: null, steps: null }) + "\\n"); process.exit(0); }
   const yaml = cwd === WS.wsA ? WS.yamlA : WS.yamlB;
   process.stdout.write(JSON.stringify({
     mapped: true, workspace: cwd, yaml: { path: yaml, sha256: sha(yaml), exists: true },
-    summarize: {
-      models: { value: cwd === WS.wsA ? ["pi:zeta", "pi:alpha"] : ["pi:alpha"], source: "file" },
-      language: { value: cwd === WS.wsA ? "English" : "中文", source: "file" },
-      interval_sec: { value: cwd === WS.wsA ? 30 : 90, source: "file" },
-    },
     steps: { fix: { declared: true, models: ["pi:zeta", "pi:alpha"] }, code: { declared: false, models: null } },
     steps_complete: true,
   }) + "\\n"); process.exit(0);
@@ -224,16 +228,16 @@ const rawRequest = (method, path, host) => new Promise((resolve, reject) => {
 });
 const resetFixtures = () => {
   writeCli(6);
-  writeFileSync(yamlA, `summarize:\n  models: ["pi:zeta", "pi:alpha"]\n  language: "English"\n  interval_sec: 30\n`);
-  writeFileSync(yamlB, `summarize:\n  models: ["pi:alpha"]\n  language: "中文"\n  interval_sec: 90\n`);
-  setStub({ mode: "ok", version: "v2.20.6", listShape: "new", daemon: "up", afterReload: false, fileMax: 6, daemonMax: 6, maxConfigured: 6, pending: [] });
+  writeFileSync(yamlA, `steps:\n  e2e:\n    fix: { models: ["pi:zeta", "pi:alpha"] }\n`);
+  writeFileSync(yamlB, `steps:\n  e2e:\n    fix: { models: ["pi:alpha"] }\n`);
+  setStub({ mode: "ok", version: "v2.20.21", listShape: "new", daemon: "up", afterReload: false, fileMax: 6, daemonMax: 6, maxConfigured: 6, pending: [] });
   resetCalls();
 };
 const SET = (patch) => post("/api/polyforge/config", { action: "set", cwd: wsA, expect_state: { file_sha256: BASELINE_CLI }, ...patch });
 
 // ---- scenario bookkeeping ----
 const T = {
-  S1: "S1: the config read carries each key's pf class and schema, the file value beside the daemon's loaded value, and the workspace summarize; an unknown class passes through verbatim",
+  S1: "S1: the config read carries each key's pf class and schema, the file value beside the daemon's loaded value, the machine-level summarize and the per-path memory policy; an unknown class passes through verbatim",
   S2: "S2: an unmapped cwd reports the workspace sections unwritable while the machine-scope cli.toml read keeps working",
   S3: "S3: a stale expected hash is refused through the panel write route with pf's key-level diff and the file untouched",
   S4: "S4: a value past the form's bounds is passed to pf, refused with pf's own error, and leaves the file's sha256 unchanged",
@@ -282,9 +286,13 @@ try {
     }
     const summarizeItems = items.filter((it) => String(it.key).startsWith("summarize."));
     const intervalItem = summarizeItems.find((it) => it.key === "summarize.interval_sec");
-    assert.ok(intervalItem && Number(intervalItem.value) === 30, "the workspace summarize must be this workspace's (30, not 90)");
+    assert.ok(intervalItem && Number(intervalItem.value) === 30, "the summarize rows must be config list's (30)");
     const other = await read(`/api/polyforge/config?cwd=${encodeURIComponent(wsB)}`);
-    assert.ok(other.text.includes("90") && other.text.includes("interval_sec"), "a second mapped workspace must show its own interval (90)");
+    const otherInterval = findItems(other.json).find((it) => it.key === "summarize.interval_sec");
+    assert.ok(otherInterval && Number(otherInterval.value) === 30, "summarize is one machine-level table: a second mapped workspace shows the same interval (30)");
+    assert.equal(r.json?.memoryPolicy?.[wsA]?.default?.record?.[0], "policy-a", "the read carries workspace A's memory_policy block");
+    assert.equal(r.json?.memoryPolicy?.[wsB]?.default?.record?.[0], "policy-b", "the read carries workspace B's memory_policy block, kept apart");
+    assert.ok(!callsWith("workspace").some((call) => /summarize|memory_policy/.test(JSON.stringify(call.args))), "nothing is read for summarize from config workspace");
     const declared = findArray(r.json, (e) => e && typeof e === "object" && typeof e.declared === "boolean") ?? [];
     const declaredFix = declared.find((e) => e.declared === true);
     const undeclared = declared.find((e) => e.declared === false);
@@ -419,8 +427,48 @@ try {
     const okWrite = await SET({ key: "max_concurrent_jobs", value: "7" });
     assert.ok(okWrite.status < 400, `an authenticated same-origin write must reach the route (got ${okWrite.status}: ${okWrite.text.slice(0, 160)})`);
     assert.ok(callsWith("set").length >= 1, "the accepted write must go through pf");
+    // every non-secret cli.toml key is on the allowlist and
+    // reaches pf as `config set <key> <value>`, with no reload/shutdown/ensure.
+    const NINE = { server: "http://127.0.0.1:2", daemon_socket: "/run/pf-2.sock", user_id: "usr_2", claude_bin: "/usr/bin/claude",
+      step_timeout: "45m0s", stall_window: "12m0s", harness_root: "/opt/pf2", operator_agent_dir: "/home/op/.pi2", max_concurrent_jobs: "8" };
+    for (const [key, value] of Object.entries(NINE)) {
+      resetCalls();
+      const written = await SET({ key, value });
+      assert.ok(written.status < 400, `${key} must be writable (got ${written.status}: ${written.text.slice(0, 160)})`);
+      const call = callsWith("set").at(-1);
+      assert.ok(call && call.args.includes(key) && call.args.includes(value), `${key} did not reach pf as config set ${key} ${value}: ${JSON.stringify(call?.args)}`);
+      assert.ok(!argvCalls().some((c) => /reload|shutdown|ensure/.test(c.args.join(" "))), `a ${key} save reloaded, shut down or ensured the daemon`);
+    }
+    // a summarize key is a flat cli.toml write — no --cwd.
     resetCalls();
-    const readOnly = await SET({ key: "server", value: "http://e2e-evil.example.com" });
+    const summarize = await SET({ key: "summarize.interval_sec", value: 40 });
+    assert.ok(summarize.status < 400, `summarize.interval_sec must be writable (got ${summarize.status}: ${summarize.text.slice(0, 160)})`);
+    const summarizeCall = callsWith("set").at(-1);
+    assert.ok(summarizeCall && summarizeCall.args.includes("summarize.interval_sec") && summarizeCall.args.includes("40"), `summarize did not reach pf as config set: ${JSON.stringify(summarizeCall?.args)}`);
+    assert.ok(!summarizeCall.args.includes("--cwd") && !summarizeCall.args.includes("--workspace"), "a summarize write must carry no path flag");
+    // below the 2.20.21 summarize floor (the panel's own floor
+    // still met) the read hides both groups behind the reason, with no
+    // config workspace stand-in, and a summarize write is refused 400 before
+    // any set spawn.
+    setStub({ version: "v2.20.20" });
+    resetCalls();
+    const belowRead = await read(`/api/polyforge/config?cwd=${encodeURIComponent(wsA)}`);
+    assert.equal(belowRead.status, 200, `below the summarize floor the read must answer 200 (got ${belowRead.status})`);
+    assert.equal(belowRead.json?.capable, true, "the rest of the panel stays capable below the summarize floor");
+    assert.ok(!findItems(belowRead.json).some((it) => String(it.key).startsWith("summarize.")), "no summarize row below the summarize floor");
+    assert.equal(belowRead.json?.memoryPolicy, undefined, "no memory_policy block below the summarize floor");
+    assert.match(String(belowRead.json?.summarizeReason ?? ""), /2\.20\.21[^)]*found v2\.20\.20/, "the reason names the floor and the found version");
+    assert.ok(callsWith("workspace").length <= 1, "no extra config workspace read serves the hidden groups");
+    resetCalls();
+    const belowWrite = await SET({ key: "summarize.interval_sec", value: 45 });
+    assert.equal(belowWrite.status, 400, `a summarize write below the floor must answer 400 (got ${belowWrite.status})`);
+    assert.match(belowWrite.text, /2\.20\.21/, "the refusal names the summarize floor");
+    assert.equal(callsWith("set").length, 0, "a refused summarize write spawns no pf config set");
+    setStub({ version: "v2.20.21" });
+    resetCalls();
+    // server is writable now; a key pf lists but the panel
+    // never edits (future_knob) is still off the allowlist.
+    const readOnly = await SET({ key: "future_knob", value: "http://e2e-evil.example.com" });
     assert.ok(readOnly.status >= 400, `a read-only key must be refused by the write allowlist (got ${readOnly.status})`);
     assert.ok(callsWith("set").length === 0, "a read-only key must be refused without spawning pf");
     resetCalls();

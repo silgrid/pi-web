@@ -16,7 +16,8 @@ import {
 } from "@/hooks/useChatAppearance";
 import { useEnterSendMode, setEnterSendMode } from "@/hooks/useEnterSendMode";
 import { sendAgentCommand } from "@/lib/agent-client";
-import type { ProjectTrustStatus, ToolSettingsResponse } from "@/lib/api-types";
+import type { AgentLanguageResponse, ProjectTrustStatus, ToolSettingsResponse } from "@/lib/api-types";
+import { AGENT_LANGUAGE_DEFAULT, isAgentLanguage, type AgentLanguage } from "@/lib/agent-language";
 import {
   setLastSettingsSection,
   settingsSectionRequiresProject,
@@ -91,6 +92,93 @@ export function SettingsSectionIcon({ section, size = 16, strokeWidth = 1.8 }: {
   if (section === "plugins") return <svg {...common}><path d="M9 7V2M15 7V2M6 13V8a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v5a6 6 0 0 1-12 0ZM12 19v3" /></svg>;
   if (section === "mcp") return <svg {...common}><rect x="3" y="3" width="18" height="7" rx="2" /><rect x="3" y="14" width="18" height="7" rx="2" /><path d="M7 6.5h.01M7 17.5h.01M11 6.5h6M11 17.5h6" /></svg>;
   return <svg {...common}><circle cx="6" cy="18" r="3" /><circle cx="18" cy="6" r="3" /><path d="M6 15V3M18 9a9 9 0 0 1-9 9" /></svg>;
+}
+
+/**
+ * Settings › General's Agent language: the server-side language new pi and
+ * claude sessions capture, shared by every device. Independent of the UI language above
+ * (browser-local `pi-locale`): it has its own state and its own API. Shown once the GET
+ * settles; a value is shown as saved only after the PUT succeeds.
+ */
+function AgentLanguageSettings() {
+  const { t } = useI18n();
+  const [language, setLanguage] = useState<AgentLanguage | null>(null);
+  const [loadFailed, setLoadFailed] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [saveFailed, setSaveFailed] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    void fetch("/api/agent-language")
+      .then(async (response) => {
+        const data = await response.json() as Partial<AgentLanguageResponse>;
+        if (!response.ok || !isAgentLanguage(data.language)) throw new Error(`HTTP ${response.status}`);
+        if (!cancelled) setLanguage(data.language);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setLoadFailed(true);
+        setLanguage(AGENT_LANGUAGE_DEFAULT);
+      });
+    return () => { cancelled = true; };
+  }, []);
+
+  const save = async (next: AgentLanguage) => {
+    if (next === language) return;
+    setSaving(true);
+    setSaveFailed(false);
+    try {
+      const response = await fetch("/api/agent-language", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ language: next }),
+      });
+      const data = await response.json() as Partial<AgentLanguageResponse>;
+      if (!response.ok || !isAgentLanguage(data.language)) throw new Error(`HTTP ${response.status}`);
+      setLanguage(data.language);
+      setLoadFailed(false);
+    } catch {
+      setSaveFailed(true);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (language === null) return null;
+  const options: { id: AgentLanguage; label: string }[] = [
+    { id: "en", label: t("settings.agentLanguageEnglish") },
+    { id: "zh-CN", label: t("settings.agentLanguageChinese") },
+  ];
+  return (
+    <section className="settings-general-section">
+      <h3 className="settings-general-heading">{t("settings.agentLanguage")}</h3>
+      <p className="settings-general-description">{t("settings.agentLanguageDescription")}</p>
+      <div role="radiogroup" aria-label={t("settings.agentLanguage")} className="settings-agent-language-options">
+        {options.map((option) => {
+          const selected = language === option.id;
+          return (
+            <button
+              key={option.id}
+              type="button"
+              role="radio"
+              aria-checked={selected}
+              disabled={saving}
+              onClick={() => void save(option.id)}
+              className="settings-language-option"
+            >
+              <span className="settings-language-radio">
+                {selected && <span className="settings-language-radio-dot" />}
+              </span>
+              <span className="settings-language-label">{option.label}</span>
+              <span className="settings-language-code">{option.id}</span>
+            </button>
+          );
+        })}
+      </div>
+      {loadFailed && <p role="alert" className="settings-general-error">{t("settings.agentLanguageLoadFailed")}</p>}
+      {saveFailed && <p role="alert" className="settings-general-error">{t("settings.agentLanguageSaveError")}</p>}
+    </section>
+  );
 }
 
 function GeneralSettings({ sessionId, onSessionReloaded, quoteSelectionEnabled, onQuoteSelectionChange }: Pick<Props, "sessionId" | "onSessionReloaded" | "quoteSelectionEnabled" | "onQuoteSelectionChange">) {
@@ -581,6 +669,8 @@ function GeneralSettings({ sessionId, onSessionReloaded, quoteSelectionEnabled, 
         </div>
       </section>
 
+      <AgentLanguageSettings />
+
       {webAuthEnabled && (
         <section className="settings-general-section">
           <ConfigButton variant="secondary" disabled={loggingOut} onClick={() => void logOut()}>
@@ -592,39 +682,7 @@ function GeneralSettings({ sessionId, onSessionReloaded, quoteSelectionEnabled, 
           {logoutError && <p role="alert" className="settings-general-error">{logoutError}</p>}
         </section>
       )}
-      <ClaudeConfigDirSection />
     </div>
-  );
-}
-
-/**
- * Settings › General's read-only claude line: the config dir every claude
- * session runs with, and what it and each preset do — including whether a preset loads the
- * session folder's CLAUDE.md. Nothing here is editable and no credential is shown.
- */
-export function ClaudeConfigDirSection({ initialConfigDir = null }: { initialConfigDir?: string | null }) {
-  const { t } = useI18n();
-  const [configDir, setConfigDir] = useState<string | null>(initialConfigDir);
-  useEffect(() => {
-    let current = true;
-    void fetch("/api/claude")
-      .then((response) => response.ok ? response.json() : null)
-      .then((data: { configDir?: unknown } | null) => {
-        if (current && typeof data?.configDir === "string") setConfigDir(data.configDir);
-      })
-      .catch(() => {});
-    return () => { current = false; };
-  }, []);
-  return (
-    <section className="settings-general-section settings-claude-section">
-      <h3 className="settings-general-heading">{t("claude.settingsHeading")}</h3>
-      <p className="settings-general-description">
-        {t("claude.configDir", { path: configDir ?? "…" })}
-      </p>
-      <p className="settings-general-description">{t("claude.configDirNote")}</p>
-      <p className="settings-general-description">{t("claude.presetReadOnlyText")}</p>
-      <p className="settings-general-description">{t("claude.presetWritableText")}</p>
-    </section>
   );
 }
 

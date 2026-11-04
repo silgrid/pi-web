@@ -7,6 +7,8 @@ import {
   conversationForContact,
   mergeNewestPage,
   mergeOlderPage,
+  parsePolyforgeAnalysis,
+  type PolyforgeAnalysis,
   type PolyforgeContact,
   type PolyforgeConversation,
   type PolyforgeMessage,
@@ -90,7 +92,19 @@ type PageResponse = {
 type UsersResponse = { admin?: boolean; users?: PolyforgeContact[]; error?: string };
 type MembershipResponse = { ok?: boolean; error?: string };
 type SendResponse = { ok?: boolean; message?: PolyforgeMessage; error?: string };
-type AnalyzeResponse = { ok?: boolean; conclusion?: string; model?: string; error?: string };
+type AnalyzeResponse = { ok?: boolean; analysis?: unknown; error?: string; upgrade?: boolean };
+
+/** An analysis refusal: pf's text, and whether it is the
+ *  below-floor refusal (the panel then shows its own upgrade text). */
+export class PolyforgeAnalyzeError extends Error {
+  readonly upgrade: boolean;
+
+  constructor(message: string, upgrade = false) {
+    super(message);
+    this.name = "PolyforgeAnalyzeError";
+    this.upgrade = upgrade;
+  }
+}
 
 /** Keep the last snapshot when a watch response degrades to null (pure). */
 export function nextWatchSnapshot(
@@ -166,7 +180,8 @@ export function usePolyforge(panelOpen: boolean) {
   const [initialPageLoaded, setInitialPageLoaded] = useState<string | null>(null);
   const [hasOlder, setHasOlder] = useState(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
-  const [analyses, setAnalyses] = useState<Record<string, string>>({});
+  // the structured analyses by message id — page memory only.
+  const [analyses, setAnalyses] = useState<Record<string, PolyforgeAnalysis>>({});
 
   // Jobs-tab card stream. cardsRef mirrors the rendered
   // cards so the next tick reads the newest cursors without re-running the
@@ -670,15 +685,16 @@ export function usePolyforge(panelOpen: boolean) {
       body: JSON.stringify({ message_id: messageId }),
     });
     const body = await response.json() as AnalyzeResponse;
-    if (!response.ok || body.error || !body.conclusion) {
-      throw new Error(body.error ?? "the analyzer is unavailable");
+    const analysis = response.ok && !body.error ? parsePolyforgeAnalysis(body.analysis) : null;
+    if (!analysis) {
+      throw new PolyforgeAnalyzeError(body.error ?? "the analyzer is unavailable", body.upgrade === true);
     }
-    // Transient only: component state, cleared when the dock closes.
-    setAnalyses((previous) => ({ ...previous, [messageId]: body.conclusion as string }));
-    return body.conclusion;
+    // Transient only: hook state, cleared when the dock closes.
+    setAnalyses((previous) => ({ ...previous, [messageId]: analysis }));
+    return analysis;
   }, []);
 
-  // The conclusion is transient by construction: closing the dock drops it
+  // The analysis is transient by construction: closing the dock drops it
   // (no localStorage/sessionStorage/disk write anywhere).
   useEffect(() => {
     if (!panelOpen) setAnalyses({});

@@ -18,6 +18,7 @@ import {
   type PolyforgeMemoryHit,
 } from "@/lib/polyforge-memory-pure";
 import { MarkdownBody } from "./MarkdownBody";
+import { POLYFORGE_SEARCH_CHECK_CLASS, POLYFORGE_SEARCH_CONTROL_CLASS, PolyforgeSearchBar, PolyforgeSearchSubmitButton } from "./PolyforgeSearchBar";
 
 /**
  * The dock's Memory surface (browse mode):
@@ -30,7 +31,10 @@ import { MarkdownBody } from "./MarkdownBody";
  * empty keyword returns to browse. Project, type and tags re-issue the
  * current mode's read. A single-memory read on selection. No timer, no
  * polling, no storage: query, results and detail live in component state and
- * die with the tab.
+ * die with the tab. renders the form through the shared search
+ * bar (keyword + 🔍 action, then project/type/tags/any-word filters); the
+ * visible field labels are gone while each control keeps its accessible name
+ * and the keyword still applies only on submit.
  */
 
 export interface PolyforgeMemoryProps {
@@ -298,57 +302,49 @@ export function PolyforgeMemory({ cwd, onOpenWorkItem }: PolyforgeMemoryProps) {
   }
 
   const renderForm = () => (
-    <form onSubmit={submit} style={{ display: "flex", flexWrap: "wrap", gap: 6, padding: "8px 12px", borderBottom: "1px solid var(--border)", flexShrink: 0, fontSize: 11 }}>
-      <label style={{ display: "flex", flexDirection: "column", gap: 2, color: "var(--text-dim)", flex: 1, minWidth: 140 }}>
-        {t("polyforge.memory.keyword")}
-        <input
-          type="search"
-          value={keyword}
-          onChange={(event) => setKeyword(event.target.value)}
-          placeholder={t("polyforge.memory.keywordPlaceholder")}
-          aria-label={t("polyforge.memory.keyword")}
-          style={{ background: "var(--bg)", color: "var(--text)", border: "1px solid var(--border)", borderRadius: 4, padding: "4px 6px", fontSize: 12 }}
-        />
-      </label>
-      <label style={{ display: "flex", flexDirection: "column", gap: 2, color: "var(--text-dim)" }}>
-        {t("polyforge.memory.project")}
-        <select
-          value={project}
-          onChange={(event) => setProject(event.target.value)}
-          aria-label={t("polyforge.memory.project")}
-          style={{ background: "var(--bg)", color: "var(--text)", border: "1px solid var(--border)", borderRadius: 4, padding: "4px 6px", fontSize: 12 }}
-        >
-          {scope.projects.map((name) => (
-            <option key={name} value={name}>{name}</option>
-          ))}
-        </select>
-      </label>
-      <label style={{ display: "flex", flexDirection: "column", gap: 2, color: "var(--text-dim)" }}>
-        {t("polyforge.memory.type")}
-        <select
-          value={type}
-          onChange={(event) => setType(event.target.value)}
-          aria-label={t("polyforge.memory.type")}
-          style={{ background: "var(--bg)", color: "var(--text)", border: "1px solid var(--border)", borderRadius: 4, padding: "4px 6px", fontSize: 12 }}
-        >
-          {MEMORY_TYPE_FILTERS.map((value) => (
-            <option key={value} value={value}>
-              {value === "*" ? t("polyforge.memory.typeAll") : t(TYPE_LABEL_KEYS[value] ?? "")}
-            </option>
-          ))}
-        </select>
-      </label>
-      <label style={{ display: "flex", flexDirection: "column", gap: 2, color: "var(--text-dim)" }}>
-        {t("polyforge.memory.tags")}
-        <input
-          value={tags}
-          onChange={(event) => setTags(event.target.value)}
-          placeholder={t("polyforge.memory.tagsPlaceholder")}
-          aria-label={t("polyforge.memory.tags")}
-          style={{ background: "var(--bg)", color: "var(--text)", border: "1px solid var(--border)", borderRadius: 4, padding: "4px 6px", fontSize: 12 }}
-        />
-      </label>
-      <label style={{ display: "flex", alignItems: "center", gap: 4, color: "var(--text-dim)", paddingTop: 14 }}>
+    <PolyforgeSearchBar
+      value={keyword}
+      onChange={setKeyword}
+      placeholder={t("polyforge.memory.keywordPlaceholder")}
+      label={t("polyforge.memory.keyword")}
+      onSubmit={submit}
+      padded
+      action={<PolyforgeSearchSubmitButton label={t("polyforge.memory.search")} />}
+    >
+      <select
+        value={project}
+        onChange={(event) => setProject(event.target.value)}
+        aria-label={t("polyforge.memory.project")}
+        title={t("polyforge.memory.project")}
+        className={POLYFORGE_SEARCH_CONTROL_CLASS}
+      >
+        {scope.projects.map((name) => (
+          <option key={name} value={name}>{name}</option>
+        ))}
+      </select>
+      <select
+        value={type}
+        onChange={(event) => setType(event.target.value)}
+        aria-label={t("polyforge.memory.type")}
+        title={t("polyforge.memory.type")}
+        className={POLYFORGE_SEARCH_CONTROL_CLASS}
+      >
+        {MEMORY_TYPE_FILTERS.map((value) => (
+          <option key={value} value={value}>
+            {value === "*" ? t("polyforge.memory.typeAll") : t(TYPE_LABEL_KEYS[value] ?? "")}
+          </option>
+        ))}
+      </select>
+      <input
+        type="text"
+        value={tags}
+        onChange={(event) => setTags(event.target.value)}
+        placeholder={t("polyforge.memory.tagsPlaceholder")}
+        aria-label={t("polyforge.memory.tags")}
+        title={t("polyforge.memory.tags")}
+        className={POLYFORGE_SEARCH_CONTROL_CLASS}
+      />
+      <label className={POLYFORGE_SEARCH_CHECK_CLASS}>
         <input
           type="checkbox"
           checked={anyWord}
@@ -357,15 +353,8 @@ export function PolyforgeMemory({ cwd, onOpenWorkItem }: PolyforgeMemoryProps) {
         />
         {t("polyforge.memory.any")}
       </label>
-      <button
-        type="submit"
-        style={{ alignSelf: "flex-end", background: "var(--accent)", color: "var(--bg-panel)", border: "none", borderRadius: 4, padding: "4px 12px", fontSize: 12, cursor: "pointer" }}
-      >
-        {t("polyforge.memory.search")}
-      </button>
-    </form>
+    </PolyforgeSearchBar>
   );
-
   if (detail || detailError) {
     const bodyCapped = detail ? isMemoryBodyTruncated(detail.content, detail.content_len) : false;
     const collapsible = detail ? detail.content_len > MEMORY_COLLAPSE_BYTES : false;

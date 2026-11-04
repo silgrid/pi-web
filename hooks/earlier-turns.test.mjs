@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { mock, test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createJiti } from "jiti";
@@ -8,6 +9,8 @@ import { createJiti } from "jiti";
 // numbers turns from. It moves with the history cursor (fresh read, older
 // page, cached snapshot, unmount persist) and a snapshot written without it
 // reads as zero.
+// one copy of that fact — the context page's `turnsBefore`;
+// the returned `earlierTurnCount` is derived from it, never kept beside it.
 const shimPath = fileURLToPath(new URL("./__fixtures__/react-hook-shim.mjs", import.meta.url));
 const jiti = createJiti(import.meta.url, { tsconfigPaths: true, alias: { react: shimPath } });
 const { renderHook } = await import(pathToFileURL(shimPath).href);
@@ -198,4 +201,10 @@ test("a same-revision read fills the offset a snapshot was stored without", asyn
   } finally {
     env.teardown();
   }
+});
+
+test("the hook keeps one copy of the offset, derived from its context page", () => {
+  const source = readFileSync(new URL("./useAgentSession.ts", import.meta.url), "utf8");
+  assert.match(source, /const earlierTurnCount = data\?\.context\.turnsBefore \?\? 0;/, "the returned offset is derived from data.context.turnsBefore");
+  assert.doesNotMatch(source, /setEarlierTurnCount|earlierTurnCountRef/, "no second state or ref mirrors it");
 });

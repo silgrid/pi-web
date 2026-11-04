@@ -42,7 +42,10 @@ test("work-item references leave through the one callback; a null work item rend
 
 test("no author, owner or user id is rendered anywhere, hover titles included", () => {
   assert.doesNotMatch(source, /owner_user_id|author/i, "no owner or author notion in the client");
-  assert.doesNotMatch(source, /title=\{/, "the rows and detail carry no hover titles over wire data");
+  // owner 有意变更 the search-bar controls keep aria-label +
+  // title (the visible field labels are gone). Wire data still carries no
+  // hover title.
+  assert.doesNotMatch(source, /title=\{(detail|hit)/, "the rows and detail carry no hover titles over wire data");
   for (const used of ["hit.type", "hit.title", "hit.updated_at", "hit.tags", "detail.content", "detail.visibility", "detail.status"]) {
     assert.ok(source.includes(used), `the confirmed fields render: ${used}`);
   }

@@ -3,8 +3,9 @@
 // per live session, speaking stream-json on stdin/stdout. Its events reach the
 // page through the adapter (lib/claude-adapter.ts) and the existing SSE stream.
 //
-// Lifecycle as pi's: the child lives while a page renews the lease or a turn
-// runs, and is ended one PI_WEB_IDLE_TIMEOUT_MS after the last renewal; the next
+// Lifecycle as pi's: the child lives while a page renews the lease, a turn runs
+// or a background subagent is unsettled, and is ended one
+// PI_WEB_IDLE_TIMEOUT_MS after the last renewal; the next
 // open or send starts a new child with `--resume <id>`. Every child runs in its
 // own process group, which is what is signalled, so no descendant outlives it.
 import { spawn, type ChildProcess } from "child_process";
@@ -15,16 +16,32 @@ import type { AgentEventLike } from "./agent-event-wire";
 import {
   ClaudeLineDecoder,
   ClaudeStreamTranslator,
+  claudeCompactLine,
   claudeInterruptLine,
+  claudeSetEffortLine,
+  claudeSetModelLine,
   claudeTranscriptToMessages,
   claudeUserInputLine,
   claudeUserPromptEvents,
   parseClaudeTranscript,
+  type ClaudeControlResponse,
+  type ClaudePromptImage,
+  type ClaudeSidecar,
+  type ClaudeSidecars,
 } from "./claude-adapter";
-import { buildClaudeArgv, buildClaudeEnv, claudePresetTools } from "./claude-argv";
-import { claudeTranscriptFile, ensureClaudeConfigDir } from "./claude-config-dir";
+import { buildClaudeArgv, buildClaudeEnv } from "./claude-argv";
+import { claudeConfigDir, claudeSidecarFiles, claudeTranscriptFile } from "./claude-config-dir";
 import { getClaudeSessionRecord, readClaudeIndex, recordClaudeUsage, updateClaudeSessionRecord, type ClaudeSessionRecord } from "./claude-index";
-import { CLAUDE_PROVIDER } from "./claude-shared";
+import {
+  CLAUDE_EFFORT_DEFAULT,
+  CLAUDE_PROVIDER,
+  claudeFirstMessage,
+  isClaudeEffort,
+  isClaudeModel,
+  type ClaudeEffort,
+  type ClaudeModel,
+} from "./claude-shared";
+import type { ClaudeSubagentRun } from "./claude-subagent-view";
 import { resolveSessionIdleTimeoutMs } from "./rpc-manager";
 import type { SessionFileStats } from "./session-stats";
 import type { AgentMessage, SessionInfo } from "./types";
@@ -32,6 +49,8 @@ import { notifySessionComplete } from "./web-push";
 
 /** How long Stop's interrupt request gets before the process group is signalled. */
 export const CLAUDE_INTERRUPT_DEADLINE_MS = 5_000;
+/** How long a control request (a model or effort switch) waits for claude's answer. */
+export const CLAUDE_CONTROL_DEADLINE_MS = 15_000;
 /** How long a child gets after SIGTERM before SIGKILL. */
 export const CLAUDE_SHUTDOWN_DEADLINE_MS = 3_000;
 const STDERR_TAIL_BYTES = 4096;
@@ -52,17 +71,46 @@ export function findClaudeBinary(pathValue: string | undefined = process.env.PAT
   return null;
 }
 
-/** The session's history and file stats, read from claude's own transcript through the adapter. */
-export function readClaudeHistory(sessionId: string): { file: string | null; messages: AgentMessage[]; entryIds: string[] } {
+export interface ClaudeHistory {
+  file: string | null;
+  messages: AgentMessage[];
+  entryIds: string[];
+  /** The subagent runs the conversation started, their entries from claude's sidecars. */
+  subagents: ClaudeSubagentRun[];
+}
+
+/** Every sidecar of the session, read whole; a missing or unreadable one is left out (its run shows no entries). */
+function readClaudeSidecars(sessionId: string, transcript: string): ClaudeSidecars {
+  const sidecars: Record<string, ClaudeSidecar> = {};
+  for (const { agentId, file, metaFile } of claudeSidecarFiles(sessionId, undefined, transcript)) {
+    let text: string;
+    try {
+      text = readFileSync(file, "utf8");
+    } catch {
+      continue;
+    }
+    let meta: unknown;
+    try {
+      meta = JSON.parse(readFileSync(metaFile, "utf8"));
+    } catch {
+      meta = undefined;
+    }
+    sidecars[agentId] = { entries: parseClaudeTranscript(text), meta };
+  }
+  return sidecars;
+}
+
+/** The session's history and file stats, read from claude's own transcript (and its subagents' sidecars) through the adapter. */
+export function readClaudeHistory(sessionId: string): ClaudeHistory {
   const file = claudeTranscriptFile(sessionId);
-  if (!file) return { file: null, messages: [], entryIds: [] };
+  if (!file) return { file: null, messages: [], entryIds: [], subagents: [] };
   let text = "";
   try {
     text = readFileSync(file, "utf8");
   } catch {
-    return { file, messages: [], entryIds: [] };
+    return { file, messages: [], entryIds: [], subagents: [] };
   }
-  return { file, ...claudeTranscriptToMessages(parseClaudeTranscript(text)) };
+  return { file, ...claudeTranscriptToMessages(parseClaudeTranscript(text), readClaudeSidecars(sessionId, file)) };
 }
 
 /** pi's file stats for a claude session: counts from the transcript, tokens and cost from the index's `result` totals. */
@@ -105,7 +153,7 @@ export function claudeSessionInfo(record: ClaudeSessionRecord, history = readCla
     messageCount: history.messages.length,
     firstMessage: record.firstMessage || "(no messages)",
     harness: "claude",
-    claude: { modelAlias: record.modelAlias, preset: record.preset },
+    claude: { model: record.model, effort: record.effort },
     ...(record.archived ? { archived: true } : {}),
   };
 }
@@ -117,7 +165,10 @@ export function getClaudeSessionInfos(): SessionInfo[] {
 
 type Listener = (event: AgentEventLike) => void;
 
-/** The agent commands a claude session answers; every other (pi-only) one is refused. */
+/**
+ * The agent commands a claude session answers; every other (pi-only) one is refused.
+ * adds the model switch, the effort change and claude's own compaction.
+ */
 export const CLAUDE_SESSION_COMMANDS: ReadonlySet<string> = new Set([
   "prompt",
   "abort",
@@ -125,7 +176,63 @@ export const CLAUDE_SESSION_COMMANDS: ReadonlySet<string> = new Set([
   "get_tools",
   "get_commands",
   "get_session_stats",
+  "set_model",
+  "set_effort",
+  "compact",
 ]);
+
+/** A `set_model` command's full model name (`model`, else pi's `modelId`); null when it names none. */
+export function claudeCommandModel(command: Record<string, unknown>): ClaudeModel | null {
+  const model = command.model ?? command.modelId;
+  return isClaudeModel(model) ? model : null;
+}
+
+/** A `set_effort` command's effort (a level or the default entry); null when it names none. */
+export function claudeCommandEffort(command: Record<string, unknown>): ClaudeEffort | null {
+  return isClaudeEffort(command.effort) ? command.effort : null;
+}
+
+/** What a model switch did: the model in force, and claude's refusal when it kept the old one. */
+export interface ClaudeModelSwitch {
+  model: ClaudeModel;
+  /** No live child: only the index changed; the next child starts with `--model <model>`. */
+  pending?: true;
+  rejected?: true;
+  error?: string;
+  errorCode?: string;
+}
+
+/** How claude's own compaction ended. */
+export type ClaudeCompactOutcome = { tokensBefore?: number } | { aborted: true } | { error: string };
+
+/** What an effort change did: the effort in force, and claude's refusal when it kept the old one. */
+export interface ClaudeEffortSwitch {
+  effort: ClaudeEffort;
+  /** Only the index changed; the next child starts with this effort. */
+  pending?: true;
+  rejected?: true;
+  error?: string;
+}
+
+/**
+ * A switch with no live child: the index is the whole change, nothing
+ * is spawned; the next open or prompt starts `--resume` with the new values.
+ */
+export async function setIdleClaudeSetting(
+  id: string,
+  command: Record<string, unknown>,
+): Promise<ClaudeModelSwitch | ClaudeEffortSwitch> {
+  if (command.type === "set_model") {
+    const model = claudeCommandModel(command);
+    if (!model) throw new Error(`Not a claude model: ${String(command.model ?? command.modelId)}`);
+    await updateClaudeSessionRecord(id, (record) => ({ ...record, model }));
+    return { model, pending: true };
+  }
+  const effort = claudeCommandEffort(command);
+  if (!effort) throw new Error(`Not a claude effort: ${String(command.effort)}`);
+  await updateClaudeSessionRecord(id, (record) => ({ ...record, effort }));
+  return { effort, pending: true };
+}
 
 /** One live claude child. A new one (with `--resume`) replaces it once it has exited. */
 export class ClaudeSession {
@@ -139,20 +246,39 @@ export class ClaudeSession {
   private readonly listeners = new Set<Listener>();
   private alive = true;
   private turnRunning = false;
+  /**
+   * `result` events still owed to the running turn: its prompt's, plus one per
+   * follow-up turn claude started on its own meanwhile. The turn
+   * ends with the last of them.
+   */
+  private pendingResults = 0;
   private aborting = false;
+  /**
+   * The running turn is claude's own `/compact`: announced as pi's
+   * compaction (compaction_start / compaction_end) and settled by `settleCompaction`.
+   */
+  private compaction: { boundary?: { tokensBefore?: number }; settle: (outcome: ClaudeCompactOutcome) => void } | null = null;
   private interruptTimer: ReturnType<typeof setTimeout> | null = null;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private stderrTail = "";
+  /** Control requests written to stdin, by request id, waiting for claude's answer. */
+  private readonly pendingControls = new Map<string, (response: ClaudeControlResponse) => void>();
   private readonly exited: Promise<void>;
 
   constructor(record: ClaudeSessionRecord, binary: string, options: { resume: boolean; configDir: string }) {
     this.sessionId = record.id;
     this.record = record;
     this.configDir = options.configDir;
-    this.argv = buildClaudeArgv({ sessionId: record.id, resume: options.resume, modelAlias: record.modelAlias, preset: record.preset });
+    this.argv = buildClaudeArgv({
+      sessionId: record.id,
+      resume: options.resume,
+      model: record.model,
+      effort: record.effort,
+      agentLanguage: record.agentLanguage,
+    });
     this.child = spawn(binary, [...this.argv], {
       cwd: record.cwd,
-      env: buildClaudeEnv(process.env, options.configDir) as NodeJS.ProcessEnv,
+      env: buildClaudeEnv(process.env) as NodeJS.ProcessEnv,
       stdio: ["pipe", "pipe", "pipe"],
       // Its own process group: shutdown signals the group, descendants included.
       detached: true,
@@ -200,6 +326,15 @@ export class ClaudeSession {
     return false;
   }
 
+  /**
+   * A background subagent still running, or finished with claude's follow-up turn
+   * not started yet: the session is unsettled — no idle reap, no
+   * completion announcement, `subagentsActive` on the lease.
+   */
+  hasUnsettledSubagents(): boolean {
+    return this.alive && this.translator.hasUnsettledSubagents();
+  }
+
   onEvent(listener: Listener): () => void {
     this.listeners.add(listener);
     return () => {
@@ -223,8 +358,15 @@ export class ClaudeSession {
         return null;
       case "get_state":
         return this.state();
+      case "set_model":
+        return this.setModel(command);
+      case "set_effort":
+        return this.setEffort(command);
+      case "compact":
+        return this.compact();
       case "get_tools":
-        return claudePresetTools(this.record.preset).map((name) => ({ name, description: "", active: true }));
+        // claude's tools are the user's claude config's, not pi-web's to select or describe.
+        return [];
       case "get_commands":
         return { commands: [] };
       case "get_session_stats": {
@@ -243,15 +385,18 @@ export class ClaudeSession {
   }
 
   private state(): Record<string, unknown> {
+    // The index's current model and effort (a switch rewrites them), not the launch copy.
+    const record = this.currentRecord();
     return {
       sessionId: this.sessionId,
       sessionFile: claudeTranscriptFile(this.sessionId) ?? "",
       isStreaming: this.turnRunning,
       isPromptRunning: this.turnRunning,
       isBashRunning: false,
-      isCompacting: false,
+      isCompacting: this.compaction !== null,
       autoCompactionEnabled: false,
-      model: { id: this.record.modelAlias, provider: CLAUDE_PROVIDER },
+      model: { id: record.model, provider: CLAUDE_PROVIDER },
+      claudeEffort: record.effort,
       messageCount: 0,
       pendingMessageCount: 0,
       queuedMessages: { steering: [], followUp: [] },
@@ -264,22 +409,150 @@ export class ClaudeSession {
 
   private prompt(command: Record<string, unknown>): null {
     const message = typeof command.message === "string" ? command.message : "";
-    if (!message.trim()) throw new Error("A claude prompt needs text");
+    // The composer's `{type: "image", data, mimeType}` entries; the API validated them
+    // (validateClaudeImages) before this session was reached.
+    const images: ClaudePromptImage[] = Array.isArray(command.images)
+      ? command.images.map((image: { data: string; mimeType: string }) => ({ data: image.data, mimeType: image.mimeType }))
+      : [];
+    if (!message.trim() && images.length === 0) throw new Error("A claude prompt needs text");
+    // An image-only prompt sends no (whitespace) text block.
+    const text = message.trim() ? message : "";
     if (!this.alive) throw new Error("The claude process has exited; send again to resume it");
     // No queue and no steer: one turn at a time.
     if (this.turnRunning) throw new Error("A claude turn is already running");
     if (!existsSync(this.record.cwd)) throw new Error(`The session folder no longer exists: ${this.record.cwd}`);
     this.turnRunning = true;
+    this.pendingResults = 1;
     this.aborting = false;
-    this.child.stdin?.write(claudeUserInputLine(message));
+    this.child.stdin?.write(claudeUserInputLine(text, images));
     this.emit({ type: "agent_start" });
-    for (const event of claudeUserPromptEvents(message)) this.emit(event);
+    for (const event of claudeUserPromptEvents(text, images)) this.emit(event);
     void updateClaudeSessionRecord(this.sessionId, (record) => ({
       ...record,
       modified: new Date().toISOString(),
-      firstMessage: record.firstMessage || message,
+      firstMessage: record.firstMessage || claudeFirstMessage(text, images.length),
     })).catch((error) => console.error("[pi-web] claude index update failed:", error instanceof Error ? error.message : error));
     return null;
+  }
+
+  /** Refuses a switch that would land mid-turn: it changes nothing. */
+  private assertIdle(what: string): void {
+    if (this.turnRunning) throw new Error(`A claude turn is running; ${what} when it ends`);
+  }
+
+  /** Writes a control request and waits for claude's answer; a missing answer is an error, never a hang. */
+  private controlRequest(line: (requestId: string) => string): Promise<ClaudeControlResponse> {
+    const requestId = randomUUID();
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        this.pendingControls.delete(requestId);
+        this.resetIdleTimer();
+        resolve({ requestId, subtype: "error", error: `claude did not answer within ${CLAUDE_CONTROL_DEADLINE_MS / 1000} s` });
+      }, CLAUDE_CONTROL_DEADLINE_MS);
+      timer.unref?.();
+      this.pendingControls.set(requestId, (response) => {
+        clearTimeout(timer);
+        this.pendingControls.delete(requestId);
+        // An answered request is activity: the idle countdown starts over from it.
+        this.resetIdleTimer();
+        resolve(response);
+      });
+      this.child.stdin?.write(line(requestId));
+    });
+  }
+
+  /**
+   * The hot model switch: claude's own `set_model` on the live child,
+   * same process and transcript. Accepted: the index records the model and every later
+   * child starts with it. Refused by a live child: claude's text comes back and nothing
+   * changes. The child exits before answering: recorded as an idle switch, the next
+   * child starts with `--model <model>`.
+   */
+  private async setModel(command: Record<string, unknown>): Promise<ClaudeModelSwitch> {
+    const model = claudeCommandModel(command);
+    if (!model) throw new Error(`Not a claude model: ${String(command.model ?? command.modelId)}`);
+    this.assertIdle("switch the model");
+    if (!this.alive) return setIdleClaudeSetting(this.sessionId, { type: "set_model", model }) as Promise<ClaudeModelSwitch>;
+    const answer = await this.controlRequest((requestId) => claudeSetModelLine(requestId, model));
+    // The child went away before answering: the switch is recorded like an idle one.
+    if (!this.alive) return setIdleClaudeSetting(this.sessionId, { type: "set_model", model }) as Promise<ClaudeModelSwitch>;
+    if (answer.subtype !== "success") {
+      return {
+        model: this.currentRecord().model,
+        rejected: true,
+        error: answer.error ?? "claude refused the model",
+        ...(answer.errorCode ? { errorCode: answer.errorCode } : {}),
+      };
+    }
+    const active = isClaudeModel(answer.response?.model) ? answer.response.model : model;
+    await updateClaudeSessionRecord(this.sessionId, (record) => ({ ...record, model: active }));
+    return { model: active };
+  }
+
+  /**
+   * An effort change. A level goes to the live child as
+   * `apply_flag_settings {effortLevel}`, which the recording proves reaches the next
+   * turn; the default entry has no such value, so the idle child is ended and the next
+   * one starts without `--effort`. Either way the index records it first for every later child.
+   */
+  private async setEffort(command: Record<string, unknown>): Promise<ClaudeEffortSwitch> {
+    const effort = claudeCommandEffort(command);
+    if (!effort) throw new Error(`Not a claude effort: ${String(command.effort)}`);
+    this.assertIdle("change the effort");
+    if (!this.alive || effort === CLAUDE_EFFORT_DEFAULT) {
+      const result = await setIdleClaudeSetting(this.sessionId, { type: "set_effort", effort }) as ClaudeEffortSwitch;
+      if (this.alive && !this.turnRunning) await this.shutdown();
+      return result;
+    }
+    const answer = await this.controlRequest((requestId) => claudeSetEffortLine(requestId, effort));
+    if (!this.alive) return setIdleClaudeSetting(this.sessionId, { type: "set_effort", effort }) as Promise<ClaudeEffortSwitch>;
+    if (answer.subtype !== "success") {
+      return { effort: this.currentRecord().effort, rejected: true, error: answer.error ?? "claude refused the effort" };
+    }
+    await updateClaudeSessionRecord(this.sessionId, (record) => ({ ...record, effort }));
+    return { effort };
+  }
+
+  /**
+   * claude's own compaction: the bare `/compact` on stdin, as a turn
+   * (nothing else is sent until it ends; Stop interrupts it like any turn). Resolves
+   * with claude's pre-compaction token count once its `result` arrives, `{ aborted }`
+   * after Stop; rejects with claude's own error. No restart, resume or instructions.
+   */
+  private compact(): Promise<{ tokensBefore?: number } | { aborted: true }> {
+    this.assertIdle("compact");
+    if (!this.alive) throw new Error("The claude process has exited; send again to resume it");
+    this.turnRunning = true;
+    this.pendingResults = 1;
+    this.aborting = false;
+    const outcome = new Promise<ClaudeCompactOutcome>((settle) => {
+      this.compaction = { settle };
+    });
+    this.child.stdin?.write(claudeCompactLine());
+    this.emit({ type: "compaction_start", reason: "manual" });
+    return outcome.then((result) => {
+      if ("error" in result) throw new Error(result.error);
+      return result;
+    });
+  }
+
+  /** Ends the compaction turn: pi's compaction_end with claude's number, or the stop / error. */
+  private settleCompaction(outcome: ClaudeCompactOutcome): void {
+    const compaction = this.compaction;
+    if (!compaction) return;
+    this.compaction = null;
+    this.turnRunning = false;
+    this.pendingResults = 0;
+    this.aborting = false;
+    if (this.interruptTimer) {
+      clearTimeout(this.interruptTimer);
+      this.interruptTimer = null;
+    }
+    if ("error" in outcome) this.emit({ type: "compaction_end", reason: "manual", errorMessage: outcome.error });
+    else if ("aborted" in outcome) this.emit({ type: "compaction_end", reason: "manual", aborted: true });
+    else this.emit({ type: "compaction_end", reason: "manual", result: outcome });
+    this.resetIdleTimer();
+    compaction.settle(outcome);
   }
 
   /** Stop: the stream-json interrupt first; a turn still running at the deadline gets SIGINT. */
@@ -296,14 +569,44 @@ export class ClaudeSession {
   }
 
   private handleClaudeEvent(event: unknown): void {
-    const { events, turnEnd } = this.translator.push(event);
+    const { events, turnEnd, claudeTurnStart, control, compactBoundary } = this.translator.push(event);
+    if (control) this.pendingControls.get(control.requestId)?.(control);
+    const compaction = this.compaction;
+    if (compaction) {
+      // A compaction turn is not a reply: only its boundary and its result count.
+      if (compactBoundary) compaction.boundary = compactBoundary;
+      if (!turnEnd) return;
+      void recordClaudeUsage(this.sessionId, turnEnd.usage)
+        .catch((error) => console.error("[pi-web] claude usage update failed:", error instanceof Error ? error.message : error));
+      if (this.aborting) this.settleCompaction({ aborted: true });
+      else if (turnEnd.error) this.settleCompaction({ error: this.withConfigDir(turnEnd.error) });
+      else if (compaction.boundary) this.settleCompaction(compaction.boundary);
+      else this.settleCompaction({ error: "claude did not compact the conversation" });
+      return;
+    }
+    if (claudeTurnStart) this.startClaudeTurn();
     for (const translated of events) this.emit(translated);
     if (!turnEnd) return;
     void recordClaudeUsage(this.sessionId, turnEnd.usage)
       .catch((error) => console.error("[pi-web] claude usage update failed:", error instanceof Error ? error.message : error));
     const aborted = this.aborting;
     if (turnEnd.error && !aborted) this.emit({ type: "prompt_error", errorMessage: this.withConfigDir(turnEnd.error) });
-    this.endTurn(aborted, !turnEnd.error);
+    // A stopped turn ends with its result; otherwise the last owed result ends it.
+    this.pendingResults = aborted ? 0 : Math.max(0, this.pendingResults - 1);
+    if (this.pendingResults === 0) this.endTurn(aborted, !turnEnd.error);
+  }
+
+  /**
+   * claude's own follow-up turn after a background subagent finished: no prompt
+   * started it. Alone it is a turn of its own (`agent_start`, then its normal end);
+   * while a turn still runs, that turn also waits for its result.
+   */
+  private startClaudeTurn(): void {
+    this.pendingResults += 1;
+    if (this.turnRunning) return;
+    this.turnRunning = true;
+    this.aborting = false;
+    this.emit({ type: "agent_start" });
   }
 
   private withConfigDir(message: string): string {
@@ -313,15 +616,20 @@ export class ClaudeSession {
   private endTurn(aborted: boolean, completed: boolean): void {
     if (!this.turnRunning) return;
     this.turnRunning = false;
+    this.pendingResults = 0;
     this.aborting = false;
     if (this.interruptTimer) {
       clearTimeout(this.interruptTimer);
       this.interruptTimer = null;
     }
-    this.emit({ type: "agent_settled", ...(aborted ? { aborted: true } : {}) });
-    this.emit({ type: "prompt_done", ...(aborted ? { aborted: true } : {}) });
+    // A subagent whose end starts another turn here: the page holds its chime and
+    // notification until the last follow-up turn ends, and so does the push.
+    const subagentsActive = this.hasUnsettledSubagents();
+    const flags = { ...(aborted ? { aborted: true } : {}), ...(subagentsActive ? { subagentsActive: true } : {}) };
+    this.emit({ type: "agent_settled", ...flags });
+    this.emit({ type: "prompt_done", ...flags });
     this.resetIdleTimer();
-    if (completed && !aborted) {
+    if (completed && !aborted && !subagentsActive) {
       void notifySessionComplete(this.sessionId, this.currentRecord().name)
         .catch((error) => console.error("[pi-web] failed to send completion push:", error instanceof Error ? error.message : error));
     }
@@ -334,6 +642,11 @@ export class ClaudeSession {
     this.idleTimer = null;
     // Whatever the group still holds goes with it.
     this.signalGroup("SIGKILL");
+    for (const [requestId, answer] of [...this.pendingControls]) answer({ requestId, subtype: "error", error: "claude exited before it answered" });
+    if (this.compaction) {
+      const detail = this.stderrTail.trim() || `claude exited${code === null ? "" : ` with code ${code}`}`;
+      this.settleCompaction(this.aborting ? { aborted: true } : { error: this.withConfigDir(detail) });
+    }
     if (this.turnRunning) {
       const aborted = this.aborting;
       for (const event of this.translator.flush()) this.emit(event);
@@ -366,8 +679,10 @@ export class ClaudeSession {
     if (timeoutMs === 0) return;
     this.idleTimer = setTimeout(() => {
       this.idleTimer = null;
-      // A running turn keeps the child, as a running pi session is kept.
-      if (this.turnRunning) {
+      // A running turn keeps the child, as a running pi session is kept; so does an
+      // unsettled subagent, whose end starts claude's follow-up turn here, and a control
+      // request still waiting for claude's answer.
+      if (this.turnRunning || this.hasUnsettledSubagents() || this.pendingControls.size > 0) {
         this.resetIdleTimer();
         return;
       }
@@ -432,14 +747,20 @@ export function startClaudeSession(record: ClaudeSessionRecord): ClaudeSession {
   const binary = findClaudeBinary();
   if (!binary) throw new Error("claude was not found on PATH");
   if (!existsSync(record.cwd)) throw new Error(`The session folder no longer exists: ${record.cwd}`);
-  const configDir = ensureClaudeConfigDir();
-  const session = new ClaudeSession(record, binary, { resume: claudeTranscriptFile(record.id) !== null, configDir });
+  // The system claude's own config dir: resolved for the resume check and error text, never created.
+  const configDir = claudeConfigDir();
+  const session = new ClaudeSession(record, binary, { resume: claudeTranscriptFile(record.id, configDir) !== null, configDir });
   registry().set(record.id, session);
   return session;
 }
 
 export function getRunningClaudeSessionIds(): string[] {
   return [...registry().values()].filter((session) => session.isRunning()).map((session) => session.sessionId);
+}
+
+/** Live claude sessions with an unsettled subagent run. */
+export function getClaudeSessionIdsWithUnsettledSubagents(): string[] {
+  return [...registry().values()].filter((session) => session.hasUnsettledSubagents()).map((session) => session.sessionId);
 }
 
 /** Every live child, ended (process groups signalled at once; resolves when they exited or the deadline passed). */

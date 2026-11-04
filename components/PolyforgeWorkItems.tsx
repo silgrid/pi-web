@@ -15,6 +15,7 @@ import {
   type PolyforgeWorkItemRow,
 } from "@/lib/polyforge-work-items-pure";
 import { MarkdownBody } from "./MarkdownBody";
+import { POLYFORGE_SEARCH_CONTROL_CLASS, PolyforgeRefreshButton, PolyforgeSearchBar } from "./PolyforgeSearchBar";
 
 /**
  * The Work panel's read-only 工单列表 surface: every mapped
@@ -29,11 +30,12 @@ import { MarkdownBody } from "./MarkdownBody";
  * and reads nothing.
  *
  * Reads follow gestures only: one list read when the sub-tab opens (this
- * component mounts) and one more per change of the local count key while it
- * stays mounted — never a timer, a filter, a search, a detail or a back.
- * Every list answer reports its running count to the parent, which keeps the
- * last one for the sub-tab badge for the rest of the page session. No
- * storage, no write control: the surface is read-only.
+ * component mounts), one more per change of the local count key while it
+ * stays mounted and one per click of the search bar's ↻ (
+ *'s busy contract) — never a timer, a filter, a search, a
+ * detail or a back. Every list answer reports its running count to the
+ * parent, which keeps the last one for the sub-tab badge for the rest of the
+ * page session. No storage, no write control: the surface is read-only.
  */
 
 interface ListResponse {
@@ -56,10 +58,6 @@ const COLLAPSE_MAX_HEIGHT_PX = 280;
 
 const STATUS_KEYS = new Set<string>(POLYFORGE_WORK_ITEM_STATUSES);
 
-const selectStyle: React.CSSProperties = {
-  flex: 1, minWidth: 0, background: "var(--bg)", color: "var(--text)", border: "1px solid var(--border)", borderRadius: 4, padding: "3px 4px", fontSize: 12,
-};
-
 export function PolyforgeWorkItems({
   itemCountKey,
   onRunningCount,
@@ -77,6 +75,10 @@ export function PolyforgeWorkItems({
   const [search, setSearch] = useState("");
   const [projectFilter, setProjectFilter] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
+  // the manual re-read's busy state. Its one source is the
+  // newest list read still in flight — the mount read, a count-key change or
+  // the button. Only that newest read clears it.
+  const [listRefreshing, setListRefreshing] = useState(false);
 
   const [selected, setSelected] = useState<string | null>(null);
   const [detail, setDetail] = useState<PolyforgeWorkItemDetail | null>(null);
@@ -88,11 +90,14 @@ export function PolyforgeWorkItems({
   const listSeqRef = useRef(0);
   const readList = useCallback(() => {
     const seq = ++listSeqRef.current;
+    setListRefreshing(true);
     fetch("/api/polyforge/work-items")
       .then(async (response) => {
         const body = await response.json() as ListResponse;
         if (seq !== listSeqRef.current) return;
+        setListRefreshing(false);
         if (!response.ok) {
+          // Keep the list already on screen; the red listError sits above it.
           setListError(body.error ?? t("polyforge.workItems.error"));
           return;
         }
@@ -101,7 +106,9 @@ export function PolyforgeWorkItems({
         onRunningCount(workItemsRunningCount(Array.isArray(body.items) ? body.items : []));
       })
       .catch(() => {
-        if (seq === listSeqRef.current) setListError(t("polyforge.workItems.error"));
+        if (seq !== listSeqRef.current) return;
+        setListRefreshing(false);
+        setListError(t("polyforge.workItems.error"));
       });
   }, [t, onRunningCount]);
   // The mount read: the ref keeps it to exactly one read per opening even
@@ -236,28 +243,30 @@ export function PolyforgeWorkItems({
           <span style={{ fontWeight: 600, color: "var(--text)" }}>{t("polyforge.workItems.total", { count: typeof list.total === "number" ? list.total : rows.length })}</span>
           {capped.size > 0 && <span style={{ color: "#d97706" }}>{capHint} ({[...capped].sort().join(", ")})</span>}
         </div>
-        <input
-          type="search"
+        <PolyforgeSearchBar
           value={search}
-          onChange={(event) => setSearch(event.target.value)}
+          onChange={setSearch}
           placeholder={t("polyforge.workItems.searchPlaceholder")}
-          aria-label={t("polyforge.workItems.searchPlaceholder")}
-          style={{ width: "100%", boxSizing: "border-box", background: "var(--bg)", color: "var(--text)", border: "1px solid var(--border)", borderRadius: 4, padding: "4px 6px", fontSize: 12 }}
-        />
-        <div style={{ display: "flex", gap: 6 }}>
+          label={t("polyforge.workItems.searchPlaceholder")}
+          action={(
+            /* the manual re-read (Tasks' #204 contract) — one
+               list read per click through the existing GET face. */
+            <PolyforgeRefreshButton refreshing={listRefreshing} onClick={readList} data-pf-items-refresh="" />
+          )}
+        >
           <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}
-            aria-label={t("polyforge.workItems.field.status")} title={t("polyforge.workItems.field.status")} style={selectStyle}>
+            aria-label={t("polyforge.workItems.field.status")} title={t("polyforge.workItems.field.status")} className={POLYFORGE_SEARCH_CONTROL_CLASS}>
             <option value="all">{t("polyforge.workItems.filterAllStatuses")}</option>
             {POLYFORGE_WORK_ITEM_STATUSES.map((status) => <option key={status} value={status}>{statusLabel(status)}</option>)}
           </select>
           <select value={projectFilter} onChange={(event) => setProjectFilter(event.target.value)}
-            aria-label={t("polyforge.workItems.field.project")} title={t("polyforge.workItems.field.project")} style={selectStyle}>
+            aria-label={t("polyforge.workItems.field.project")} title={t("polyforge.workItems.field.project")} className={POLYFORGE_SEARCH_CONTROL_CLASS}>
             <option value="">{t("polyforge.workItems.filterAllProjects")}</option>
             {projects.map((project) => (
               <option key={project} value={project}>{capped.has(project) ? `${project} · ${capHint}` : project}</option>
             ))}
           </select>
-        </div>
+        </PolyforgeSearchBar>
       </div>
       <div style={{ flex: 1, minHeight: 0, overflowY: "auto", display: "flex", flexDirection: "column" }}>
         {listError && <div style={{ padding: "8px 12px", color: "#dc2626", fontSize: 12, overflowWrap: "anywhere" }}>{listError}</div>}

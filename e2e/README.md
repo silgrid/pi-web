@@ -76,14 +76,20 @@ Failures save a screenshot, Playwright trace, and server log under
 - Install once: `npm ci` and `npx playwright install chromium`. The runner
   never installs; it only checks both exist and shares them across suites.
 - Each browser suite starts its own `next dev` with `PI_WEB_DIST_DIR=.next/e2e/<suite>`
-  (`next.config.ts` `distDir`), so suites do not fight over `.next/dev/lock`
-  and each keeps a warm Turbopack cache for the next run. The per-suite caches
-  take about 4.8 GB per checkout; remove them with `rm -rf .next/e2e` when they
-  are no longer useful. Without the variable every suite uses `.next` as
+  (`next.config.ts` `distDir`), so suites do not fight over `.next/dev/lock` and
+  each one's compiled output lives in its own dir. Once every suite has
+  settled, the runner removes the dist dir of each suite that passed (about
+  360 MB each); a failed suite's dir is kept so its re-run
+  (`npm run test:e2e:all -- <suite>`) starts warm, and the final green run
+  clears it. An interrupted run (SIGINT/SIGTERM) removes nothing, and only
+  `.next/e2e/<suite>` is ever removed: `.next/dev` and `.next` are left alone
+. Without the variable every suite uses `.next` as
   before. With it, `next.config.ts` points Next at `tsconfig.e2e.json` (it
   extends the repo config), so `next dev` never rewrites the checkout's
   `tsconfig.json`.
-- Browser suites run `E2E_JOBS` at a time (default `min(2, cpus/2)`; 4 made suites hit their page-load timeouts on a 12-core box); all other
+- Browser suites run `E2E_JOBS` at a time (default `min(6, max(2, floor(cpus/4)))`,
+  `e2e/runner/jobs.mjs`: 6 on a 32-core host, 2 on 4–8 cores; the floor stays at 2
+  because 4 made suites hit their page-load timeouts on a 12-core box); all other
   suites (tmux, `pgrep`, scratch HOME) run one at a time in a separate lane.
   The first run after a clean checkout compiles cold and is slower and more
   sensitive to the suites' page-load timeouts; lower `E2E_JOBS` if a loaded
@@ -104,8 +110,8 @@ Failures save a screenshot, Playwright trace, and server log under
     because a busy host delays rendering, not correctness: the former 8 s of
     `polyforge-work-tab-163.mjs` timed out `locator.click` in the parallel bar
     (/#227/#235); `polyforge-panel-213.mjs` (former 10 s) takes it
-    as a precaution, since it shares that suite's `openDock()` click path
-. Other suites still spell their own default.
+    as a precaution, since it shares that suite's dock click path, the shared
+    `openPolyforgeDock()` in `e2e/polyforge-dock.mjs` (#247). Other suites still spell their own default.
 
   Override in milliseconds, e.g.
   `E2E_COLD_MS=540000 E2E_NAV_MS=240000 E2E_ACTION_MS=45000 npm run test:e2e:all`.
@@ -122,8 +128,12 @@ Failures save a screenshot, Playwright trace, and server log under
   10s bound is the acceptance), `polyforge-work-tab-163.mjs`
   (8 s click timeouts in the parallel bar,/#227/#235) and
   `polyforge-panel-213.mjs` (a precaution: named by and sharing
-  work-tab-163's `openDock()` click path; its S213-12 failures were a
-  context-read race, fixed in the suite, not a load bound). The
+  work-tab-163's dock click path, `openPolyforgeDock()` in
+  `e2e/polyforge-dock.mjs`; its S213-12 failures were a
+  context-read race, fixed in the suite, not a load bound), and
+  `claude-composer-272.mjs` (S272-12's launch count) and `run.mjs` (the
+  minimap jump's scroll wait), each red in both full bars and
+  green on every isolated re-run. The
   runner starts those suites only after both lanes have drained, one at a
   time, so another `next dev` + Chromium cannot push the bound over while the
   suite passes alone.
@@ -138,6 +148,12 @@ Failures save a screenshot, Playwright trace, and server log under
   - `FAIL e2e/<suite>: no scenario marker — <line>` for a failing suite that
     printed no marker (a crash, a timeout kill or a spawn error), quoting the
     runner's own `[all.mjs]` trailer, else the suite's last output line;
+  - a suite's own tally of red scenarios (`FAIL <suite>: <n> scenario(s)
+    failed`, any `FAIL` line counting `<n> … scenario(s)`) is a count, not a
+    scenario, and is not listed;
+  - `host loadavg 1m/5m/15m: <x> / <y> / <z>` once per failing suite: the host's
+    load average when that suite settled, two decimals each, the evidence a
+    load-sensitive flake classification needs;
   - `re-run: npm run test:e2e:all -- <suite>` once per failing suite: the
     targeted re-run of exactly that suite, to copy as is (also on a base commit).
 - Re-run only some suites: `npm run test:e2e:all -- polyforge.mjs run.mjs`.

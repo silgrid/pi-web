@@ -21,7 +21,8 @@ export async function POST(
       success: true,
       running: claude.isRunning(),
       awaitingInput: false,
-      subagentsActive: false,
+      // A background subagent whose end starts claude's follow-up turn here.
+      subagentsActive: claude.hasUnsettledSubagents(),
     }, { headers: { "Cache-Control": "no-store" } });
   }
   const session = getRpcSession(id);

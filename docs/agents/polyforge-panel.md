@@ -1,15 +1,19 @@
 # Polyforge dock panel (pi#108)
 
-A read-only Polyforge panel in the shared dock slot (the bg-tasks slot): a topbar
-button + right dock (desktop) / bottom sheet (mobile), a job card stream, and a selected
+A Polyforge panel in the shared dock slot (the bg-tasks slot) that reads the
+daemon through `GET /api/polyforge/**` and writes only through JSON-only POSTs:
+`POST /api/polyforge/messages` (send), `POST /api/polyforge/messages/ack` and
+`POST /api/polyforge/projects/members`, plus the configuration panel's pf-only
+writes (`config`, `config/reload`, the `config/history` rollback). It has a
+topbar button + right dock (desktop) / bottom sheet (mobile), a job card stream, and a selected
 work item's summary, step graph and execution progress. On a narrow phone (≤480px) the topbar button is
 resident, immediately right of the toolbar's ⋯ (More) button and left of the
 session-stats strip; the More overlay holds the other chat actions but never
 the Polyforge button. Files: `lib/polyforge-status.ts`, `lib/polyforge-messages.ts`,
 `lib/polyforge-messages-pure.ts`, `lib/polyforge-cards.ts`, `lib/polyforge-cards-pure.ts`,
-`lib/polyforge-panel-preferences.ts`, `lib/polyforge-disclosure.ts`, `lib/polyforge-messages-collapse.ts`, `app/api/polyforge/**`,
-`hooks/usePolyforge.ts`, `hooks/usePolyforgePanelPreferences.ts`, `hooks/usePolyforgeDisclosure.ts`, `hooks/usePolyforgeMessagesCollapse.ts`, `components/PolyforgePanel.tsx`,
-`components/PolyforgeMessages.tsx`, the `polyforge.*` wiring in
+`lib/polyforge-panel-preferences.ts`, `lib/polyforge-disclosure.ts`, `lib/polyforge-messages-collapse.ts`, `lib/polyforge-messages-list-collapse.ts`, `app/api/polyforge/**`,
+`hooks/usePolyforge.ts`, `hooks/usePolyforgePanelPreferences.ts`, `hooks/usePolyforgeDisclosure.ts`, `hooks/usePolyforgeMessagesCollapse.ts`, `hooks/usePolyforgeMessagesListCollapse.ts`, `components/PolyforgePanel.tsx`,
+`components/PolyforgeMessages.tsx`, `components/PolyforgeAnalysisCard.tsx`, `components/PolyforgeFileTicketDialog.tsx`, the `polyforge.*` wiring in
 `components/AppShell.tsx`, the dock width
 and sheet height constants in `lib/panel-layout.ts`, the resize handles
 `hooks/useResizablePanel.ts` / `hooks/useResizableSheet.ts` and their
@@ -55,55 +59,137 @@ probe; the section UI itself is in [settings-ui.md](settings-ui.md).
   `isApiRequestAllowed` re-checked in-route (403 is the only non-2xx).
 - `GET /api/polyforge/progress?wi=<wi_id>` (; whole-job since
 ) → 200 `{available, lines:[{id, kind:"narration"|"tool"|"event",
-  text, tone?, event?}], omitted}` — the selected job's execution progress:
-  every spawn of every step (reruns included) as one time-ordered stream of
-  narration, one masked tool line per call and one composed line per retained
-  lifecycle event, the newest 2000 lines with `omitted` the exact count of
-  earlier ones, read from the daemon's own files with no pf spawn, for a
-  running job and for a finished one only while the daemon's job index still
-  holds it — the daemon drops a terminated job moments after its terminal
-  event, and from then on the route answers 400 `unknown work item` (the drop
-  paragraph of the section linked below); `tone` and `event` (the raw daemon
-  kind) ride `event` lines only, `tone` absent = neutral; see
+  text, variant?, tone?, event?, at?, tool?}], omitted}` — the selected job's execution progress:
+  every spawn of every step (reruns included) as one complete time-ordered
+  stream of narration, one masked tool line per call and one composed line per
+  retained lifecycle event, read from the daemon's own files with no pf spawn,
+  for a running job and for a finished one only while the daemon's job index
+  still holds it; the daemon drops a terminated job moments after its terminal
+  event, and from then on the route serves that job from its event log alone
+  (`events/wi-<wi>.jsonl`,): its lifecycle lines, the final
+  `terminal` / `job_stopped` included, and no narration or tool line, since
+  the capsule is no longer named (the drop paragraph of the section linked
+  below); `variant:"thinking"` (optional, narration only) marks a line
+  projected from a non-empty `thinking` block; `tone` and `event` (the raw
+  daemon kind) ride `event` lines only, `tone` absent = neutral; `at` (the
+  event's time, epoch ms, when readable) rides `event` lines only and times
+  the spawn block heads; `tool` rides `tool` lines only and is
+  the light `{name, argument?, status:"ok"|"error"|"running", durationMs?}`
+  (the masked primary argument in full, the status from the
+  paired result, the duration only when the call and its result both carry a
+  timestamp) — a call's full input and output never ride this 2 s poll, they
+  are read on demand from `GET /api/polyforge/progress/tool`; narration `text`
+  keeps its original whitespace (masked only) since, so it
+  renders as Markdown; there is no line bound and no per-line length cap since
+, and `omitted` stays `0`; see
   [Job detail layout and execution progress](#job-detail-layout-and-execution-progress).
   A `wi` that is not the daemon's `wi_…` id shape answers 400 before any file
   read. A missing, unreadable or non-JSON `runtime-state.json` answers 200
   `{available:false, lines:[], omitted:0}` (the #210 ledger's
-  N6); a readable index with no such job answers 400 `{error:"unknown work
-  item"}` before any capsule read. A job record without a capsule, a capsule
-  with neither a readable spawn journal nor a readable event log, a job whose
-  transcripts exceed the 128 MiB safety bound, or any error answers 200
-  `{available:false, lines:[], omitted:0}`; an outside-root, missing or
+  N6); a readable index with no such job, or a record without a capsule, is
+  answered from the event log, and only a wi with neither an index record nor
+  a readable event log answers 400 `{error:"unknown work item"}`, before any
+  capsule read. A record without a capsule and without a readable event log,
+  a capsule with neither a readable spawn journal nor a readable event log, a
+  job whose transcripts exceed the 128 MiB safety bound, or any error
+  answers 200 `{available:false, lines:[], omitted:0}`; an outside-root, missing or
   partially written transcript only contributes no line — never 5xx, no
   response names a path. GET only (other methods 405), `isApiRequestAllowed`
   re-checked in-route (403); the two 400s and the 403 are the only non-2xx
   answers.
+- `GET /api/polyforge/progress/tool?wi=<wi_id>&id=<tool line id>`
+ (`app/api/polyforge/progress/tool/route.ts`) → one tool call's
+  full detail for an expanded progress tool card, read only when a reader
+  expands that card. Reach: pi-web's authenticated surface — the same
+  in-route `isApiRequestAllowed` gate as the progress route, answering the
+  same 403 `{error:"Forbidden"}`; GET only (405 otherwise); it reads only,
+  logs nothing, writes nothing, reads no env of its own. Validation before any
+  file read: a `wi` that is not the `wi_…` shape and an `id` that is not the
+  progress line id shape (`<16 hex>.<decimal offset>.<decimal block>`, no
+  path) are 400; a wi with neither an index record nor a readable event log is
+  400 `unknown work item`. Otherwise 200 `{available:true, hasResult,
+  tool:{name, argument?, status, durationMs?, input, output, isError}}` —
+  `input` (a string argument as is, else indented JSON) and `output` (the
+  result's text blocks joined by a newline, any other block a neutral
+  `[image]` / `[<type>]` placeholder) both complete and masked by
+  `maskPolyforgeCredentials`, `output: null` and `hasResult:false` while no
+  result is paired — or 200 `{available:false, error}` (a fixed reason) when
+  the job index, the capsule, the transcript (moved, replaced — a new inode is
+  a new identity — or over the 128 MiB bound) or the call is no longer
+  readable. Never 5xx; no answer names a path. The read
+  (`readProgressToolDetail`) resolves the same spawns and transcripts as the
+  progress read (same realpath containment), reads only the transcript whose
+  identity the id names, and keeps only that call's input and result.
 - `GET /api/polyforge/config?cwd=…` → 200
   `{pfPresent, pfVersion, capable, reason?, file?:{sha256,exists},
   items:[{key,value?,set?,source?,class,schema?,daemon?,stale_reason?}],
   mapped, daemonReachable?, reload?:{pending,overridden,maxConfigured?},
-  summarize?, steps?, steps_complete?}`. Every fact comes from
-  `pf --json config list`,
+  steps?, steps_complete?, memoryPolicy?, summarizeReason?}`. Every fact
+  comes from `pf --json config list`,
   `pf --json config workspace --cwd …` and `pf --json ops status`; an unknown
-  class passes through verbatim, and a summarize item's `class` comes from
-  pf's workspace read (never a UI copy). `daemonReachable:false` means the ops
+  class passes through verbatim. (salvaging #273's pi-web
+  half onto the #286 wire): summarize and the memory policy are cli.toml
+  facts and come ONLY from `pf --json config list` — the three `summarize.*`
+  items (value, source, class, schema; `withListSummarize` in
+  `lib/polyforge-config.ts`) and its top-level `memory_policy` object,
+  sanitized to `memoryPolicy` (`{<workspace path>: {<default|project>:
+  {record, skip, declared}}}` — `default` carries its effective lists
+  (declared, else built-in), each project its OWN declared lists, never
+  pre-merged; an empty object stays empty; read-only). Their floor is
+  `POLYFORGE_CONFIG_SUMMARIZE_MINIMUM_PF_VERSION = "2.20.21"` (the pf release
+  carrying #286, `docs/upgrade.md` v2.20.21; defined once in the
+  browser-safe `lib/polyforge-config-schema.ts` and re-exported by
+  `lib/polyforge-config.ts`): below it — and a missing or unparseable
+  version counts as below, through `isPolyforgeVersionBelowMinimum`'s
+  opt-in `unknownIsBelow` argument (its default stays false, so the panel's
+  own `2.20.6` floor and every other floor are unchanged) — or for a list
+  that carries no `summarize.*` item, every `summarize.*` item is dropped,
+  `memoryPolicy` is absent and `summarizeReason` is set; the cli.toml card
+  then renders ONE localized hint (`polyforge.settings.summarizeFloorHint`,
+  naming `2.20.21` and the found version or 「an unparseable version」) in
+  place of the hidden zone and blocks. No `config workspace` read stands in
+  for them, and the rest of the panel keeps its own floor. A
+  `summarize`/`memory_policy` field a drifted workspace document still
+  carries is ignored: `sanitizeWorkspace` returns `mapped`, `steps`,
+  `steps_complete` and `workspaceFile` only. (#255's "summarize read only
+  from the workspace yaml" ruling is superseded by the owner's 2026-11-02
+  ruling that #286/#290 carry.)
+  `daemonReachable:false` means the ops
   read failed. Capability is the `2.20.6` floor AND the list
   shape (`file.sha256` plus `class` on every item); below it the read is still
   200 with `capable:false` and a visible `reason`, and no workspace/write verb
   is spawned. api_key always carries set/unset only. adds, from
-  the same workspace read: each `steps[]` entry's `source` (`file` |
+  the workspace read: each `steps[]` entry's `source` (`file` |
   `default`), `class` (`live`) and `attrs` (`{<name>: {value?, declared,
   source, class, default?, schema?}}` — every attr an installed bundle
-  declares for the step id plus every override the file declares), the
-  unconditional `default` and `task` entries of every mapped project, and
-  `memoryPolicy` (`{source, class, appendToDefault, default:{record, skip,
-  declared}, projects:{<project>:{record, skip, declared}}}` — each project's
-  OWN declared lists, never pre-merged; read-only).
+  declares for the step id plus every override the file declares) and the
+  unconditional `default` and `task` entries of every mapped project.
 - `POST /api/polyforge/config` the only write entry point.
   JSON body `{action:"set"|"unset", key, value?, cwd?, expect_state?}`; the
-  exact writable allowlist is `max_concurrent_jobs`, `step_timeout`,
-  `stall_window`, `summarize.models`, `summarize.language`,
-  `summarize.interval_sec`, `api_key`. Every mutation is a `pf config set|unset`
+  exact writable allowlist is every non-secret cli.toml key —
+  `max_concurrent_jobs`, `step_timeout`, `stall_window`, `claude_bin`,
+  `server`, `daemon_socket`, `user_id`, `harness_root`, `operator_agent_dir`
+  — plus `api_key` and the cli.toml `[summarize]` keys `summarize.models`,
+  `summarize.language`, `summarize.interval_sec` (written like
+  every cli.toml key — `pf config set|unset summarize.<key>` with no `--cwd`,
+  the cli.toml sha256 and its declared values as `--expect-state`, the
+  history's `old` from `config list`, a mapped cwd not required; a rollback
+  derives its scope from the key, so a pre-#286 entry recorded against a
+  workspace yaml rolls back through the same flat path as a new entry;
+  below the 2.20.21 summarize floor, or with an unknown version,
+  `assertSummarizeWriteCapability` answers 400 naming the floor and the found
+  version before any write spawn, shown under the row as the localized
+  `polyforge.settings.summarizeWriteRefused`);
+  memory_policy is never writable from the panel; `WRITABLE_KEYS` is built
+  from the same `lib/polyforge-config-schema.ts` constants the form renders
+  from (`CLI_WRITABLE_KEYS`, `SUMMARIZE_KEYS`). The `[workspace."<path>"]`
+  mapping stays read-only (a mapping change needs a daemon restart). The
+  route's shape guard adds only a non-empty check for the six string/path
+  keys (`NON_EMPTY_STRING_KEYS`); every other judgment is pf's. A save never
+  calls `config reload`, `ops shutdown` or `daemon ensure`; the connection
+  keys (`server`, `api_key`, `daemon_socket`, `user_id`) are confirmed in the
+  form first ([settings-ui.md](settings-ui.md)) and their saved row offers the
+  history rollback below (never api_key). Every mutation is a `pf config set|unset`
   spawn; api_key goes on stdin only, never argv, and is never echoed in a
   response, error, log or history entry. pi-web writes neither config file.
   `expect_state` is the read snapshot `{file_sha256, values}`, so a refusal is
@@ -126,9 +212,23 @@ probe; the section UI itself is in [settings-ui.md](settings-ui.md).
   spawn; pf's own `CORE-501` refusal is the same fact on the CLI side.
 - `GET /api/polyforge/workflows?cwd=…` → 200
   `{pfPresent, pfVersion, capable, reason?, workflows: <pf workflows doc> | null,
-  workspace: <declared values> | null}` — the Settings › Polyforge workflow
+  workspace: <declared values> | null, workspaces?: [{workspace, workflows,
+  declared, reason?}]}` — the Settings › Polyforge workflow
   card's read, assembled by `readPolyforgeWorkflows(cwd)` in
-  `lib/polyforge-workflows.ts`: `pf --json workflows --cwd` (bundles, their
+  `lib/polyforge-workflows.ts`. makes it the union of every
+  cli.toml-mapped workspace: one `pf --json config list` reads the
+  `[workspace."<abs path>"]` mapping (`mappedWorkspacesFromList`; only an
+  absolute path becomes a `--cwd`), then each mapped workspace W is read with
+  its own `--cwd W` — `pf --json config workspace` first, then
+  `pf --json workflows` — the workspaces in parallel, each degraded on its
+  own (a failed read is that entry's `reason`, never the whole answer's).
+  Bound: 1 mapping read + 2 reads per mapped workspace per call, never one
+  spawn per project, nothing cached. The top-level `workflows`/`workspace`
+  stay the settings cwd's own workspace (the entry containing the cwd, else
+  null); the page-level `reason` is the daemon's, or every workspace's
+  failure when none could be read. A machine with no mapping (or an
+  unreadable list) reads the cwd alone, as #216 did. The yaml sanitizer
+  carries each workspace's `yaml.path`. Per workspace: `pf --json workflows --cwd` (bundles, their
   steps in declared order with `model_candidates`, declared `attrs` and each
   mapped project's `effective` chain + `from`, `defaults.effective`, `task`,
   `bundle_errors`, `daemon_reachable`, `write_capable`/`write_reason`) and
@@ -151,9 +251,11 @@ probe; the section UI itself is in [settings-ui.md](settings-ui.md).
 - `GET|POST /api/polyforge/config/history` the bounded
   (50-entry) panel history at `<agentDir>/polyforge-config-history.json`
   (mode 0600, newest first). POST is rollback: a fresh read, then the same CAS
-  write path, recorded as a new entry; a workspace entry rolls back into its
-  own resolved workspace (never the panel's current cwd) and a null old value
-  rolls back to `unset`. api_key entries are `rollbackable:false`
+  write path, recorded as a new entry; a workspace (step-key) entry rolls back
+  into its own resolved workspace (never the panel's current cwd), the scope
+  always derived from the key — a `summarize.*` entry, a pre-#286 one recorded
+  against a workspace yaml included, rolls back as a flat cli.toml write
+  and a null old value rolls back to `unset`. api_key entries are `rollbackable:false`
   and store set/unset only.
 - The panel these routes feed (`components/PolyforgeConfig.tsx`, styled in
   `app/settings.css`; layout in [settings-ui.md](settings-ui.md)): at ≤ 640px a
@@ -161,14 +263,57 @@ probe; the section UI itself is in [settings-ui.md](settings-ui.md).
   end,) with the file value and the daemon value spanning the
   row below; the 640px breakpoint and the wider shared-column layout are
   unchanged.
-  the summarize keys, the `[workspace]` mapping and the read-only
-  `memory_policy` (from the config read's `memoryPolicy`) render as ONE
-  工作区 / Workspace card, each row tagged with its source file (`cli.toml` /
-  `.polyforge.yaml`) and keeping its own write path (mapping: cli.toml through
-  pf; summarize: the yaml writer; memory_policy: none); the legend and the
-  grid header of every card sit above its fold, so collapsing hides rows only.
+  the page's machine-scope hint
+  (`polyforge.settings.configMachineScope`) has its own class,
+  `p.config-machine-scope-hint`: at the desktop width it is one line
+  (`white-space: nowrap`, `text-overflow: ellipsis`) with the full text as its
+  `title`; at ≤ 640px it shows the whole text (no ellipsis, no nowrap) with
+  `text-wrap: balance`, so no line is a one-glyph orphan. The shared
+  `.config-scope-switch-reason` (`max-width: 320px`) and its other users are
+  untouched.
+  the workflow card's `pf submit --models` precedence note
+  (`polyforge.settings.workflowSubmitNote`) is a full sentence, so it has its
+  own class, `p.polyforge-workflow-submit-note`: the same dim 11px type as a
+  scope-switch reason but without the shared class's `max-width: 320px`, so it
+  stays on one line at ≥ 768px and wraps at whole tokens, without overflow, at
+  390px. The shared `.config-scope-switch-reason` rule and its remaining users
+  are untouched (owner-intended).
+/#290: the cli.toml keys render as ONE cli.toml card with a
+  top-level zone, a `[daemon]` zone and a `[summarize]` zone (literal section
+  headers; per-zone counted folds of the advanced keys — the summarize rows
+  are all common and stay editable with an unmapped cwd — machine-level
+  values; the daemon column only in `[daemon]`), then the summarize
+  floor's upgrade hint when present, then the read-only `cli.toml
+  [memory_policy]` zone: one group per workspace path (sorted, the path
+  shortened in the label, the full path as its title), `default` first and
+  the projects sorted (`policyEntryNames`), each row a `memory_policy.<entry>`
+  with its record/skip chips and the next-claim badge, never an input.
+  The 工作区 / Workspace card holds the cli.toml `[workspace]` mapping rows
+  only (folded under its counted control, tagged `cli.toml`); it presents
+  neither summarize nor memory_policy. The legend and the grid header of
+  every card sit above its fold, so collapsing hides rows only.
   The read-only declared-candidates card and its disclosure region are gone —
   the workflow card ([below](#workflow-card)) carries those facts.
+ tests: the read/sanitizer unit tests parse a real
+  `pf --json config list` recording (`lib/__fixtures__/polyforge-config-list-2.20.21/`,
+  pf built from acme `18412ea6`, provenance in its README); the authored
+  acceptance suite is `e2e/polyforge-config-290.mjs`. The six existing suites
+  were flipped as an owner-intended change (at review), not a weakening:
+  `polyforge-config-255.mjs` S12 now pins a flat summarize write from the
+  cli.toml card (no `--cwd`, the cli.toml CAS) where it pinned the yaml tag
+  and `--cwd`, and its list summarize items are the values (the old
+  "a drifted list item loses to the yaml" pin is gone with the yaml source);
+  `polyforge-config-panel.mjs` S1 reads one machine-level interval and the
+  per-path `memoryPolicy` where it pinned per-workspace summarize (30 vs 90),
+  and S8 adds the flat summarize write and the 2.20.21 floor (read hides both
+  groups with `summarizeReason`, a summarize write is 400 with no set spawn);
+  `polyforge-config-simplify-212.mjs` counts the `[summarize]` zone and the
+  visible `[memory_policy]` rows in the cli.toml card and a mapping-only
+  工作区 fold; `polyforge-config-layout.mjs` and `polyforge-config-viewport.mjs`
+  probe the `[summarize]` zone as the third cli.toml zone; and
+  `polyforge-workflow-216.mjs` W216-5 reads the policy from `config list`
+  and W216-26 finds it read-only in the cli.toml card (its pf is built at
+  `v2.20.21`), keeping every workflow-card and spawn-determinism pin.
 - `GET /api/polyforge/detect[?force=1]` (pi#122, the Settings Polyforge section)
   → 200 flat `{pfPresent, pfVersion: string|null, pfVersionBelowMinimum,
   line: "internal"|"public"|"unknown", piSkillInstalled, piSkillEnabled,
@@ -251,6 +396,28 @@ work-item links) sets Work › Jobs and the selection — never 工单列表. Th
 cards poll is gated on `activeTab === "work" && workTab === "jobs"`; the
 Tasks and work-item surfaces read only while they are mounted.
 
+## Search bars
+
+Work › 工单列表, Memory and Tasks render through one layout:
+`components/PolyforgeSearchBar.tsx` plus its `.pf-searchbar` rules in
+`app/globals.css`, each root carrying `data-pf-searchbar`. Row 1 is the
+search input (`flex: 1`, its `aria-label` and `title` plus a placeholder)
+and one square icon action
+(`data-pf-searchbar-action`) on its right; row 2 is that surface's filters.
+Desktop controls are 26px high with a `1px var(--border)` border, radius 4,
+12px font and `var(--bg)` background, and the filters share one equal-width
+row. At ≤640px row 1 never wraps, the filters become a two-column grid (an odd
+last control spans the row), every input/select/action is at least 40px high
+(the action 40×40, the any-word checkbox's label cell 40px), and the global
+16px mobile input/select font stays. The surface keeps its own semantics:
+工单列表 filters as you type and its ↻ is the one manual list re-read (#204's
+busy contract, one existing `GET /api/polyforge/work-items` per click);
+Memory still applies its keyword only on Enter or the 🔍 action (accessible
+name `polyforge.memory.search`), and a project/type/tags change still
+re-issues the current read; Tasks' existing ↻ is unchanged. Memory's visible
+field labels are gone — each control keeps `aria-label` + `title` and the text
+inputs a placeholder, while the any-word checkbox keeps its visible text.
+
 ## Messages tab (layout redone in)
 
 The Messages tab is the human
@@ -284,8 +451,13 @@ sits the bubble stream pane: the open conversation's header shows the
 peer's avatar and display name, own bubbles
 are right-aligned with no name and no avatar, peer bubbles are left-aligned
 with the avatar and name only on the first message of a consecutive run, and
-every bubble keeps its timestamp (HH:MM from `created_at`), work-item
-anchor and reply quote. Every identity surface renders the display name or
+every bubble keeps its timestamp (HH:MM from `created_at`), inline
+work-item links, the historical anchor line where it is not already inline,
+and its reply quote. Own bubbles carry 【引用】 (引用 / Quote): it appends a
+plain-text quote block (`> ` per line, an empty line as `>`, then one blank
+line) to the composer — never sending, never overwriting it, leaving a
+pending reply target untouched, and appending again on repeated clicks —
+while peer bubbles keep the unchanged 【回复】. Every identity surface renders the display name or
 the 未知用户 placeholder with a ? avatar — a raw user id is never rendered,
 titled or labelled anywhere. An absent or empty `peer_name` (the old-aihub
 transient included) or a blank contact `display_name` is the placeholder,
@@ -307,9 +479,11 @@ carries a direct conversation whose peer is the open contact
 (the empty pane had no history). At every width — the ≤640px sheet
 included (replacing the earlier one-view-at-a-time mobile
 switch) — the same component keeps both panes side by side. On the mobile
-sheet the list column stays the fixed `clamp(120px, 35%, 220px)` with its
-left divider and no resize handle (about 131px at a 375px sheet, the 120px
-floor at 320px;); the chat pane sits beside it, shows
+sheet the expanded list column keeps the fixed
+`clamp(120px, 35%, 220px)` with its left divider and no resize handle (about
+131px at a 375px sheet, the 120px floor at 320px;), and folds to
+its own 40px strip through the shared key (below); the chat
+pane sits beside it, shows
 选择一个会话 (`polyforge.messages.select`) while nothing is open — nothing is
 auto-opened — and carries the ← back control that closes the open conversation
 or contact. Inside an open conversation the
@@ -340,6 +514,33 @@ none, the same empty contact pane a silent row opens — no conversation is
 created and nothing is acknowledged. The groups, folding, notices, picker and
 remove controls work the same in the ≤640px sheet; the #222 list width and the
 mobile clamp with no handle are untouched.
+
+**Contact-column strip (; the ≤640px sheet folds too,
+).** On desktop the list column carries a
+collapse control (收起联系人列, top right of the column) that folds the whole
+column to a fixed 28px strip; the chat pane takes the remaining width. The
+strip carries the expand control (展开联系人列) and the total-unread indicator
+(`data-unread-dot`, labelled with the panel's own total — filled while
+anything is unread, an empty ring at zero). While folded the #222 resize
+separator is not rendered and no width is written, so expanding shows the
+width stored under `pi-web:polyforge-messages-list-width` again (#222's
+bounds, default and `persistClamp: false` are unchanged). The state is one
+global value under its own key `pi-web:polyforge-messages-list-collapsed`
+(`lib/polyforge-messages-list-collapse.ts`, read through
+`hooks/usePolyforgeMessagesListCollapse.ts`; `"1"` folded, anything else —
+absent, corrupt, blocked — expanded; a write storage refuses still folds the
+column for the page; a change event plus `storage` keep the open page in
+step), separate from #222's width and #223's project groups, which still fold
+independently. The same key folds the ≤640px sheet: expanded,
+it has a 40px-tall column header row holding the 单聊 heading and, at its
+right end, a 40×40 collapse control that overlaps no contact row; folded, the
+column is a 40px strip flush with the panel's right edge, with a 40×40 expand
+control at its top and the same unread dot below it. Expanding the sheet
+restores its fixed `clamp(120px, 35%, 220px)`; the sheet keeps its ← control
+and still renders no resize handle. Folding is manual only (opening a
+conversation never folds the column). A browser folded on desktop shows the
+strip on the sheet and vice versa; folding writes none of #222's width or
+#223's group keys.
 
 **Collapse state.** The folded projects are stored in this browser under
 `pi-web:polyforge-messages-collapsed` (`lib/polyforge-messages-collapse.ts`,
@@ -384,9 +585,13 @@ helpers, `directRows`, the flat direct area's row sequence,
 `conversationForContact`, `buildProjectGroups` and `contactsOutsideGroups`),
 `lib/polyforge-messages-collapse.ts` + `hooks/usePolyforgeMessagesCollapse.ts`
 (the collapse key),
-`app/api/polyforge/messages/**` (the four routes),
+`lib/polyforge-messages-list-collapse.ts` + `hooks/usePolyforgeMessagesListCollapse.ts`
+(the contact-column strip's key,),
+`app/api/polyforge/messages/**` (the five routes, `file-ticket` included),
 `app/api/polyforge/users/route.ts`, `app/api/polyforge/projects/members/route.ts`,
-`components/PolyforgeMessages.tsx`.
+`components/PolyforgeMessages.tsx`, `components/PolyforgeAnalysisCard.tsx`,
+`components/PolyforgeFileTicketDialog.tsx`, and the task link's hand-off in
+`components/PolyforgePanel.tsx` / `components/PolyforgeTasks.tsx`.
 
 **Routes** (all re-check `isApiRequestAllowed` in-route; every read answers
 200 JSON, every write is a JSON-only POST):
@@ -451,11 +656,67 @@ helpers, `directRows`, the flat direct area's row sequence,
   `{error}` only: there is no invented error-code field. pf runs with `--json`,
   so its stderr envelope `{code, detail}` (or plain `CODE: text`) is decoded
   and only `detail` reaches the panel.
-- `POST /api/polyforge/messages/analyze` — `{message_id}`; one read-only
-  `pf --json msg analyze` read. The conclusion exists only in the response
-  and in component state; DAEMON-409 is a 409, DAEMON-500/unavailable is a
-  200 `{error}` (this repo has no 5xx route path). The analyzer spawn waits
-  at least five minutes (the ruling; a real one-shot is an LLM call).
+- `POST /api/polyforge/messages/analyze` JSON-only
+  `{message_id}`, validated before any spawn. pf below the **analysis floor**
+  (`POLYFORGE_ANALYZE_MINIMUM_PF_VERSION = "2.20.18"`, the release whose
+  `pf msg analyze` runs one task) answers 400 `{error, upgrade: true}` and
+  spawns no `pf msg analyze`; the Messages floor (2.20.12) and every other
+  verb of the tab are unaffected. Then exactly one `pf --json msg analyze <id>`,
+  which pf runs as one read-only task (5 min / 100000 tokens) and which blocks
+  until that task ends — the spawn's bound is 420 s, outlasting pf's 6-minute
+  wait. The answer is `{ok: true, analysis}` with the structured analysis
+  passed through the one sanitizer `parsePolyforgeAnalysis`:
+  `{message_id, task_id, project, type, summary, suggested_actions, model, duration, reply_draft?}`
+  — a task id, `type` one of the closed set `requirement | bug | ruling |
+  discussion | clarification | outreach | other` and a non-blank summary are
+  required; `suggested_actions` keeps only `file_ticket | reply | note_only`
+  (unknown and duplicate members dropped); `reply_draft` survives only beside
+  `reply` and within pf's 4096-byte send bound; the summary is cut to 2000
+  code points with `…`. Any other answer is the typed "the analyzer answered
+  no structured result" (DAEMON-500) — the retired `conclusion` field is
+  neither read nor answered, and there is no second shape. pf's typed refusals
+  keep their 4xx (DAEMON-409 both task slots busy, DAEMON-400 no task model
+  chain, DAEMON-412 unmapped project); DAEMON-500 (a `failed`/`capped`/
+  `interrupted` task, named in pf's text) and an unreachable pf answer 200
+  `{error}` (this repo has no 5xx route path). The analysis exists only in the
+  response and in page memory; nothing is written or logged.
+- `POST /api/polyforge/messages/prompt` the Messages 「@」
+  action. Reach: pi-web's authenticated surface only (the in-route
+  `isApiRequestAllowed` gate, 403). JSON-only `{message_id}`, validated
+  before any spawn. pf below the **prompt floor**
+  (`POLYFORGE_PROMPT_MINIMUM_PF_VERSION = "2.20.20"`, the release shipping
+  `pf msg prompt`; checked with a fresh `pf --version` per click) answers 400
+  `{error, upgrade: true}` and spawns nothing. Then exactly one
+  `pf --json msg prompt <id>` — one read-only pf task (5 min / 100000 tokens)
+  that restates the message, its ≤10 most recent earlier messages, its
+  replied-to message and its anchored work item as a self-contained
+  execution prompt — under the analyze bound (420 s). The answer is
+  `{ok: true, prompt}` through the one sanitizer `parsePolyforgePrompt`:
+  exactly `{prompt, task_id, model, duration}` (a non-blank prompt and a task
+  id required, extra fields dropped; any other shape is the typed "the prompt
+  task answered no prompt", DAEMON-500). pf's typed refusals keep their 4xx
+  (DAEMON-409 both task slots busy, DAEMON-400 no task chain, DAEMON-412
+  unmapped project, AUTH-403/CORE-404 an unreadable message); DAEMON-500 (a
+  failed/capped/interrupted task or a blank report) and an unreachable pf
+  answer 200 `{error}`. The prompt exists only in the response and in the
+  panel's component memory; nothing is written or logged.
+- `POST /api/polyforge/messages/file-ticket` the analysis
+  card's 【建票】 confirm, JSON-only `{goal, project, content}`. Reach:
+  whoever can already reach pi-web's authenticated surface — the same in-route
+  `isApiRequestAllowed` gate as the other messaging writes (403); it holds no
+  aihub credential, proxies no aihub route, writes no config file and logs no
+  request or response body. Before any write spawn: non-JSON is 415, an
+  unparsable body 400, pf below the Messages floor 400 with its reason, then
+  the mapping is read (`pf --json config list`) and the body validated — a
+  blank or multi-line goal or one over 500 characters (pf's goal bound), a
+  project that is not exactly one mapped name, a blank content or one over
+  64 KiB, a content pf would read as a file or stdin (`@path`, `-`) are 400.
+  Then exactly one `pf --json file create --project <p> --goal <g> --content <c>`
+  — never `--bundle`, so the result is a **registration ticket**: not
+  claimable, no lane chosen, the filing discipline untouched. Success is
+  `{ok: true, slug}`; pf's typed refusal keeps its 4xx with pf's text;
+  DAEMON-500, an untyped or unreachable pf answer 200 `{error}` — never 5xx,
+  never retried.
 - `GET /api/polyforge/users` → 200
   `{pfPresent, pfVersion, capable, reason?, admin, users:[{id,display_name}], error?}`.
   The admin probe and the membership picker's data: behind the Messages floor
@@ -489,7 +750,18 @@ helpers, `directRows`, the flat direct area's row sequence,
 `isPolyforgeVersionBelowMinimum`. Below it the panel renders a visible
 "pf upgrade required" state with the reason and spawns no message, contact,
 `projects get`, `users list` or `projects members` verb; there is no read-only or conversation-only fallback, and at or above it
-there is no separate "contacts unavailable" path. pf absent keeps the dock's existing degradation.
+there is no separate "contacts unavailable" path. pf absent keeps the dock's existing degradation. The message analysis has its own,
+higher floor: `POLYFORGE_ANALYZE_MINIMUM_PF_VERSION = "2.20.18"`
+(`lib/polyforge-messages-pure.ts`, re-exported by `lib/polyforge-messages.ts`),
+checked by `readPolyforgeAnalysisCapability` over the same probe and compare;
+below it only the analysis entry is refused (the upgrade text, no
+`pf msg analyze`), and the rest of the tab keeps working at 2.20.12. The
+「@」 action's prompt floor is
+`POLYFORGE_PROMPT_MINIMUM_PF_VERSION = "2.20.20"` — the polyforge
+`docs/upgrade.md` section of the same version ships `pf msg prompt` — checked
+by `readPolyforgePromptCapability` with a fresh probe per click; below it the
+「@」 stays visible and only its route refuses (the upgrade text under the
+message, `polyforge.messages.promptUpgrade`).
 
 **Cadence.** Messages ride the dock's existing timers — 3 s while the panel is
 open, 30 s while closed; the contacts and the project groups ride the same
@@ -513,13 +785,130 @@ while a local job is blocked; the blocked state suppresses only the
 **arrival** scroll-to-bottom write, so no programmatic `onScroll` can turn
 into an ack.
 
-**Anchors and analysis.** `splitAnchor` makes only the work-item prefix
+**Anchors.** `splitAnchor` makes only the historical work-item prefix
 (`task-42`, `proj#12`, `wi_…`) clickable; the rest of a deep reference
 renders as text and is never fetched. Clicking it switches to Jobs and runs
-the existing watch read for that ref. The analyzer control renders only when
-the sanitized message says `mine: false`; its conclusion is component state,
-dropped when the dock closes, never written to storage or disk. Incoming
-messages never enter a chat session, an agent turn or the composer.
+the existing watch read for that ref. folds the composer's
+separate anchor field into the message text: one shared token definition
+(`@` at text/line start or after a non-word character, a project
+`[A-Za-z0-9][A-Za-z0-9_-]*`, `#`, digits, and no word character after them;
+`@acme#272` and `@acme#272，` hit, `@acme#272abc` and
+`a@acme#1` miss) feeds both sides. On send, `about_wi` is the first
+token outside a line whose first character is `>` whose project exactly
+(case-sensitive) matches one of the panel's mapped project groups; otherwise
+the send carries no `about_wi` — no notice, no block, no extra read, and the
+text is sent verbatim with the `@` token. In every bubble body every valid
+token renders in place as a link showing the `@` text; clicking it (with
+propagation stopped) opens Work › Jobs through the same `onOpenAnchor` watch
+read. Rendering only checks the syntax, never the project table. The separate
+anchor line above a bubble stays except when `about_wi` equals a token
+present in that bubble's own text; historical anchors (`task-42`, a
+`/path` suffix, `wi_…`) therefore keep rendering exactly as before, and the
+no-`about_wi` de-emphasis rule is unchanged. The message textarea keeps its
+「消息」 label and gains the `@项目#号` placeholder (`polyforge.messages.textPlaceholder`,
+all three locales); the `polyforge.messages.anchor` key and field are gone.
+Incoming messages never enter a chat session or an agent turn; text reaches a
+composer only by an explicit click — 【回复】's reply draft in the Messages
+composer, or the 「@」 action's pf-written execution prompt in the bound
+session composer (below) — and is never sent.
+
+**Message analysis.** Every received message — direct and
+group, `mine: false` — carries an inline Analyze button with an icon and text
+(分析 / Analyze) in the normal foreground colour; the user's own messages carry
+none, and there is no hover-only control or ⋯ menu. One click starts exactly
+one analysis of that message. The in-flight state is per message: while its
+request waits, that message's control is disabled (分析中…, a spinning icon)
+and starts no second task, another message's analysis may still start (pf has
+no analyzer lock — only the task lane's two slots bound it) and the chat stays
+usable. A refusal — both slots busy, no task model chain, an unmapped project,
+a failed/capped/interrupted task, pf's own text — renders in that message's
+own slot with the control left available to retry, never in the composer's
+send-error line. Below the analysis floor (2.20.18) the click spawns no
+`pf msg analyze` and the slot shows the upgrade text
+(`polyforge.messages.analysisUpgrade`).
+
+A result renders as a collapsible card under its message
+(`components/PolyforgeAnalysisCard.tsx`), replacing the retired one-line gray
+conclusion text. Its header — the localized type badge
+(`polyforge.messages.analysisType.<type>`: en Requirement / Bug / Ruling /
+Discussion / Clarification / Outreach / Other; zh-CN 需求 / 缺陷 / 裁定 / 讨论 /
+消歧 / 外联 / 其他; zh-TW 需求 / 缺陷 / 裁定 / 討論 / 消歧 / 外聯 / 其他; never the
+raw enum), `model · duration` and the expand/collapse control
+(`aria-expanded`, 收起卡片 / 展开卡片) — and its action row are always shown;
+the body — the summary and the task link (任务 `<task id>`) — only while
+expanded. The card opens expanded; which cards are collapsed is component
+memory. The action row always carries 【建票】 and 【回复】: the suggested one
+(`primarySuggestedAction`: `reply` when suggested, else `file_ticket`) is the
+primary (accent) button, the other secondary, and both are secondary for
+`note_only` or no suggestion. The task link switches the dock to Work › Tasks
+and runs that task's existing detail read once (`openTaskId` handed to
+`PolyforgeTasks`, whose detail header then names the task).
+
+【建票】 opens a confirmation dialog (`components/PolyforgeFileTicketDialog.tsx`):
+the goal prefilled with the summary's first sentence (the analysis's suggested
+next step, within 500 characters), the project a select over the mapped
+projects (the Messages project groups) defaulting to the analysis's project
+(else the first mapped one), the content prefilled with the source message
+reference (`消息 <id>: "<quote>"`) followed by the summary — every field
+editable. Cancel, Escape, the backdrop or closing writes nothing and leaves the
+card unchanged. Confirm makes exactly one `POST /api/polyforge/messages/file-ticket`
+(one bundle-free `pf file create`: a registration ticket); on success the
+dialog closes and the card names the created slug (已建票 `<slug>`); on a
+refusal the dialog stays open with pf's text, nothing is created and nothing
+is retried. 【回复】 sets that message as the composer's reply target and,
+when the analysis carries `reply_draft`, fills the composer with it (still
+editable); without a draft the composer keeps its text. It never sends and the
+card stays. The composer's fields are named by their own labels (`htmlFor`),
+so a filled draft never becomes part of the field's accessible name.
+
+The analyses are page memory only: the hook's `analyses` map by message id
+survives conversation and tab switches inside the page, is dropped when the
+dock closes, and is gone after a reload (the message can be analyzed again —
+a new task). Nothing is written to `localStorage`, `sessionStorage`, a cookie,
+a file, the daemon or aihub; the task and its report stay readable in Work ›
+Tasks and through `pf task show` under pf's own retention.
+
+**Message 「@」.** Every message row — received and the
+user's own, direct and group — carries a visible 「@」 button beside Analyze
+(after 回复 on an own row), with a localized accessible name and title
+(`polyforge.messages.prompt`; in flight `polyforge.messages.prompting`, a
+spinning icon, the glyph kept); the analysis card carries none. A click:
+
+1. **Binds the fill target at click time** — AppShell's `bindPromptTarget`
+   takes the composer `resolveChatInputHandle()` resolves (the focused split
+   pane, a new-session pane included; else the classic page's or the ≤640px
+   page's composer, pi or claude alike) and records its draft key (that
+   session) and, in split view, its pane, plus the session name for the
+   feedback. The binding is never re-derived; no composer means no target.
+2. **Requests the prompt** — one `POST /api/polyforge/messages/prompt`
+   (AppShell's `requestPfPrompt`, handed down through the messages surface).
+3. **Fills the bound target, text only** — the bound slot's composer, when
+   it still shows the bound draft key, gets `appendText` (the old draft, one
+   blank line, the prompt; an empty draft gets the prompt alone —
+   `appendPromptText` in `lib/draft-store.ts`); a bound session whose
+   composer is not mounted gets the same rule on its stored draft
+   (`appendDraftText`, images kept), so reopening it shows the text.
+   Attached images, the model/effort/compact toolbar and focus are not
+   touched and nothing is submitted. The feedback under the message reads
+   `已填入 <会话名>` (`polyforge.messages.promptFilled`).
+
+**Fallbacks.** With no composer at click time the prompt is shown under the
+message (selectable, copyable) with `无目标会话，已显示在消息下`
+(`polyforge.messages.promptNoTarget`). A bound split pane closed before the
+answer is never retargeted: the prompt is shown under the message, without
+that line. A refusal (below the floor, a full lane, an unmapped project, a
+failed task) shows pf's text — or the upgrade text — under the message, fills
+nothing, and leaves the 「@」 usable; a retry is a new task. The two feedback
+lines are the owner's fixed lines, the same text in every locale.
+
+**In flight.** One run per message (a per-message guard; that message's 「@」
+disabled), any number across messages, each filling its own bound target.
+While any run is in flight the desktop dock ignores the outside-press
+dismissal (the panel reports `onPromptBusyChange`), so a click on the
+sidebar, a pane tab or a composer cannot close the panel and lose an answer
+headed under its message; the mobile sheet is never closed by the action.
+Every outcome is component memory — gone when the panel closes; no
+`localStorage` key, page-memory map or server write is added.
 
 **Sanitization.** The sanitizers are the only passport: a conversation keeps
 id/kind/peer/peer_name/last_seq/unread/created_at, a contact keeps exactly
@@ -638,28 +1027,37 @@ the unchanged queue line and above the selected detail.
 (owner's intentional change, not a regression): the cards are ONE row that
 scrolls left and right (`display: flex`, `flexWrap: nowrap`, the same gap 8
 and padding 8) instead of a wrapping grid (`repeat(auto-fill, minmax(150px,
-1fr))` until), and every card is a fixed 150px wide
-(`JOB_CARD_WIDTH`, `flex: 0 0 150px`) — so the 460px dock, the 375px sheet
+1fr))` until), and every card is a fixed width
+(`JOB_CARD_WIDTH`, `flex: 0 0 180px`) — so the 460px dock, the 375px sheet
 (beside its 40px icon rail) and the 340px dock all show one card row whose
-cards keep their 150px width, a wider main area leaves free space at the
-right and a narrower one scrolls rather than squeezes. The row is
+cards keep their width, a wider main area leaves free space at the right and
+a narrower one scrolls rather than squeezes. (the owner's
+intentional change of #213/#220): the fixed width is 180px and the Tasks grid
+keeps its own 150px column minimum — the two are decoupled, so #213's
+equal-width ruling reads on the Tasks side only and a job card is no longer
+required to match the Tasks track. The row is
 `overflowX: auto` with `scrollbarWidth: "thin"` and a visible scrollbar (a
 desktop mouse has no horizontal wheel, so a hidden bar would strand the cards
 past the fold), native touch inertia and no scroll-snap; scrolled to the end
 the last card is fully visible, nothing is vertically clipped or scrolled,
-and the row scrolls whenever the cards exceed the main area (three 150px
+and the row scrolls whenever the cards exceed the main area (three 180px
 cards plus the gaps already do at the 460px dock). The
 cards keep their DOM order and their stable keys, so Tab order is unchanged,
 focusing an off-screen card scrolls it into view natively, and the 3 s card
-poll never resets the row's scroll position (no re-mount). The Tasks blocks
-keep their grid;'s equal-width ruling now reads as the fixed
-150px job card = the Tasks grid's 150px column minimum. Each card is in
+poll never resets the row's scroll position (no re-mount). Each card is in
 `POLYFORGE_BLOCK_STYLE`
 (`lib/panel-layout.ts`: no background, a `1px solid var(--border)` frame,
 radius 6, padding `6px 8px` — the one block treatment the Tasks blocks share,
-it was `8px 10px`, so the Tasks blocks are denser too); a
-selected card is on `var(--bg-selected)`. pins the card's own
-spacing: the outer column gap is 4, the title block's gap is 0 (was 2), the
+it was `8px 10px`, so the Tasks blocks are denser too);
+ changes only the card frame's colour, never its 1px width: a
+`running` job is `var(--accent)`, `needs_input` amber `#d97706`, `completed`
+green `#16a34a`, `failed` red `#dc2626`, the three quiet states
+(`queued`/`paused`/`cancelled`) one shared gray `var(--text-dim)`, and an
+unknown status keeps the block default `var(--border)`. The four loud colours
+are pairwise distinct and distinct from the quiet gray; no new colour value
+or theme token. A selected card still shows only the `var(--bg-selected)`
+background (the frame colour stays the status colour). pins the
+card's own spacing: the outer column gap is 4, the title block's gap is 0 (was 2), the
 slug row and the goal span are explicit 16px lines (`lineHeight: "16px"`, not
 the inherited 18px), the needs-input badge is `padding 0 5px`,
 `line-height 14px` (16px with its 1px border) against the dim status label's
@@ -667,17 +1065,16 @@ the inherited 18px), the needs-input badge is `padding 0 5px`,
 8px` (left/right stay 8px; `POLYFORGE_BLOCK_STYLE` itself is untouched, so
 the Tasks blocks keep `6px 8px`). A card with a goal is therefore 42px + its
 title block (2 border + 8 padding + slug row + 32 goal): 58px with a one-line
-slug, 74px with a two-line one.:
-because a fixed 150px card leaves the slug row 85px beside the status label,
-a 14-character slug wraps to two 16px lines in both locales, so
-`e2e/polyforge-cards.mjs` S18 states the height bound against the measured
+slug, 74px with a two-line one. a fixed card leaves the slug
+row beside the status label, and a long slug may wrap to a second 16px line,
+so `e2e/polyforge-cards.mjs` S18 states the height bound against the measured
 slug row — at most `43px + the slug row` (58px for a one-line slug, 74px for
-the wrapped two-line row measured at the 460px and 340px docks; the old
-100px/117px card fails it, and so does one that only removed the narration:
-64px/80px) — and checks the
+a wrapped two-line row; the old 100px/117px card fails it, and so does one
+that only removed the narration: 64px/80px) — and checks the
 one-row /
-150px-width / horizontally scrollable layout at the 460px dock, the 375px
-sheet and the 340px dock. A card click (or Enter/Space) toggles the existing
+180px-width / horizontally scrollable layout at the 460px dock, the 375px
+sheet and the 340px dock. adds the same geometry check at the
+390px, 768px and 1280px viewports (`e2e/ui-polish-198.mjs` S8). A card click (or Enter/Space) toggles the existing
 slug selection, so the detail, the watch poll and pi#120's deselect behave as
 before; a second click deselects. A work-item anchor selects by wi id, and a
 card counts as selected for either its slug or its wi id.
@@ -689,9 +1086,12 @@ card counts as selected for either its slug or its wi id.
  — it was a row of its own), then the work item's goal under
   them truncated to the title-length preference in code points with `…`
   (clamped to at most 2 lines, the full goal in the goal span's `title`).
-  Never a nowrap slug + goal row: in a ~112px cell that squeezed the slug to a
-  few characters and hid the goal ( review s14#2;
-  `e2e/polyforge-cards.mjs` S18 checks the geometry, the fixed 150px width and
+  the status element carries `title` = the full status text
+  for every status, while the card's `aria-label` keeps `${slug} · <full
+  status text>`; no card-level `title` is added (the goal span keeps its
+  own). Never a nowrap slug + goal row: in a ~112px cell that squeezed the
+  slug to a few characters and hid the goal ( review s14#2;
+  `e2e/polyforge-cards.mjs` S18 checks the geometry, the fixed 180px width and
   the one-row horizontal scroll at 460/375/340). The
   model, `#spawnN`, step age and idle age left the card: the
   model (24 chars + `…`, full on hover), `#spawnN` and the two ages show in
@@ -701,20 +1101,24 @@ card counts as selected for either its slug or its wi id.
   label (`polyforge.jobStatus.needs_input`: 等待输入 / Needs input / 等待輸入)
   emphasized (`data-pf-needs-input`, amber `#d97706`, bold, framed) in place
   of the dim label at the right end of the slug's row (; it was a
-  row of its own). It follows the job's status on the next status/cards read —
+  row of its own). Its `title` is the full status label. It
+  follows the job's status on the next status/cards read —
   no new request, poller or timer.
-- **Running duration:** a `running` job's dim status label
-  carries the job's age in whole minutes after it — `运行中 23m`, `running
-  23m` — in the same element and colour (the `…m` suffix in every locale).
+- **Running duration (visible alone since):** a
+  `running` job's visible status text is the job's age in whole minutes alone
+  — `23m`, matching `^\d+m$` in every locale, with no 运行中/Running/運行中
+  word (the frame colour already says it runs). the full
+  status text (`运行中 23m`, `running 23m`) stays in the card's `aria-label`
+  and in that element's `title`.
   `n = floor((now − card.startedAt) / 60s)`, the card's existing earliest
   `job_started`: the job's age, so it does not reset when the step changes and
   includes waiting time. Under a minute (and for a negative age from clock
   skew) it reads `0m`; at 60 minutes and beyond it stays in minutes (`125m`,
   never hours). No `startedAt` (including the status-only stand-in before the
-  first card read) or an unparsable one keeps the bare label, and no other
-  status gets a suffix. A 30s local render clock advances the value without a
-  request or poll (the Tasks blocks' pattern); its `cardRunningMinutes` helper
-  lives in `lib/polyforge-cards-pure.ts`.
+  first card read) or an unparsable one falls back to the bare status word
+  (`运行中`), and no other status gets a suffix. A 30s local render clock
+  advances the value without a request or poll (the Tasks blocks' pattern);
+  its `cardRunningMinutes` helper lives in `lib/polyforge-cards-pure.ts`.
 - **No narration on the card (the owner's intentional reversal
   of the 32px narration):** the card holds only the
   slug/status row and the goal. The assistant narration stays visible in the
@@ -905,10 +1309,11 @@ byte length. Content and the waiting facts never ride a list row; `attrs`,
 `session_*` field never leave the server.
 
 **Surface.** `components/PolyforgeWorkItems.tsx` owns its list, filters,
-search and detail state (no storage, no timer, no poll, no ↻ control, no
-write control). It reads once when the sub-tab opens (the component mounts,
-ref-guarded) and once more per change of `itemCountKey` while it stays
-mounted: `PolyforgePanel` computes it with `workItemCountKey` as
+search and detail state (no storage, no timer, no poll, no write control). It
+reads once when the sub-tab opens (the component mounts, ref-guarded), once
+more per change of `itemCountKey` while it stays mounted and once per click of
+the search bar's ↻ (the Tasks #204 contract). `PolyforgePanel`
+computes `itemCountKey` with `workItemCountKey` as
 `` `${queue.running}:${<completed|failed|cancelled jobs in jobs[]>}` `` from
 the status snapshot (null without one); a ref holds the mount value, so
 entering reads once, the mount value never re-reads and a null on either
@@ -926,12 +1331,17 @@ one scrolling list — no virtualisation, paging or list truncation (the real
 merged list is about 1162 rows). Each row is one whole-row button showing
 slug, the localized status (`polyforge.workItems.status.*`, unknown raw),
 priority, bundle (`—` when null/empty), project and the goal clipped to one
-line by CSS only. Above the list: a search box over slug/goal/project
-(case-insensitive substring; content is never searched) and two selects —
-status (`全部状态` + the seven statuses) and project (`全部项目` + the distinct
+line by CSS only. Above the list, through the shared search bar
+: row 1 is the search input over slug/goal/project (case-insensitive substring; content is
+never searched) with the square ↻ action, row 2 the two selects — status
+(`全部状态` + the seven statuses) and project (`全部项目` + the distinct
 projects of the loaded list) — composed in the one `filterWorkItemRows`; a
-change makes no request, and a reload resets them. Selecting a row makes one
-detail read and replaces the list with the detail: the full goal
+change makes no request, and a reload resets them. The ↻ action re-reads the
+list once per click through the existing `GET /api/polyforge/work-items`,
+with #204's busy state (disabled, `aria-busy`, spinning, labelled
+`polyforge.refresh`/`polyforge.refreshing` while the newest read is in
+flight); a failed read keeps the old list and shows the error. Selecting a
+row makes one detail read and replaces the list with the detail: the full goal
 (unclipped), slug, status, priority, bundle, project, labels, milestone,
 reporter, assignee, created/updated/closed, the waiting line
 (`waiting_for` blockers when present, else `waiting_on`) and the content
@@ -999,9 +1409,9 @@ marks never leave the server.
 
 **Surface.** `components/PolyforgeTasks.tsx` owns its state (no hook read,
 no poll, no storage) and reads on gestures only — one list read each time
-the Tasks sub-tab opens (the component mounts), one per click of the search
-row's ↻ button and one detail read per
-selection; searching, clearing the search, filtering and going back read
+the Tasks sub-tab opens (the component mounts), one per click of the shared
+search bar's ↻ action (slot) and one detail read
+per selection; searching, clearing the search, filtering and going back read
 nothing. The one automatic exception: `PolyforgePanel` passes
 `taskCountKey` = the status snapshot's `` `${tasks.running}:${tasks.completed}` ``
 (null without a snapshot), and while the sub-page stays mounted each change
@@ -1014,9 +1424,10 @@ line: no one-shot task on this machine yet) instead of the two sections. It does
 the 3 s/30 s dock cadence: a background re-read under an open search would
 change the list being searched, and the spec forbids a new cadence.
 
-The manual refresh is the third list read: a 26px ↻ icon
-button on the search box's own row, right of it (the box takes the remaining
-width), with the sidebar refresh's icon; it renders in the list view only —
+The manual refresh is the third list read: the square ↻ icon
+button in the shared search bar's action slot, right of the
+search input (the input takes the remaining width), with the sidebar refresh's
+icon; it renders in the list view only —
 the 暂无任务 empty list included, but never on the detail or the loading,
 not-installed, below-the-floor and first-read-failure notices. A click calls
 the same `readList`, so it adds exactly one `GET /api/polyforge/tasks` read
@@ -1052,13 +1463,14 @@ no new read; the selections live in component memory only (no storage, URL,
 hook or server field — a reload resets them to 全部); a list from a pf without
 the field offers only 全部发起人; there is no model or time-range filter. Each section is
 a responsive grid of discrete blocks (;:
-`repeat(auto-fill, minmax(150px, 1fr))`, gap 8 — the one 150px
-minimum the job cards share (was 112px); the Tasks grid stays
-a grid while the job cards are one fixed-width row, so the shared number is
-the grid's 150px column minimum = the job card's fixed 150px width rather
-than an equal track count — so two blocks side by side at the 375px sheet
-(beside its 40px rail) and the 460px dock, one per row at the 340px dock,
-more as the main area widens — each in the shared
+`repeat(auto-fill, minmax(150px, 1fr))`, gap 8 — the 150px
+column minimum (was 112px); the Tasks grid stays a grid while
+the job cards are one fixed-width row. decouples the two: the
+Tasks grid keeps its own 150px minimum while the job cards are fixed 180px,
+so the number is no longer shared and #213's equal-width ruling reads on the
+Tasks side only — two blocks side by side at the 375px sheet (beside its 40px
+rail) and the 460px dock, one per row at the 340px dock, more as the main
+area widens — each in the shared
 `POLYFORGE_BLOCK_STYLE`). A block is a button (the
 whole block is the click/Enter/Space target; the id stays a secondary label
 on its last line) showing a
@@ -1165,15 +1577,21 @@ The Settings › Polyforge workflow card reads `GET /api/polyforge/workflows`
 and writes through `POST /api/polyforge/config`. Its row model is pure
 (`lib/polyforge-workflows-pure.ts`, client-safe, type-only imports):
 
-- **Project.** The selector lists `pf workflows`' `projects` (the cwd
-  mapping's projects, in order) and defaults to the first
+- **Project.** the selector lists the union of every mapped
+  workspace's `pf workflows` `projects` (`workflowUnion`: mapping order, a
+  project owned by the first workspace listing it; an answer without
+  `workspaces[]` is one entry built from its top-level fields), defaulting
+  to the settings cwd's first project, else the union's first
   (`defaultProject`), because the key space is `steps.<project>.<step-id>`.
+  `projectOwner` names the workspace whose reads give that project's rows,
+  capability and write target.
 - **Rows** (`buildWorkflowRows(doc, workspace, project)`): `default` first
   (the project-level fallback, `steps.<project>.default`), then one row per
   step id across every bundle, alphabetically — a step shared by several
-  bundles is ONE row naming each bundle (sorted) with that bundle's own
-  candidates — then `task` last (the bundle-less one-shot lane; it names no
-  bundle). A row is `declared` when `steps.<project>.<id>.models` is declared
+  bundles is ONE row naming each bundle (sorted), each name's tooltip carrying
+  that bundle's own candidates — then `task` last (the bundle-less one-shot
+  lane; it names no bundle). A row is `declared` when
+  `steps.<project>.<id>.models` is declared
   in the yaml (declared-empty included) and otherwise renders 「继承」 /
   Inherited. Its effective chain and source level (`from`) are pf's
   (`effective.<project>`, `defaults.effective`, `task`): one chain when every
@@ -1192,29 +1610,50 @@ configuration cards; `aria-label` 「工作流」 / Workflow):
   `polyforge.refresh` / `polyforge.refreshing`): disabled, `aria-busy` and
   `animate-spin` (the icon turns) while the newest read is in flight; a seq ref
   lets only the newest read write the card or end the spin. A failed read —
-  not 200, `capable:false`, no document, or `daemon_reachable:false` — keeps
-  the last good list and shows the reason as a `role="alert"` line. No timer,
-  no cache.
+  not 200, `capable:false`, no readable workspace, or `daemon_reachable:false`
+  — keeps the last good list and shows the reason as a `role="alert"` line. No
+  timer, no cache. each readable workspace is one line naming
+  its `.polyforge.yaml` path with the projects it contributes (the projects'
+  source label); a workspace whose read failed is exactly one line
+  (`workflowWorkspaceFailed`: its yaml path and pf's reason) and contributes
+  no project, so no write; the other workspaces stay editable.
 - **Rows.** Each row (`li.polyforge-workflow-row`, from `buildWorkflowRows`)
-  shows its id, the `live` badge and the next-dispatch note
-  (`polyforge.settings.classLiveNote`), the bundles it appears in with their
-  own candidates, the declared chain (Declared) or Inherited, the effective
-  chain(s) with `From: <level>`, and the declared attrs
-  (`question_batch_size` as 「每轮问题数（0 = 一次性全部）」). A note states that
-  `pf submit --models` outranks every level; no control edits it.
+  is one summary line (`p.polyforge-workflow-summary`): its id and the
+  default/task tag with the declared chain (Declared) or Inherited — the
+  lead segment, `span.polyforge-workflow-lead` — then the effective
+  chain(s) with `From: <level>` (muted, truncated with an ellipsis; the full
+  text is the element's `title`), and a right-aligned bundle suffix — the
+  bundles it appears in, muted monospace names joined by ` · `, no label and
+  no border, each name's `title` carrying that bundle's own candidates. The
+  `default` row names every bundle; `task` has no suffix. A divergent row (one
+  effective chain per bundle) may wrap, and so may any row at the phone
+  breakpoint; a non-divergent row is one visual line when it fits and wraps
+  by segment otherwise (the summary is `flex-wrap: wrap` at
+  every width, the lead and effective segments and their chips shrink and
+  wrap inside, and the ` · ` suffix stays the last item, flush right on the
+  last line) — never horizontal overflow. Declared attrs stay their own sub-line
+  (`question_batch_size` as 「每轮问题数（0 = 一次性全部）」). The card states
+  the next-dispatch note (`polyforge.settings.classLiveNote`) and its one
+  `live` badge once, below the card hint; no row repeats either. A note states
+  that `pf submit --models` outranks every level; no control edits it.
+ removed the 「所属 bundle」 label and its i18n key.
 - **Writes** fold under the `workflow` disclosure region (default closed;
   the #212 store, a draft or an error locks it open with the marker): chips
   with ↑/↓/× and a free-text add, Save (`set steps.<project>.<id>.models` with
   the full list), Clear (`unset`, falls back one level), and the integer attr
-  field with Save/Clear. Every write is `POST /api/polyforge/config` with
-  `expect_state:{file_sha256: <the read's yaml sha>, values:{}}`, then a fresh
+  field with Save/Clear. Every write is `POST /api/polyforge/config` with the
+  OWNING workspace's `cwd` (never the settings cwd) and
+  `expect_state:{file_sha256: <that workspace's yaml sha>, values:{}}`; its
+  capability is that workspace's `write_capable`. Then a fresh
   card read plus the panel's config/history read. Every write control is
   disabled while `write_capable` is false, and the card shows
   `polyforge.settings.workflowCapabilityHint` (the 2.20.15 floor) plus pf's
   `write_reason` as text.
-- **Project.** A select of the mapped projects, defaulting to the first;
-  switching re-renders that project's rows from the same read and drops the
-  unsaved drafts; the disclosure state is the card's own, kept.
+- **Project.** A select of the union's projects, defaulting
+  as above; switching re-renders that project's rows from the same read and
+  drops the unsaved drafts; the disclosure state is the card's own, kept.
+  The 工作区 card (the mapping rows) stays scoped to the settings cwd; only
+  the workflow card is a union.
 
 ## Settings detection (pi#122)
 
@@ -1493,17 +1932,29 @@ stays outside the region and visible. Horizontal behavior is unchanged: the
 graph still wraps with no horizontal scroll. The same component renders the
 mobile sheet and the desktop dock, so both get it.
 
-**Open at the top, follow only when pinned.** Selecting a job
-(or another job) sets the region's `scrollTop` to 0, so the detail opens at
-the top of the summary — never scrolled past the summary and DAG to the
-progress. The progress block keeps a `pinned` flag from a passive `scroll`
-listener on the region (`isProgressPinnedToBottom` in
-`lib/polyforge-cards-pure.ts`: within `PROGRESS_PIN_THRESHOLD_PX` = 8 px of
-the bottom, or content no taller than the viewport; unreadable numbers never
-pin). After a new snapshot renders, the region scrolls to its bottom only
-when the reader was pinned; a reader parked anywhere else is not moved. A
-reader starts unpinned, and another job starts unpinned again. There is no
-jump-to-latest control.
+**Open at its bottom, follow while pinned (; reversed at the
+owner's ruling).** Every job selection and every remount of
+the detail (reopening the dock or its tab) starts pinned: `pinned` is true,
+and once the first snapshot with lines has rendered — every 200-line chunk —
+the WHOLE region sits at its bottom (`scrollTop + clientHeight` within
+`PROGRESS_PIN_THRESHOLD_PX` = 8 px of `scrollHeight`). Nothing is forced
+while the detail is loading, empty or unavailable. The selection's old
+`scrollTop = 0` reset is gone, so #238's open-at-top ruling and the #247 N4
+seed both retire; a selection whose stream arrives short starts at its
+bottom, and a detail that fits and then grows is followed before any scroll.
+A passive `scroll` listener keeps `pinned` =
+`isProgressPinnedToBottom` (within 8 px of the bottom, or content no taller
+than the viewport; unreadable numbers never pin). After every new snapshot
+or added chunk the region scrolls to the bottom only while pinned; a reader
+parked anywhere else is never moved by a poll.
+
+**↓ Latest (`[data-pf-detail-latest]`,).** A floating button at
+the region's bottom-right, an overlay with no in-flow height, visible
+whenever the region is not at its bottom (including while the reader is at
+the summary) and hidden once it is. One click jumps to the bottom
+immediately (no smooth animation) and restores following, so the next
+snapshot or chunk keeps it there. It carries no unread/new-line count. The
+label is translated: `polyforge.progress.latest` = ↓ 最新 / ↓ Latest / ↓ 最新.
 
 ## Job detail layout and execution progress
 
@@ -1558,18 +2009,117 @@ the card title-length preference — the one-line fit is CSS ellipsis.
 
 **Execution progress** (`[data-pf-progress]`, `PolyforgeDetailProgress`).
 A heading (`polyforge.progress.title`: 执行进度 / Execution progress / 執行進度),
-then, when the 2000-line bound left earlier lines out, one dim marker line
-first (`[data-pf-progress-omitted]`, `polyforge.progress.omitted` with the
-exact `{count}`: 已省略更早的 {count} 行 / {count} earlier lines omitted /
-已省略更早的 {count} 行), then the selected job's whole stream from
+then (only for a legacy snapshot that still carries `omitted > 0`) one dim
+marker line first (`[data-pf-progress-omitted]`, `polyforge.progress.omitted`
+with the exact `{count}`: 已省略更早的 {count} 行 / {count} earlier lines
+omitted / 已省略更早的 {count} 行), then the selected job's whole stream from
 `GET /api/polyforge/progress?wi=` — every line inline in the detail's one
-scroll region (no `overflowY`, no virtualisation), oldest first, one nowrap,
-ellipsized line each (`[data-pf-progress-kind="narration"|"tool"|"event"]`).
-Narration is `var(--text)`; a tool line mono and dim; an event line mono, in
-its tone (`[data-pf-progress-tone]`: accent `var(--accent)`, dim
-`var(--text-dim)`, red #dc2626, amber #d97706, green #16a34a, `neutral`
-`var(--text-muted)`). The hover `title` is the full text, preceded on an
-event line by its raw daemon kind (pi#112's "raw kind one hover away"). States:
+scroll region (no `overflowY`, no virtualisation), oldest first, with no
+per-line length cap (; it was one nowrap/ellipsized line through
+). Since each entry renders by kind: narration
+through the transcript's own Markdown guard (`components/SafeMarkdownBody.tsx`,
+shared with `MessageView.tsx`; paragraphs, lists, code blocks, two pixels under
+the chat's 14px), a `thinking` one in the same Markdown, dim italic and never
+folded — a narration over the guard's `MAX_MARKDOWN_CHARS` (100 000) skips
+Markdown and renders inline, in full, as plain `pre-wrap` text in its line
+style, never the guard's click-to-reveal button and height-bounded scrolling
+box (that would be a per-entry gate and a nested scroller here; pin S238-28 in
+`e2e/polyforge-238.mjs`); a tool call as one tool card (below); every other lifecycle event a
+restrained marker row that wraps in full with no ellipsis. A large stream
+renders its first `PROGRESS_RENDER_CHUNK` = 200 lines at once and appends the
+rest one 200-line chunk per animation frame, so no frame
+does the whole transcript and no line is dropped; a poll keeps the shown
+count, so an unchanged stream is never re-chunked
+(`[data-pf-progress-kind="narration"|"tool"|"event"]`,
+`[data-pf-progress-variant="thinking"]` on a thinking narration).
+
+**Tool cards.** `components/PolyforgeProgressToolCard.tsx` on
+the transcript's own card shell (`components/ToolCallCard.tsx`, which
+`MessageView.tsx`'s `ToolCallBlock` renders through — same border, tone,
+radius and background, both harnesses alike): one header button
+(`aria-expanded`) with the tool name, a single nowrap/ellipsized preview of
+the masked primary argument cut so name + preview stay within
+`PROGRESS_TOOL_HEADER_MAX` = 120 code points, the full masked header on the
+button's `title`, the status (`polyforge.progress.toolStatus.ok|error|running`:
+成功 / ok / 成功, 出错 / error / 出錯, 运行中 / running / 執行中; red tone for
+`error`) and the duration (the transcript's `formatToolDuration`, only when the
+poll carries `durationMs` and it is at least the transcript's 100 ms floor —
+never invented). The root is `[data-pf-progress-kind="tool"]`. Cards start
+collapsed; the first expansion of a card asks
+`GET /api/polyforge/progress/tool` for exactly that call
+(`fetchProgressToolDetail`; the panel's `loadDetail` keeps one detail per
+call per selection — a call loading or loaded is never asked again, an
+unavailable one again on its next expansion, an answer for an earlier
+selection is dropped, the cache resets with the selection and nothing is
+persisted). The expanded body shows the complete masked input
+(`polyforge.progress.toolInput`) and output (`polyforge.progress.toolOutput`)
+inline, wrapping (`pre-wrap`, `overflow-wrap:anywhere`) with no scroller of
+its own; no result yet is stated (`polyforge.progress.toolNoResult`: 尚无结果
+/ No result yet / 尚無結果), and a refused, degraded or malformed answer leaves
+only that card unavailable (`polyforge.progress.toolUnavailable`: 工具详情不可用 /
+Tool detail unavailable / 工具詳情無法取得) while every other card and the
+stream stay as they are. Loading reads `polyforge.loading`.
+
+**Spawn blocks.** `progressBlocks` in
+`lib/polyforge-cards-pure.ts` cuts the stream at every line whose kind is
+`event` and whose raw kind is `step_started`, in stream order: a block runs
+until the next start, so interleaved/parallel spawns and every rerun of a
+rewound step are separate blocks and nothing is reordered. Lines before the
+first start stay leading and unfolded. Every block — a lone one too, since
+ (one behaviour, no flat special case) — has a group head button
+(`[data-pf-progress-block-toggle]`, `aria-expanded`, the block container
+`[data-pf-progress-block]` carrying `data-pf-progress-block-status` and
+`data-pf-progress-block-count`) shaped
+`▸|▾ <step> #<spawn_n> <mark> <duration> · <N> <lines>`; N counts every line
+of the block, its absorbed ones included, and `polyforge.progress.lines` =
+{count} 行 / {count} lines / {count} 行. The duration (
+`formatCardDuration`) is the block's own lifecycle times — `progressBlocks`
+names `startAt` (its start line's `at`), `endAt` (its terminal line's `at`)
+and `durationMs` when both exist and are ordered — or, for the running
+block, its age at render from `startAt`; without times there is none. The
+head absorbs two lines: the block's `step_started` line and
+its terminal line (`terminal`: the block's last `step_done` / `step_failed` /
+`step_dead`). Neither renders as a body row; both are on the head's `title`
+as `<raw kind>\n<full text>` entries separated by a blank line. The block
+body is every other line, unchanged — no line is dropped, capped or edited.
+The status mark comes only from the block's
+own lifecycle lines, in this precedence: `step_done` → ✓, `step_failed` /
+`step_dead` → ✕, a last lifecycle line of `needs_input` → ?, `job_stopped`
+→ ⏸, otherwise the newest block is ▶ (running) and an older one carries no
+mark. Only the LAST block is expanded by default; a poll that adds a spawn
+moves that default to the new block, while blocks the reader toggled keep
+the reader's choice until another job is selected or the detail remounts
+(component state only, nothing persisted). A lone block folds like any
+other. The no-truncation guarantee still holds as an
+identity: the leading lines plus the sum of every block's count equal the
+snapshot's total line count, and with every block expanded the
+`[data-pf-progress-kind]` rows plus the heads' absorbed lines are every line,
+each with its full text (on its row, or on its head's title). Folding and
+following interact without a jump: collapsing while pinned clamps the
+region to its new bottom and stays pinned, expanding an older block keeps
+`scrollTop` unchanged so the reader leaves the bottom, unpins, the
+↓ Latest button appears and later polls leave the view alone; toggling while
+unpinned keeps the position and `pinned` is recomputed from the actual
+position (a fold click is never itself a "scrolled up" event). A tool card's
+expand/collapse and its detail settling (loading, then the answer) are folds
+too: the card reports each toggle (`onToggle`) and the panel
+bumps the same `foldVersion` measurement, so expanding a card at the bottom
+leaves `scrollTop` where it was, unpins and shows ↓ Latest (a later poll does
+not pull the reader off the opened card), and collapsing at the bottom stays
+pinned (pin S238-27 in `e2e/polyforge-238.mjs`).
+
+Narration is
+`var(--text)`; thinking narration is `var(--text-dim)` italic (the owner ruling
+on) — its row also rebinds `--text` to `var(--text-dim)`, because
+the Markdown body sets its own `color: var(--text)` and would otherwise
+render thinking at full text colour (computed-colour pin S238-26 in
+`e2e/polyforge-238.mjs`); a tool line is its card; an event line mono, in its tone
+(`[data-pf-progress-tone]`: accent `var(--accent)`, dim `var(--text-dim)`, red
+#dc2626, amber #d97706, green #16a34a, `neutral` `var(--text-muted)`). An
+event row's hover `title` is its raw daemon kind and its full text (pi#112's
+"raw kind one hover away"; an absorbed start/terminal line's is on its head),
+a tool card's is the full masked header; narration shows its full text
+itself. States:
 `polyforge.loading` only until the first read settles,
 `polyforge.progress.empty` (暂无进度 / No progress yet / 暫無進度) for an
 available snapshot with no line, `polyforge.progress.unavailable` (进度不可用 /
@@ -1580,31 +2130,52 @@ the selection's watch snapshot — never a fabricated line. The read is keyed on
 `runtime-state.json` and `pf ops status` (runtime `dropJob`) moments after its
 terminal event, so a job that finishes while its detail is open leaves the
 status/cards lists and keeps its wi through the watch snapshot (reset per
-selection, kept across failed watch reads). Its next read gets the route's 400
-(N6: an id naming no job in a readable index) and the hook keeps the last good
-snapshot, so the stream read before the drop stays visible; lines written after
-the last read (often the final `terminal` / `job_stopped`) are not shown. A
-finished job selected after the drop has no index entry, so the route cannot
-serve it and the block shows the unavailable state.
+selection, kept across failed watch reads). From the drop on, the route serves
+that wi from its event log alone: the next read returns the
+job's lifecycle lines, the final `terminal` / `job_stopped` included, without
+the narration and tool lines (the capsule dir came from the dropped record).
+The open detail does not swap its stream for that answer: `nextProgressSnapshot`
+keeps every narration, tool and event line it held (the B1
+guarantee) and appends the answer's event lines after the newest one it
+already shows (event line ids are the same in both answers), with no line
+bound, so the stream keeps its narration and ends with the
+job's real last lines. A finished job selected
+after the drop has nothing held and shows the event-log stream alone. Only a wi with neither an index record nor a readable event
+log is the route's 400 (`unknown work item`), and the block then shows the
+unavailable state.
 
 **Whitelist (the progress face only).** `progressEntries` in
-`lib/polyforge-cards.ts`: an assistant text block → `{kind:"narration"}`
-(whitespace-collapsed, masked, ≤ 400 code points, as on the card); a pi
-`toolCall` / claude `tool_use` block → one `{kind:"tool"}` line
-`<name>: <primary argument>` (the primary argument: a string `command`, else
-the first string-valued argument in key order, else the name alone), masked
-by `maskPolyforgeCredentials` and capped at `PROGRESS_TOOL_MAX` = 200 code
-points. Tool results, thinking, user/system records, `api-request-blob` and
+`lib/polyforge-cards.ts`: an assistant `text` block → `{kind:"narration"}`
+(masked, no length cap since, its original whitespace kept
+since — text blank after a trim is no line); a non-empty
+`thinking` block → `{kind:"narration", variant:"thinking"}` with the same
+mask ('s owner ruling; claude records store thinking as `""`,
+so in practice this is pi prose); a pi `toolCall` / claude `tool_use` block →
+one `{kind:"tool"}` line `<name>: <primary argument>` (whitespace-collapsed;
+the primary argument: a string `command`, else the first string-valued
+argument in key order, else the name alone), masked by
+`maskPolyforgeCredentials` with no length cap, plus its light `tool` fields
+. The transcript projector (`projectTranscript`, shared by the
+snapshot and the detail read) pairs each call with its result: by call id
+(pi `toolResult.toolCallId`, claude `tool_result.tool_use_id`) when the
+result names one — an id no call of that transcript carries pairs nothing —
+else the oldest unpaired call of the same transcript (the recorded pi format
+names none); `status` is `error` on the result's `isError` / `is_error`,
+`ok` otherwise, `running` while unpaired; `durationMs` = result − call
+`timestamp` only when both exist in order. A result's content and a call's
+full input are kept only for the call the detail read names, never in the
+poll. An empty/absent thinking block, tool results (beyond that status and
+duration), user/system records, `api-request-blob` and
 every other field produce nothing — the same projection for both harnesses
 (proven on transcripts recorded from real pi and claude sessions,
 `lib/__fixtures__/progress-238/`, provenance in its `README.md`). The card
-stream's whitelist (narration only) is unchanged.
+stream's whitelist (narration only, ≤ 400 code points) is unchanged.
 
 **Lifecycle lines.** `composeProgressEventLine` in
 `lib/polyforge-cards-pure.ts` turns one daemon event into one line
 `<HH:MM:SS> <glyph> <fields…>` (server-local clock, glyphs instead of per-kind
 words, so no locale string per kind), masked by `maskPolyforgeCredentials`
-and capped at 400 code points:
+with no length cap:
 
 | kind | line | tone |
 |---|---|---|
@@ -1646,14 +2217,18 @@ is the stable sort by time of the lifecycle lines (`at`) and the transcript
 lines (`timestamp`; without one, the spawn's `started_at` plus the record's
 ordinal in µs), events first at the same instant, then build order — so each
 step's start line precedes its lines and its end/failure line follows them,
-and a rerun follows the earlier spawn. The newest `PROGRESS_MAX_LINES` = 2000
-are kept and `omitted` is the exact count of the rest; there is no byte cap
-(under the bound every line shows). Neither the journal nor the event log
+and a rerun follows the earlier spawn. Every line is returned (
+removed the 2000-line window and its per-line caps); `omitted` stays `0` in
+the wire shape and there is no byte cap. Neither the journal nor the event log
 readable, the job's transcripts summed over 128 MiB (an exact count would
 need them all) or any error → `available:false`. Line ids are
 `<16 hex identity>.<offset>.<block>` (transcripts) and `e.<offset>` (events):
-never a path. Cost, measured on capsule task-42 (24 spawns, 15.4 MB of
-transcripts): 54–63 ms per whole read. It never throws.
+never a path. The whole read never throws. Cost measured for
+on capsule task-42 (24 spawns, 17.2 MB of transcripts): 49–75 ms per
+read, yielding 1303 projected lines (1.5 MB, 1.4M characters, longest line
+44,753); the browser render measured ~0.34 s for the full stream unchunked
+versus ~0.23 s to the first 200-line chunk with `PROGRESS_RENDER_CHUNK`,
+total ~0.51 s (load-sensitive host, recorded in the work item's fix summary).
 
 **Cadence.** `hooks/usePolyforgeProgress.ts` (modeled on `useMachineLoad`):
 mounted only with the Jobs detail of a selected job (closing the dock or
@@ -1666,7 +2241,10 @@ aborts the request in flight (zero requests while hidden); becoming visible
 reads at once. One request in flight, bounded at
 `PROGRESS_REQUEST_TIMEOUT_MS` = 5000 ms. `nextProgressSnapshot` keeps the last
 good snapshot on a failed or degraded read (no flash, no error readout) and
-replaces it wholesale on a usable one; another job never shows the previous
+replaces it wholesale on a usable one — except a read of event lines only
+over a held stream with narration or tool lines (the post-drop event-log
+answer above), which keeps the held lines and appends the new event lines;
+another job never shows the previous
 job's snapshot. A first read that fails outright (HTTP error, network error,
 timeout, malformed body) with nothing held is the unavailable state, never a
 perpetual Loading (the #210 ledger's N5); a later good read
@@ -1711,12 +2289,14 @@ replaces it. An abort by hiding, deselecting or unmounting writes nothing.
   failure returns to idle with no button-specific error state (the panel's
   error text is the only error signal). The busy state is written only by the
   click path — background polls never spin or disable the button.
-- `components/AppShell.tsx`: the button renders iff pf is present,
+- `components/AppShell.tsx`: the Polyforge button renders iff pf is present,
   independent of chat visibility; opening the Polyforge panel closes bg-tasks
-  and vice versa (mutually exclusive dock slot: mobile bottom sheet both) —
-  enforced on every path that opens either panel, including
-  the bg-task terminal notification's jump: its onClick closes the Polyforge
-  panel before showing bg-tasks, so the jump never lands on a covered dock.
+  (mutually exclusive dock slot: mobile bottom sheet both).
+  (owner 有意变更) removed the pi top bar's bg-tasks toggle and its
+  running-count badge: the bg-task terminal notification's jump is the only
+  path that opens bg-tasks, and its onClick closes the Polyforge panel before
+  showing bg-tasks, so the jump never lands on a covered dock. The dock, its
+  API routes, bridge and hook are unchanged.
   **Mobile sheet heights (pi#120):** both mobile sheets (Polyforge and
   bg-tasks, the same dock slot) open at 62 % of their container and resize
   by dragging a top-edge handle (`.pf-sheet-resize-handle`, one shared

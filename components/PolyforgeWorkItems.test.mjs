@@ -18,7 +18,12 @@ test("reads follow gestures only: the two GET routes, one mount read, one detail
   assert.match(source, /if \(!isPolyforgeWorkItemId\(id\)\) return;/, "a malformed id is never fetched");
   assert.match(source, /if \(listReadRef\.current\) return;\s*listReadRef\.current = true;\s*readList\(\);/, "exactly one list read per opening");
   assert.equal((source.match(/readList\(\);/g) ?? []).length, 2, "the list is read at mount and on a count-key change, nowhere else");
-  assert.doesNotMatch(source, /↻|refresh/i, "no refresh control");
+  // owner 有意变更 the third read is the shared ↻ action's
+  // click ('s contract); the action itself lives in the shared
+  // search bar, so this source carries onClick={readList}, not readList().
+  assert.match(source, /<PolyforgeSearchBar[\s\S]*<PolyforgeRefreshButton refreshing=\{listRefreshing\} onClick=\{readList\}/,
+    "the manual re-read renders in the shared action slot");
+  assert.doesNotMatch(source, /setInterval|setTimeout|requestAnimationFrame/, "the ↻ adds no timer");
   for (const verb of ["cancel", "claim", "create", "edit", "close"]) {
     assert.doesNotMatch(source, new RegExp(`polyforge\\.workItems\\.${verb}`), `no ${verb} control`);
   }
@@ -57,7 +62,10 @@ test("filters: 全部状态 + the seven statuses, 全部项目 + the loaded proj
   assert.match(source, /<option value="all">\{t\("polyforge\.workItems\.filterAllStatuses"\)\}<\/option>\s*\{POLYFORGE_WORK_ITEM_STATUSES\.map/);
   assert.match(source, /<option value="">\{t\("polyforge\.workItems\.filterAllProjects"\)\}<\/option>\s*\{projects\.map/);
   assert.match(source, /const projects = workItemProjectOptions\(rows\);/);
-  assert.match(source, /onChange=\{\(event\) => setSearch\(event\.target\.value\)\}/);
+  // owner 有意变更 the input lives in the shared search bar,
+  // which takes the setter directly; the search state and semantics are kept.
+  assert.match(source, /<PolyforgeSearchBar[\s\S]*value=\{search\}[\s\S]*onChange=\{setSearch\}/,
+    "the search box renders through the shared search bar with the same state");
   assert.match(source, /onChange=\{\(event\) => setStatusFilter\(event\.target\.value\)\}/);
   assert.match(source, /onChange=\{\(event\) => setProjectFilter\(event\.target\.value\)\}/);
 });

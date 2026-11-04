@@ -13,7 +13,7 @@ test("the Polyforge button is gated on pf presence alone, independent of chat vi
     "the button renders iff pf is found");
   assert.match(source, /aria-label=\{translate\("polyforge\.open"\)\}/);
   assert.match(source, /\{includePolyforge && renderPolyforgeButton\(mobile\)\}/);
-  // The chat actions (bg-tasks, history, …) keep their original gate.
+  // The chat actions (history, …) keep their original gate.
   assert.match(source, /const showChatActions = mobile \|\| showChat;/);
   assert.match(source, /if \(!showChatActions && !\(includePolyforge && pfPresent\)\) return null;/);
   assert.match(source, /\{showChatActions && \(<>/);
@@ -28,16 +28,21 @@ test("the badge shows the queue running count and nothing while the daemon is do
 test("the dock slot is mutually exclusive in both directions", () => {
   // Opening Polyforge closes bg-tasks…
   assert.match(source, /setPfPanelOpen\(\(open\) => \{\s*const next = !open;\s*if \(next\) setBgPanelOpen\(false\);\s*return next;\s*\}\);/);
-  // …and opening bg-tasks closes Polyforge.
-  assert.match(source, /setBgPanelOpen\(\(open\) => \{\s*const next = !open;\s*if \(next\) setPfPanelOpen\(false\);\s*return next;\s*\}\);/);
-  // The bg-tasks toggle keeps its toggle semantics (open/close, nothing else).
+  // …and opening bg-tasks closes Polyforge. (owner 有意变更):
+  // the pi top bar's bg-tasks toggle is gone, so the terminal notification's
+  // jump (pinned by the next test) is the only bg-tasks-opening path; no
+  // toolbar toggle-shaped opener may remain.
+  assert.doesNotMatch(source, /setBgPanelOpen\(\(open\) => \{/,
+    "a toolbar toggle-shaped bg-tasks opener remains although the top-bar toggle is gone");
   assert.doesNotMatch(source, /setBgPanelOpen\(\(open\) => !open\)/);
+  assert.doesNotMatch(source, /translate\("bgTasks\.open"\)/,
+    "the top bar still renders a bg-tasks toggle");
 });
 
 test("every path that opens bg-tasks closes the Polyforge panel (notification jump, B-2)", () => {
   // The bg-task terminal notification's onClick is the only bg-tasks-opening
-  // path besides the toolbar toggle; it must not leave the pf dock covering
-  // the panel the jump was meant to show (AC9 / AC12).
+  // path now that removed the top-bar toggle; it must not leave
+  // the pf dock covering the panel the jump was meant to show (AC9 / AC12).
   const jumps = [];
   let index = source.indexOf("setBgPanelOpen(true)");
   while (index !== -1) {

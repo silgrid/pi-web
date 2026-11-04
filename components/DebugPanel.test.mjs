@@ -678,7 +678,7 @@ test("without a chat or with a reader that throws, the panel says so and still s
   assert.doesNotMatch(before, /<div class="debug-panel-scroll">/);
 });
 
-test("the open panel shows's machine-load section once, as the grid's last row after every column; first open reads Unavailable", () => {
+test("the open panel shows's machine-load section once, as the rightmost of the grid's columns after every one; first open reads Unavailable", () => {
   const html = render();
   const scroll = html.indexOf('<div class="debug-panel-scroll">');
   const cols = html.indexOf('<div class="debug-cols">');
@@ -693,7 +693,8 @@ test("the open panel shows's machine-load section once, as the grid's last row a
   assert.ok(section.includes(`>${t("session.machineLoad")}<`));
   assert.ok(section.includes(`>${t("session.machineHost")}<`));
   assert.equal(section.split(`>${t("session.machineUnavailable")}<`).length - 1, 4, "no value before the first answer");
-  assert.doesNotMatch(render({ page: null }), /machine-load-section/, "no section, so no poll, before the page is read");
+  // The panel's stylesheet names the section (its row separator); the mounted element is what must be absent.
+  assert.doesNotMatch(render({ page: null }), /class="machine-load-section"/, "no section, so no poll, before the page is read");
 });
 
 test("the panel keeps to the theme and to Safari 16.2: tokens, the three state colors, no :has or nesting", () => {
@@ -704,14 +705,23 @@ test("the panel keeps to the theme and to Safari 16.2: tokens, the three state c
   assert.doesNotMatch(css, /:has\(|&|transition/);
   // Rules are flat: only the container queries hold rules inside braces.
   const outside = css.replace(/@container debug-panel \(max-width: \d+px\) \{[^]*?\n {2}\}\n/g, "");
-  // Three columns on a wide panel, each but the page's capped; the sessions under the server's
-  // pages on a narrower one (its height going to their row); one above the other on a phone.
-  // The machine load is the last row across every column at all three widths; the grid hugs its
-  // columns, so that row's edges are the grid's.
-  assert.match(css, /\.debug-cols \{\s*display: grid;\s*grid-template-areas: "page server sessions" "load load load";\s*grid-template-columns: minmax\(320px, max-content\) minmax\(340px, 480px\) minmax\(360px, 560px\);\s*gap: 0;\s*width: fit-content;\s*max-width: 100%;/);
-  assert.match(css, /\.debug-load \{\s*grid-area: load;/);
-  assert.match(css, /@container debug-panel \(max-width: 1239px\) \{\s*\.debug-cols \{\s*grid-template-areas: "page server" "page sessions" "load load";\s*grid-template-columns: minmax\(320px, max-content\) minmax\(0, 560px\);\s*grid-template-rows: auto 1fr auto;/);
+  // Four columns on a wide panel (owner 有意变更 the load moved from a full-width last
+  // row into the narrow rightmost column): its own track is a 240–280px range capped at 280, so it
+  // never stretches with the panel, and the server/sessions-style 20px gutter + 20px padding + left
+  // rule separates it from the sessions' column; its top rule is off there. Below the measured
+  // four-column width (a 1412px panel: the four columns' 320 + 380 + 400 + 280 with their gutters plus
+  // the scroll body's 32px padding; measured in a browser, no horizontal scroll) the sessions go under
+  // the server's and the load under the sessions in that right column, its top rule the separator
+  // again; on a phone the four stack, the load last, with that top rule.
+  assert.match(css, /\.debug-cols \{\s*display: grid;\s*grid-template-areas: "page server sessions load";\s*grid-template-columns: minmax\(320px, max-content\) minmax\(340px, 480px\) minmax\(360px, 560px\) minmax\(240px, 280px\);\s*gap: 0;\s*width: fit-content;\s*max-width: 100%;/);
+  assert.match(css, /\.debug-load \{\s*grid-area: load;\s*min-width: 0;\s*margin-left: 20px;\s*padding-left: 20px;\s*border-left: 1px solid var\(--border\);/);
+  assert.match(css, /\.debug-load \.machine-load-section \{\s*margin-top: 0;\s*padding-top: 0;\s*border-top: 0;/);
+  assert.match(css, /@container debug-panel \(max-width: 1411px\) \{\s*\.debug-cols \{\s*grid-template-areas: "page server" "page sessions" "page load";\s*grid-template-columns: minmax\(320px, max-content\) minmax\(0, 560px\);\s*grid-template-rows: auto 1fr auto;/);
+  // The middle widths put the load back under the sessions' column with its own top rule (the row
+  // separator), and the phone stack strips the columns' left rules, the load's included.
+  assert.match(css, /\.debug-col-sessions \{\s*padding-top: 10px;\s*\}\s*\.debug-load \.machine-load-section \{\s*margin-top: 16px;\s*padding-top: 12px;\s*border-top: 1px solid var\(--border\);/);
   assert.match(css, /@container debug-panel \(max-width: 760px\) \{\s*\.debug-cols \{\s*grid-template-areas: "page" "server" "sessions" "load";\s*grid-template-columns: minmax\(0, 1fr\);\s*grid-template-rows: none;\s*width: auto;/);
+  assert.match(css, /\.debug-col-server,\s*\.debug-col-sessions,\s*\.debug-load \{\s*margin-left: 0;\s*padding-left: 0;\s*border-left: 0;/);
   // A measure's details wrap in the table instead of widening it.
   assert.match(css, /\.debug-measure-sub,\s*\.debug-measure-empty \{\s*grid-column: 2 \/ -1;\s*width: 0;\s*min-width: 100%;/);
   assert.doesNotMatch(outside, /\{[^}]*\{/, "no nested rule");

@@ -53,6 +53,10 @@ import { isBuiltInSubagentsEnabled } from "./subagent-settings";
 import { resolveShellTools } from "./powershell-settings";
 import { CHAT_ONLY_RESOURCE_LOADER_OPTIONS, contextFilesSystemPrompt } from "./chat-only";
 import { createExactSystemPromptExtension } from "./exact-system-prompt";
+import { appendAgentLanguageInstruction, type AgentLanguage } from "./agent-language";
+import { readStoredAgentLanguage } from "./agent-language-config";
+import { createAgentLanguageExtension } from "./agent-language-prompt";
+import { appendSessionAgentLanguage, readSessionAgentLanguage } from "./session-agent-language";
 import { createPiWebBuiltinExtensions, createSubagentCodemodeExtension, createSubagentMcpExtensions } from "./builtin-extensions";
 import type { McpHost } from "./mcp-host";
 import type { DebugMcpHost, DebugSessionLifecycle, DebugWrapperSnapshot } from "./debug-types";
@@ -188,6 +192,8 @@ type WrapperMcpHost = Pick<McpHost, "prepareForPrompt" | "dispose"> & Partial<Pi
 
 type AgentSessionWrapperOptions = {
   exactSystemPrompt?: () => string;
+  /** The session's Agent language as its entry fixed it at start; English when absent. */
+  agentLanguage?: AgentLanguage;
   chatOnly?: boolean;
   onAgentRunComplete?: AgentRunCompleteListener;
   suppressCompletionNotifications?: boolean;
@@ -291,6 +297,12 @@ export interface RpcSessionStartOptions {
   initialModel?: { provider: string; modelId: string };
   allowInitialModelFallback?: boolean;
   thinkingLevel?: ThinkingLevel;
+  /**
+   * A new session's Agent language. Only a rebuild passes it, to keep
+   * the language of the session it replaces; otherwise a new session captures the
+   * server setting. An existing session file always keeps its own entry.
+   */
+  agentLanguage?: AgentLanguage;
 }
 
 const CODING_TOOL_NAMES = ["read", "bash", "powershell", "edit", "write", "grep", "find", "ls"];
@@ -403,6 +415,8 @@ export class AgentSessionWrapper {
   private extensionBindingPromise: Promise<void> | null = null;
   private extensionBindingError: unknown = null;
   private readonly exactSystemPrompt?: () => string;
+  /** Read by the subagent runtime: a pi subagent inherits its parent's language. */
+  readonly agentLanguage: AgentLanguage;
   private readonly chatOnly: boolean;
   private readonly onAgentRunComplete?: AgentRunCompleteListener;
   private readonly onDirectTurnSettled?: (aborted: boolean) => void;
@@ -445,6 +459,7 @@ export class AgentSessionWrapper {
     options: AgentSessionWrapperOptions = {},
   ) {
     this.exactSystemPrompt = options.exactSystemPrompt;
+    this.agentLanguage = options.agentLanguage ?? "en";
     this.chatOnly = options.chatOnly ?? false;
     this.onAgentRunComplete = options.onAgentRunComplete;
     this.onDirectTurnSettled = options.onDirectTurnSettled;
@@ -2812,6 +2827,8 @@ export async function setRpcSessionTools(
     ? existing.sessionFile
     : undefined;
   const sessionCwd = existing.cwd;
+  // A rebuild keeps the session's own Agent language, never a newer setting.
+  const agentLanguage = readSessionAgentLanguage(existing.inner.sessionManager.getEntries() as unknown as SessionEntry[]);
   const model = existing.inner.model;
   const currentThinkingLevel = existing.inner.agent.state?.thinkingLevel;
   await existing.shutdown();
@@ -2825,6 +2842,7 @@ export async function setRpcSessionTools(
     ...(toolNames !== undefined ? { toolNames } : {}),
     ...(model ? { initialModel: { provider: model.provider, modelId: model.id } } : {}),
     allowInitialModelFallback: true,
+    agentLanguage,
     ...(currentThinkingLevel && THINKING_LEVEL_NAMES.has(currentThinkingLevel as ThinkingLevel)
       ? { thinkingLevel: currentThinkingLevel as ThinkingLevel }
       : {}),
@@ -3173,6 +3191,17 @@ export async function startRpcSession(
   if (!subagentResources && persistedToolNames === undefined && requestedToolNames !== undefined) {
     appendSessionToolSelection(sessionManager, requestedToolNames);
   }
+  // A session's Agent language is fixed at creation: a new session
+  // records the server setting (or the language of the session a rebuild replaces); an
+  // existing one reads its entry, and a pre-feature session without one is English. A
+  // subagent's language rides in its resource snapshot instead.
+  let agentLanguage: AgentLanguage = "en";
+  if (!sessionFile) {
+    agentLanguage = options.agentLanguage ?? readStoredAgentLanguage();
+    appendSessionAgentLanguage(sessionManager, agentLanguage);
+  } else if (!subagentResources) {
+    agentLanguage = readSessionAgentLanguage(sessionEntries);
+  }
   const subagentLoadsResources = Boolean(
     subagentResources?.loadExtensions || subagentResources?.loadSkills || subagentResources?.codemode || subagentResources?.mcp,
   );
@@ -3247,6 +3276,9 @@ export async function startRpcSession(
       skills: subagentResources.skills,
       exactSystemPrompt: subagentResources.exactSystemPrompt
         ?? (chatOnly ? subagentResources.appendSystemPrompt[0] ?? "" : undefined),
+      // The snapshot's language composes once, here: a reopened subagent gets no second
+      // language extension, and append mode already carries it in appendSystemPrompt.
+      ...(subagentResources.agentLanguage ? { agentLanguage: subagentResources.agentLanguage } : {}),
     }) : undefined;
     // The binding's own compose factory is merged into the extensionFactories below; the
     // rest of its loader options (noSkills, skillsOverride) spread into resourceLoaderOptions.
@@ -3307,6 +3339,8 @@ export async function startRpcSession(
                 isBuiltInSubagentsEnabled,
               ),
               ...(backgroundTasks ? [createBackgroundTasksBridgeExtension(backgroundTasks)] : []),
+              // Last, so the instruction follows every other prompt change.
+              createAgentLanguageExtension(() => agentLanguage),
             ],
             extensionsOverride: (base) => preferUserBashExtension(preferPiWebSubagentExtension(base)),
           },
@@ -3425,12 +3459,14 @@ export async function startRpcSession(
     const exactSystemPrompt = subagentResources
       ? skillsBinding!.getExactSystemPrompt
       : chatOnly
-        ? () => contextFilesSystemPrompt(inner.resourceLoader.getAgentsFiles().agentsFiles)
+        // Chat only's exact prompt, then the Agent language instruction for 中文.
+        ? () => appendAgentLanguageInstruction(contextFilesSystemPrompt(inner.resourceLoader.getAgentsFiles().agentsFiles), agentLanguage)
         : undefined;
     exactSystemPromptRef.current = exactSystemPrompt;
     const mcpHost = builtins?.mcpHost ?? subagentMcp?.mcpHost;
     const wrapper = new AgentSessionWrapper(inner, {
       exactSystemPrompt,
+      agentLanguage,
       chatOnly,
       backgroundTasks,
       onAgentRunComplete: (completedSessionId, sessionName) => {

@@ -20,6 +20,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
 import { startNextServer } from "./next-server.mjs";
+import { openPolyforgeDock as openDock, polyforgeDock as dock, polyforgeToggle as pfButton } from "./polyforge-dock.mjs";
 import { NAV_MS } from "./timeouts.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
@@ -235,22 +236,15 @@ async function openPage({ storage = {}, session = true, viewport = { width: 1280
   return page;
 }
 const withPage = async (opts, fn) => { const page = await openPage(opts); try { return await fn(page); } finally { await page.context().close(); } };
-const dock = (page) => page.locator("#polyforge-dock").or(page.getByRole("dialog", { name: /polyforge/i })).first();
-const pfButton = (page) => page.getByRole("button", { name: /^(?!.*close).*polyforge/i }).first();
-const openDock = async (page) => {
-  // the toggle renders only after the mount-time status probe
-  // (`pfPresent`) and, since, is resident at ≤480px / inline
-  // wider. Never open ⋯ to reveal it: ⋯'s overlay covers that slot and
-  // intercepts the click. Wait for the toggle, close ⋯ if it is open, click.
-  const more = page.locator('[data-mobile-toolbar-more="true"]');
-  await waitFor(async () => (await pfButton(page).count()) > 0, "the Polyforge toggle renders", 20_000);
-  if ((await more.count()) > 0 && (await more.getAttribute("aria-expanded")) === "true") {
-    await more.click();
-    await page.locator('[data-mobile-toolbar-actions="true"]').waitFor({ state: "hidden", timeout: 10_000 });
-  }
-  await pfButton(page).click(); await dock(page).waitFor({ timeout: 20_000 }); return dock(page);
-};
 const card = (page, wi) => dock(page).locator(`[data-pf-card-wi="${wi}"]`);
+// the visible status element is the leaf carrying the full
+// status as its title — the running card's text is its duration alone, so the
+// title is `<status word> <n>m` and ends with the visible text.
+const cardStatus = (page, wi) => card(page, wi).evaluate((el) => {
+  const lf = [...el.querySelectorAll("[title]")].map((node) => ({ text: (node.textContent ?? "").trim(), title: node.getAttribute("title") ?? "" }))
+    .find((entry) => entry.text && (entry.title === entry.text || entry.title.endsWith(` ${entry.text}`)));
+  return { text: lf?.text ?? "", title: lf?.title ?? "", aria: el.getAttribute("aria-label") ?? "" };
+});
 const cardOrder = (page) => dock(page).locator("[data-pf-card-wi]").evaluateAll((nodes) => nodes.map((node) => node.getAttribute("data-pf-card-wi")));
 async function waitFor(fn, label, ms = 12_000) {
   const deadline = Date.now() + ms; let last;
@@ -312,9 +306,13 @@ try {
     const panel = await openDock(page);
     await card(page, A.work_item_id).waitFor({ timeout: 30_000 });
     assert.equal(await panel.locator("[data-pf-card]").count(), 5, "one card per ops-status job");
-    const expected = [[A.work_item_id, /running/i], [B.work_item_id, /needs input/i],
-      [T.work_item_id, /paused/i], [C.work_item_id, /queued/i]];
-    for (const [wi, label] of expected) assert.match(await card(page, wi).innerText(), label, `${wi} status label`);
+    const expected = [[B.work_item_id, /needs input/i], [T.work_item_id, /paused/i], [C.work_item_id, /queued/i]];
+    for (const [wi, label] of expected) assert.match((await cardStatus(page, wi)).text, label, `${wi} status label`);
+    // owner 有意变更 a running card's visible status is the
+    // duration alone; the status word stays in its aria-label/title.
+    const runningStatus = await cardStatus(page, A.work_item_id);
+    assert.match(runningStatus.text, /^\d+m$/, `the running card shows the duration alone (${runningStatus.text})`);
+    assert.match(runningStatus.aria, new RegExp(`^${A.slug} · Running \\d+m$`), `the running aria-label keeps the full status (${runningStatus.aria})`);
   }));
 
   await check("S2", () => withPage({}, async (page) => {
@@ -705,10 +703,12 @@ try {
       assert.ok(geometry.goal.height <= 33, `${label}: the goal span is ${geometry.goal.height}px, over the 2×16px clamp (+1px) (${JSON.stringify(geometry.goal)})`);
       // A needs_input card's badge no longer inflates its slug row: 14px line
       // + 1px border = 16px (old badge: 11px × 1.5 + 2px padding + 2px border ≈ 20.5px).
-      // The slug row itself is max(badge, the slug's own 16px lines); a 150px
-      // card leaves the slug 85px beside the status label, so B's 14-character
-      // slug wraps to two 16px lines at every width — 32px, inside the memo's
-      // ≤33px allowance for the 150px card (one-column 340 dock included).
+      // The slug row itself is max(badge, the slug's own 16px lines); a fixed
+      // card leaves the slug a narrow column beside the status label, so B's
+      // 14-character slug may wrap to two 16px lines — inside the ≤33px
+      // allowance for the card (one-column 340 dock included). owner 有意変更
+      // the card is 180px now, so the slug has more room; the
+      // bound follows the measured row either way.
       const needsB = await card(page, B.work_item_id).evaluate((el, slug) => {
         const box = (target) => (target ? target.getBoundingClientRect().height : null);
         const slugNode = [...el.querySelectorAll("*")].find((child) => child.children.length === 0 && (child.textContent ?? "").trim() === slug);
@@ -723,17 +723,24 @@ try {
       assert.ok(needsB.row <= 33, `${label}: the needs_input slug row is ${needsB.row}px, over 33px (16px badge; one wrapped 2-line slug at a 150px card)`);
       assert.ok(geometry.slugRow >= 16 && geometry.slugRow % 16 === 0,
         `${label}: card A's slug row is a whole number of 16px lines (${geometry.slugRow})`);
-      // a running card's dim status label carries the job's age
-      // in whole minutes, computed from the card's earliest job_started (A has
-      // a job_started at at(0)); ±1 absorbs a minute rollover during the run.
-      // A non-running card (B, needs_input) has no suffix.
+      // a running card's age is whole minutes, computed from the
+      // card's earliest job_started (A has a job_started at at(0)); ±1 absorbs a
+      // minute rollover during the run. owner 有意变更 the
+      // visible status text is the duration alone (`23m`, matching ^\d+m$ and
+      // no status word); the full `<status word> <n>m` stays in the element's
+      // title and the card's aria-label. A non-running card (B, needs_input)
+      // keeps its status text and has no duration.
       const expectedMinutes = Math.floor((Date.now() - Date.parse(at(0))) / 60_000);
-      const runningText = await node.innerText();
-      const minutes = Number((runningText.match(/\bRunning\s+(\d+)m\b/i) ?? [])[1]);
-      assert.ok(Number.isFinite(minutes) && Math.abs(minutes - expectedMinutes) <= 1,
-        `${label}: the running label shows ${expectedMinutes}m from the fixture's job_started (got ${JSON.stringify(runningText.slice(0, 60))})`);
-      const nonRunningText = await card(page, B.work_item_id).innerText();
-      assert.doesNotMatch(nonRunningText, /\b\d+m\b/, `${label}: a non-running card has no minutes suffix (${JSON.stringify(nonRunningText.slice(0, 60))})`);
+      const runningStatus = await cardStatus(page, A.work_item_id);
+      assert.match(runningStatus.text, /^\d+m$/, `${label}: the running card's visible status is the duration alone (got ${JSON.stringify(runningStatus.text)})`);
+      assert.doesNotMatch(runningStatus.text, /running|运行中/i, `${label}: no status word in the running card's visible status (got ${JSON.stringify(runningStatus.text)})`);
+      const minutes = Number(runningStatus.text.slice(0, -1));
+      assert.ok(Math.abs(minutes - expectedMinutes) <= 1,
+        `${label}: the running label shows ${expectedMinutes}m from the fixture's job_started (got ${JSON.stringify(runningStatus.text)})`);
+      assert.match(runningStatus.title, /^Running \d+m$/, `${label}: the status element's title carries the full status (${runningStatus.title})`);
+      assert.match(runningStatus.aria, new RegExp(`^${A.slug} · Running \\d+m$`), `${label}: the card aria-label carries the full status (${runningStatus.aria})`);
+      const nonRunningStatus = await cardStatus(page, B.work_item_id);
+      assert.doesNotMatch(nonRunningStatus.text, /^\d+m$/, `${label}: a non-running card shows no duration (${JSON.stringify(nonRunningStatus.text)})`);
       if (measureHeight) {
         // The docks (460px and 340px) measure card A's whole height. owner 有意变更
         //（fix228-card-height， reverses the 32px
@@ -746,8 +753,10 @@ try {
         const bound = 43 + geometry.slugRow;
         assert.ok(cardHeight <= bound, `${label}: card A is ${cardHeight}px, over the ${bound}px card geometry (43px + its ${geometry.slugRow}px slug row)`);
       }
-      // one row of fixed 150px cards that scrolls left and right
+      // one row of fixed-width cards that scrolls left and right
       // (old: N tracks of `repeat(auto-fill, minmax(150px, 1fr))` per width).
+      // owner 有意变更 that fixed width is 180px, decoupled from
+      // the Tasks grid's own 150px column minimum.
       const row = await node.evaluate((el) => {
         const container = el.parentElement;
         const box = el.getBoundingClientRect();
@@ -755,8 +764,8 @@ try {
           clientWidth: container.clientWidth, scrollWidth: container.scrollWidth,
           overflowX: getComputedStyle(container).overflowX, scrollbarWidth: getComputedStyle(container).scrollbarWidth };
       });
-      assert.ok(Math.abs(row.width - 150) <= 0.5, `${label}: a job card is a fixed 150px wide (${row.width})`);
-      assert.equal(row.basis, "150px", `${label}: the card width is the 150px flex basis, not a stretched track (${row.basis})`);
+      assert.ok(Math.abs(row.width - 180) <= 0.5, `${label}: a job card is a fixed 180px wide (${row.width}) (owner 有意变更)`);
+      assert.equal(row.basis, "180px", `${label}: the card width is the 180px flex basis, not a stretched track (${row.basis}) (owner 有意变更)`);
       assert.equal(row.gap, "8px", `${label}: the card gap is the unchanged 8px (${row.gap})`);
       assert.equal(row.overflowX, "auto", `${label}: the card row scrolls horizontally (${row.overflowX})`);
       assert.equal(row.scrollbarWidth, "thin", `${label}: the row's scrollbar stays visible but thin (${row.scrollbarWidth})`);
@@ -767,7 +776,7 @@ try {
         order: nodes.map((el) => el.getAttribute("data-pf-card-wi")),
       }));
       assert.equal(shape.rows, 1, `${label}: every job card sits on one row (${JSON.stringify(shape)})`);
-      assert.ok(shape.widths.every((width) => Math.abs(width - 150) <= 0.5), `${label}: every card is 150px wide (${JSON.stringify(shape.widths)})`);
+      assert.ok(shape.widths.every((width) => Math.abs(width - 180) <= 0.5), `${label}: every card is 180px wide (${JSON.stringify(shape.widths)}) (owner 有意变更)`);
       assert.equal(new Set(shape.order).size, shape.order.length, `${label}: the cards keep one DOM node each (${JSON.stringify(shape.order)})`);
       // Scrolled to the row's end the last card is fully visible (its box inside
       // the row's viewport, nothing clipped) and the row has really moved.

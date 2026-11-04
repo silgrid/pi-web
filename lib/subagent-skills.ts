@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { formatSkillsForPrompt, type DefaultResourceLoader, type InlineExtension, type Skill } from "@earendil-works/pi-coding-agent";
+import { appendAgentLanguageInstruction, type AgentLanguage } from "./agent-language";
 import { parseFrontmatter } from "./frontmatter";
 import { subagentNameList } from "./subagents";
 
@@ -8,12 +9,19 @@ export function createSubagentSkillsBinding(options: {
   loadSkills: boolean;
   skills?: readonly string[];
   exactSystemPrompt?: string;
+  /**
+   * The session's Agent language: an exact prompt (replace mode, Chat only)
+   * is followed by the instruction for 中文, after the skills text. Append mode carries it
+   * in `appendSystemPrompt` instead, so this adds nothing there.
+   */
+  agentLanguage?: AgentLanguage;
 }) {
   // `load_skills: false` wins over a list.
   const names = options.loadSkills && options.skills !== undefined ? subagentNameList(options.skills) : undefined;
   let discovered: Skill[] = [];
   let activeTools: () => readonly string[] = () => [];
-  let effectiveExactPrompt = options.exactSystemPrompt;
+  const exact = (prompt: string): string => appendAgentLanguageInstruction(prompt, options.agentLanguage);
+  let effectiveExactPrompt = options.exactSystemPrompt === undefined ? undefined : exact(options.exactSystemPrompt);
   const suffix = (): string => {
     if (!options.loadSkills) return "";
     if (names === undefined) {
@@ -42,9 +50,10 @@ export function createSubagentSkillsBinding(options: {
         const skillsText = suffix();
         if (!skillsText && options.exactSystemPrompt === undefined) return undefined;
         const base = options.exactSystemPrompt ?? event.systemPrompt;
-        const prompt = skillsText ? `${base}\n\n${skillsText}` : base;
-        if (options.exactSystemPrompt !== undefined) effectiveExactPrompt = prompt;
-        return { systemPrompt: prompt };
+        const composed = skillsText ? `${base}\n\n${skillsText}` : base;
+        if (options.exactSystemPrompt === undefined) return { systemPrompt: composed };
+        effectiveExactPrompt = exact(composed);
+        return { systemPrompt: effectiveExactPrompt };
       });
     },
   };

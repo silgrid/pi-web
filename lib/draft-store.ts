@@ -71,6 +71,22 @@ export function mergeRestoredSubmissionDraft(
   };
 }
 
+/** The Messages 「@」 fill rule: the prompt goes after the
+ *  current text with one blank line between them, and an empty draft gets
+ *  the prompt alone (no leading blank line). Text only — never images. */
+export function appendPromptText(current: string, text: string): string {
+  return current.trim() ? `${current}\n\n${text}` : text;
+}
+
+/** The same rule on a session's stored draft, for a bound composer that is
+ *  not mounted: the stored images are kept exactly, nothing else changes. */
+export function appendDraftText(key: string, text: string): ChatDraft {
+  const current = getDraft(key) ?? { value: "", images: [] };
+  const next = { value: appendPromptText(current.value, text), images: current.images };
+  setDraft(key, next);
+  return next;
+}
+
 export function restoreDraftSubmission(
   key: string,
   text: string,

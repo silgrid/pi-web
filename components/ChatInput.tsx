@@ -5,6 +5,7 @@ import type { BuiltinSlashCommandResult, CompactResultInfo, QueuedMessages, Slas
 import type { SkillsResponse } from "@/lib/api-types";
 import type { TextContent, UserMessage } from "@/lib/types";
 import {
+  appendPromptText,
   clearDraft,
   getDraft,
   mergeRestoredSubmissionDraft,
@@ -17,6 +18,7 @@ import {
   MAX_ATTACHED_IMAGE_BYTES,
   MAX_ATTACHED_IMAGES,
   isBase64ImageWithinLimits,
+  isClaudeImageMimeType,
 } from "@/lib/image-attachments";
 import {
   buildEntriesFromFiles, buildAtInsertText, extractAtQuery, filterFileEntries,
@@ -35,20 +37,34 @@ import { useChatAppearance } from "@/hooks/useChatAppearance";
 import { useFontPreferences } from "@/hooks/useFontPreferences";
 import type { ToolPreset } from "@/lib/tool-presets";
 import {
+  CLAUDE_EFFORT_DEFAULT,
+  CLAUDE_EFFORT_LEVELS,
   CLAUDE_HARNESS,
-  CLAUDE_MODEL_ALIASES,
-  CLAUDE_TOOL_PRESETS,
-  PI_HARNESS,
-  isClaudeModelAlias,
-  isClaudeToolPreset,
-  type ClaudeModelAlias,
-  type ClaudeToolPreset,
+  CLAUDE_MODELS,
+  CLAUDE_PROVIDER,
+  isClaudeModel,
+  type ClaudeEffort,
+  type ClaudeModel,
   type SessionHarness,
 } from "@/lib/claude-shared";
+import { HarnessSelector } from "./HarnessSelector";
 import { SelectorRow } from "./SelectorRow";
 import { ModelSelector, type ModelSelectorOption } from "./ModelSelector";
 
 export { filterModelOptions } from "./ModelSelector";
+
+/**
+ * The picked, pasted or dropped files a composer attaches, before the count limit:
+ * images within pi's size limit, and for claude only PNG/JPEG/GIF/WebP.
+ * `formatRefused` is whether claude's whitelist turned an image away (shown visibly);
+ * pi's limits stay silent.
+ */
+export function filterComposerImageFiles<T extends { type: string; size: number }>(files: readonly T[], claude: boolean): { accepted: T[]; formatRefused: boolean } {
+  const withinLimits = files.filter((f) => f.type.startsWith("image/") && f.size <= MAX_ATTACHED_IMAGE_BYTES);
+  if (!claude) return { accepted: withinLimits, formatRefused: false };
+  const accepted = withinLimits.filter((f) => isClaudeImageMimeType(f.type));
+  return { accepted, formatRefused: accepted.length < withinLimits.length };
+}
 
 export interface AttachedImage {
   data: string;   // base64, no prefix
@@ -119,122 +135,63 @@ interface Props {
   cwd?: string | null;
   /** Files picked with the attach button, handled like files dropped onto the chat. Without it the button takes images only. */
   onAttachFiles?: (files: File[]) => void;
-  /** The harness controls: a fresh composer's pi/claude choice, or a claude session's fixed line. */
+  /** The harness controls: a fresh composer's pi/claude choice; claude's model / effort controls. */
   claude?: ClaudeComposerState;
 }
 
 /**
- * The composer's claude state. `choosing`: a fresh composer, where harness, alias and preset
- * are picked; otherwise they are the session's, fixed for its life.
+ * The composer's claude state. `choosing`: a fresh composer, where harness, model and
+ * effort are picked; otherwise an open claude session, whose harness stays as it is and
+ * whose model and effort switch while it is idle.
  */
 export interface ClaudeComposerState {
   choosing: boolean;
   harness: SessionHarness;
-  modelAlias: ClaudeModelAlias;
-  preset: ClaudeToolPreset;
+  /** The claude full model name. */
+  model: ClaudeModel;
+  /** The claude effort; the default entry passes no `--effort`. */
+  effort: ClaudeEffort;
   /** GET /api/claude's answer; null until it came (claude then stays unavailable). */
-  availability: { available: boolean; configDir: string } | null;
+  availability: { available: boolean } | null;
   onHarnessChange?: (harness: SessionHarness) => void;
-  onModelAliasChange?: (alias: ClaudeModelAlias) => void;
-  onPresetChange?: (preset: ClaudeToolPreset) => void;
+  onModelChange?: (model: ClaudeModel) => void;
+  onEffortChange?: (effort: ClaudeEffort) => void;
+  /** The visible line of a switch claude refused (localized prefix + claude's own text). */
+  switchError?: string | null;
+  /** An open session: its event stream has said whether a turn runs. Until then its controls stay disabled. */
+  stateKnown?: boolean;
 }
 
-/** i18n key of a claude model alias's label. */
-export function claudeAliasLabelKey(alias: ClaudeModelAlias): string {
-  return alias === "claude-default" ? "claude.aliasDefault" : `claude.alias.${alias}`;
-}
-
-/** i18n key of what a preset does, including whether it loads the session folder's CLAUDE.md. */
-export function claudePresetTextKey(preset: ClaudeToolPreset): string {
-  return preset === "writable" ? "claude.presetWritableText" : "claude.presetReadOnlyText";
-}
-
-const claudeSelectStyle: React.CSSProperties = {
-  height: 28,
-  padding: "0 6px",
-  borderRadius: 7,
-  border: "1px solid var(--border)",
-  background: "var(--bg)",
-  color: "var(--text)",
-  fontSize: 12,
-};
+/** The claude full names as the model selector's options. */
+const CLAUDE_MODEL_OPTIONS: ModelSelectorOption[] = CLAUDE_MODELS.map((model) => ({ provider: CLAUDE_PROVIDER, modelId: model, name: model }));
 
 /**
- * The harness picker of a fresh composer (pi default, claude with alias and preset) and,
- * for claude, what is fixed and what the preset does — all visible text, never a tooltip.
+ * The claude lines under the composer's selectors — all visible text, never a tooltip:
+ * in a fresh composer the system-claude hint while claude is chosen and the not-on-PATH
+ * reason; in an open claude session the line of a model / effort switch claude refused
+ *, until the next successful switch.
  */
 export function ClaudeComposerControls({ state, t }: { state: ClaudeComposerState; t: (key: string, params?: Record<string, string | number>) => string }) {
   const claudeOn = state.harness === CLAUDE_HARNESS;
-  const available = state.availability?.available === true;
-  const presetLabel = t(state.preset === "writable" ? "claude.presetWritable" : "claude.presetReadOnly");
-  if (!state.choosing) {
-    if (!claudeOn) return null;
-    return (
-      <div className="claude-fixed-line" data-harness="claude" style={{ fontSize: 11, color: "var(--text-muted)", padding: "4px 2px 0" }}>
-        {t("claude.fixedLine", { model: t(claudeAliasLabelKey(state.modelAlias)), preset: presetLabel })}
-      </div>
-    );
-  }
+  const unavailable = state.choosing && state.availability !== null && !state.availability.available;
+  const hint = state.choosing && claudeOn;
+  const switchError = claudeOn ? state.switchError : null;
+  if (!hint && !unavailable && !switchError) return null;
   return (
-    <div className="claude-composer-controls" style={{ display: "flex", flexDirection: "column", gap: 4, padding: "6px 2px 0", fontSize: 12, color: "var(--text-muted)" }}>
-      <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8 }}>
-        <label style={{ display: "flex", alignItems: "center", gap: 4 }}>
-          <span>{t("claude.harnessLabel")}</span>
-          <select
-            aria-label={t("claude.harnessLabel")}
-            value={state.harness}
-            onChange={(event) => state.onHarnessChange?.(event.target.value === CLAUDE_HARNESS && available ? CLAUDE_HARNESS : PI_HARNESS)}
-            style={claudeSelectStyle}
-          >
-            <option value={PI_HARNESS}>{t("claude.harnessPi")}</option>
-            <option value={CLAUDE_HARNESS} disabled={!available}>{t("claude.harnessClaude")}</option>
-          </select>
-        </label>
-        {claudeOn && (
-          <>
-            <label style={{ display: "flex", alignItems: "center", gap: 4 }}>
-              <span>{t("claude.modelAliasLabel")}</span>
-              <select
-                aria-label={t("claude.modelAliasLabel")}
-                value={state.modelAlias}
-                onChange={(event) => { if (isClaudeModelAlias(event.target.value)) state.onModelAliasChange?.(event.target.value); }}
-                style={claudeSelectStyle}
-              >
-                {CLAUDE_MODEL_ALIASES.map((alias) => <option key={alias} value={alias}>{t(claudeAliasLabelKey(alias))}</option>)}
-              </select>
-            </label>
-            <label style={{ display: "flex", alignItems: "center", gap: 4 }}>
-              <span>{t("claude.presetLabel")}</span>
-              <select
-                aria-label={t("claude.presetLabel")}
-                value={state.preset}
-                onChange={(event) => { if (isClaudeToolPreset(event.target.value)) state.onPresetChange?.(event.target.value); }}
-                style={claudeSelectStyle}
-              >
-                {CLAUDE_TOOL_PRESETS.map((preset) => (
-                  <option key={preset} value={preset}>{t(preset === "writable" ? "claude.presetWritable" : "claude.presetReadOnly")}</option>
-                ))}
-              </select>
-            </label>
-          </>
-        )}
-      </div>
-      {!available && state.availability !== null && <div className="claude-unavailable">{t("claude.notOnPath")}</div>}
-      {claudeOn && (
-        <>
-          <div>{t("claude.fixedForSession")}</div>
-          <div>{t(claudePresetTextKey(state.preset))}</div>
-          {state.availability?.configDir && (
-            <div style={{ fontFamily: "var(--font-mono)", fontSize: 11, wordBreak: "break-all" }}>
-              {t("claude.configDir", { path: state.availability.configDir })}
-            </div>
-          )}
-          <div>{t("claude.configDirNote")}</div>
-        </>
-      )}
+    <div className="claude-composer-controls" style={{ display: "flex", flexDirection: "column", gap: 4, padding: "4px 2px 0", fontSize: 11, color: "var(--text-muted)" }}>
+      {hint && <div className="claude-system-hint">{t("claude.systemHint")}</div>}
+      {unavailable && <div className="claude-unavailable">{t("claude.notOnPath")}</div>}
+      {switchError && <div className="claude-switch-error" role="alert" style={{ color: "#ef4444", whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{switchError}</div>}
     </div>
   );
 }
+
+/** claude's effort entries in menu order: the default entry, then its five levels. */
+export const CLAUDE_EFFORT_ENTRIES: readonly ClaudeEffort[] = [CLAUDE_EFFORT_DEFAULT, ...CLAUDE_EFFORT_LEVELS];
+const CLAUDE_EFFORT_DESC_KEYS: Record<ClaudeEffort, string> = {
+  default: "claude.effortDefaultDesc", low: "chat.thinkingLow", medium: "chat.thinkingMedium",
+  high: "chat.thinkingHigh", xhigh: "chat.thinkingXhigh", max: "chat.thinkingMax",
+};
 
 export interface ChatInputHandle {
   insertText: (text: string) => void;
@@ -243,6 +200,12 @@ export interface ChatInputHandle {
   insertIfEmpty: (text: string) => void;
   replaceMessage: (message: UserMessage) => void;
   prependText: (text: string) => void;
+  /** The Messages 「@」 fill: append after the current text
+   *  with one blank line (none for an empty draft); images, toolbar and
+   *  focus untouched, and never a submit. */
+  appendText: (text: string) => void;
+  /** The draft key this composer currently writes (its session's key). */
+  draftKey: () => string | undefined;
   addImages: (files: File[]) => void;
   rekeyDraft: (previousKey: string, nextKey: string) => void;
   restoreSubmission: (text: string, images?: ChatDraftImage[], targetDraftKey?: string) => void;
@@ -877,6 +840,13 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const [atMenuMaxHeight, setAtMenuMaxHeight] = useState<number | null>(null);
   const [atActiveIndex, setAtActiveIndex] = useState(0);
   const [imageWarningDismissed, setImageWarningDismissed] = useState(false);
+  // A claude composer refused a picked image's format: one visible line.
+  const [claudeImageFormatRefused, setClaudeImageFormatRefused] = useState(false);
+  const claudeComposer = claude?.harness === CLAUDE_HARNESS;
+  // An open claude session's model, effort and compact controls: usable only
+  // while idle — no turn and no compaction running.
+  const claudeSession = claudeComposer && !claude?.choosing;
+  const claudeBusy = isStreaming || Boolean(isCompacting) || (claudeSession && claude?.stateKnown === false);
   const [filePickerNoticeVisible, setFilePickerNoticeVisible] = useState(false);
   // pi#33: "Edit from here" skips the restore when a draft exists; the skip
   // must be observable (kept-draft notice), never a silent no-op.
@@ -978,6 +948,20 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         ta.setSelectionRange(combined.length, combined.length);
         autoGrowTextarea(ta);
       });
+    },
+    appendText(text: string) {
+      if (!text.trim()) return;
+      const combined = appendPromptText(valueRef.current, text);
+      valueRef.current = combined;
+      setValue(combined);
+      setAtQuery(null);
+      const ta = textareaRef.current;
+      requestAnimationFrame(() => {
+        if (ta) autoGrowTextarea(ta);
+      });
+    },
+    draftKey() {
+      return draftKeyRef.current;
     },
     rekeyDraft(previousKey: string, nextKey: string) {
       if (previousKey === nextKey) return;
@@ -1116,9 +1100,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       0,
       MAX_ATTACHED_IMAGES - attachedImagesRef.current.length - pendingImageCountRef.current,
     );
-    const imageFiles = files
-      .filter((f) => f.type.startsWith("image/") && f.size <= MAX_ATTACHED_IMAGE_BYTES)
-      .slice(0, remaining);
+    const { accepted, formatRefused } = filterComposerImageFiles(files, claudeComposer);
+    if (claudeComposer) setClaudeImageFormatRefused(formatRefused);
+    const imageFiles = accepted.slice(0, remaining);
     if (!imageFiles.length) return;
     pendingImageCountRef.current += imageFiles.length;
     try {
@@ -1138,7 +1122,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     } finally {
       pendingImageCountRef.current -= imageFiles.length;
     }
-  }, [compact]);
+  }, [compact, claudeComposer]);
 
   /**
    * Opens the OS file chooser synchronously inside the click gesture (never
@@ -1228,6 +1212,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   }, []);
 
   const clearImages = useCallback(() => {
+    setClaudeImageFormatRefused(false);
     attachedImagesRef.current = [];
     setAttachedImages((prev) => {
       prev.forEach(revokeImagePreview);
@@ -1384,8 +1369,10 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const stackedComposer = stacksComposerLayout(compact, isMobile, isStreaming);
   // Warn when images are attached but the selected model is known not to accept
   // image input (#584), including a resolved default. Unknown models stay silent.
+  // Never for claude: its four models all take images.
   const showImageUnsupportedWarning = (
-    attachedImages.length > 0
+    !claudeComposer
+    && attachedImages.length > 0
     && !modelSupportsImageInput(model, modelList)
     && !imageWarningDismissed
   );
@@ -1922,10 +1909,13 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     }));
   })();
 
-  const compactSavedTokens = compactResult
+  const compactSavedTokens = compactResult && compactResult.estimatedTokensAfter !== undefined
     ? Math.max(0, compactResult.tokensBefore - compactResult.estimatedTokensAfter)
     : 0;
-  const compactResultText = compactResult
+  const compactResultText = compactResult && compactResult.estimatedTokensAfter === undefined
+    // claude reports only the count before its compaction: nothing after or saved.
+    ? t("claude.compactResult", { tokens: formatTokenCount(compactResult.tokensBefore) })
+    : compactResult && compactResult.estimatedTokensAfter !== undefined
     ? `${compactResult.reason && compactResult.reason !== "manual" ? `${compactResult.reason[0].toUpperCase()}${compactResult.reason.slice(1)} ` : t("chat.compacted")} ${formatTokenCount(compactResult.tokensBefore)} -> ${formatTokenCount(compactResult.estimatedTokensAfter)} tokens (${t("chat.tokensSaved", { saved: formatTokenCount(compactSavedTokens) })})`
     : null;
   const resolvedThinkingLevel = thinkingLevel && thinkingLevel !== "auto" ? thinkingLevel : null;
@@ -1968,7 +1958,10 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     if (!isStreaming) return;
     return () => { runEndedAtRef.current = performance.now(); };
   }, [isStreaming]);
-  const isStrayClick = (e: React.MouseEvent) => isRunEndStrayClick(e.detail, performance.now() - runEndedAtRef.current);
+  // The guard is for pi's Compact (and tools) taking Stop's place as a run ends. An open claude
+  // session's compact control stays in place, disabled while a turn runs, so a
+  // click on it is always meant.
+  const isStrayClick = (e: React.MouseEvent) => !claudeSession && isRunEndStrayClick(e.detail, performance.now() - runEndedAtRef.current);
 
   useEffect(() => {
     if (!isMobile) setControlsMenuOpen(false);
@@ -2066,10 +2059,25 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     )}
   </>);
 
+  // claude's controls: pi's model selector with claude's four full names, and
+  // pi's reasoning button / menu with claude's effort entries.
+  const claudeEffortChange = claudeComposer ? claude?.onEffortChange : undefined;
+  const claudeEffortLabel = (effort: ClaudeEffort) => (effort === CLAUDE_EFFORT_DEFAULT ? t("claude.effortDefault") : effort);
+  const reasoningLabel = claudeEffortChange ? claudeEffortLabel(claude?.effort ?? CLAUDE_EFFORT_DEFAULT) : thinkingDisplayLabel;
+  const claudeModelSelector = claude && claudeComposer ? (
+    <ModelSelector
+      options={CLAUDE_MODEL_OPTIONS}
+      value={{ provider: CLAUDE_PROVIDER, modelId: claude.model }}
+      onChange={(_provider, modelId) => { if (isClaudeModel(modelId) && modelId !== claude.model) claude.onModelChange?.(modelId); }}
+      disabled={claudeBusy}
+    />
+  ) : null;
+
   const sendButton = (
     <button
       onClick={handleSend}
-      disabled={!value.trim() && !attachedImages.length}
+      // A claude compaction is a turn: nothing is sent until it ends.
+      disabled={(claudeComposer && Boolean(isCompacting)) || (!value.trim() && !attachedImages.length)}
       title={t("chat.send")}
       aria-label={t("chat.send")}
       style={{
@@ -2179,6 +2187,24 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             />
           );
         })()}
+        {claudeComposer && claudeImageFormatRefused && (
+          <div
+            role="alert"
+            className="claude-image-format-refusal"
+            style={{
+              marginBottom: 8,
+              padding: "5px 10px",
+              border: "1px solid rgba(234,179,8,0.3)",
+              borderRadius: 6,
+              background: "rgba(234,179,8,0.07)",
+              color: "rgb(234,179,8)",
+              fontSize: 12,
+              lineHeight: 1.5,
+            }}
+          >
+            {t("chat.claudeImageFormats")}
+          </div>
+        )}
         {/* Queued steering / follow-up messages (delivered by pi on upcoming turns) */}
         {((queuedMessages?.steering.length ?? 0) + (queuedMessages?.followUp.length ?? 0)) > 0 && (
           <div style={{
@@ -2705,7 +2731,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
           <textarea
             ref={textareaRef}
             className="chat-input-textarea"
-            aria-label={compact ? t("chat.askInSideChat") : undefined}
+            aria-label={compact ? t("chat.askInNewChat") : undefined}
             value={value}
             onChange={(e) => {
               valueRef.current = e.target.value;
@@ -2731,7 +2757,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             onPaste={handlePaste}
             placeholder={
               isCompacting
-                ? t("chat.compactingPlaceholder")
+                ? t(claudeComposer ? "claude.compactingPlaceholder" : "chat.compactingPlaceholder")
                 : isStreaming && (onSteer || onFollowUp)
                 ? t("chat.steerPlaceholder")
                 : isStreaming ? t(claude?.harness === CLAUDE_HARNESS ? "claude.sendWhileRunning" : "chat.agentPlaceholder")
@@ -2785,8 +2811,6 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
           </div>
         )}
 
-        {!compact && claude && <ClaudeComposerControls state={claude} t={t} />}
-
         {/* Bottom bar: left | center (context) | right */}
         {!compact && <div className="chat-input-controls" style={{
           marginTop: isMobile ? 4 : 8,
@@ -2798,8 +2822,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
 
           {/* LEFT: attach + model selector (idle) or steer/followup toggle (streaming) */}
           <div style={{ flex: isMobile ? "1 1 auto" : "0 0 auto", minWidth: 0, display: "flex", alignItems: "center", gap: 2 }}>
-            {/* A claude session takes text only: no attachments. */}
-            {claude?.harness !== CLAUDE_HARNESS && <button
+            {/* Both harnesses attach images; claude's whitelist applies in processImageFiles. */}
+            <button
               onClick={openImagePicker}
               title={t("chat.attachFiles")}
               style={{
@@ -2826,9 +2850,26 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 <circle cx="8.5" cy="8.5" r="1.5" />
                 <polyline points="21 15 16 10 5 21" />
               </svg>
-            </button>}
-            {/* Model selector - visible always, disabled while the session or switch is busy */}
-            {(modelOptions.length > 0 || model || modelError) && onModelChange && (
+            </button>
+            {/* A fresh composer's harness, beside the model selector it drives. */}
+            {claude?.choosing && (
+              <HarnessSelector
+                value={claude.harness}
+                onChange={(harness) => claude.onHarnessChange?.(harness)}
+                claudeAvailable={claude.availability?.available === true}
+                unavailableReason={t("claude.notOnPath")}
+                ariaLabel={t("claude.harnessLabel")}
+                disabled={isStreaming}
+              />
+            )}
+            {/* A claude composer (fresh or open,): the same model selector, listing the
+                four claude full names. On a phone an open session's stays here in the bottom bar's
+                left cell, exactly where pi's sits (owner 有意变更; #272 had moved it
+                into the More controls menu); effort and compact stay in that menu. */}
+            {claudeComposer ? (
+              claudeModelSelector
+            ) : (modelOptions.length > 0 || model || modelError) && onModelChange && (
+              /* Model selector - visible always, disabled while the session or switch is busy */
               <ModelSelector
                 options={modelOptions}
                 value={model}
@@ -2921,13 +2962,15 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 backdropFilter: "blur(10px)",
               } : null),
             }}>
-            {onThinkingLevelChange && (
+            {(claudeEffortChange || onThinkingLevelChange) && (
               <div ref={thinkingDropdownRef} style={{ position: "relative" }}>
                 <button
                   onClick={() => setThinkingDropdownOpen((v) => !v)}
+                  // claude's effort switches only while the session is idle.
+                  disabled={claudeEffortChange ? claudeBusy : undefined}
                   title={isStreaming
-                    ? t("chat.currentReasoning", { level: thinkingDisplayLabel })
-                    : t("chat.changeReasoning", { level: thinkingDisplayLabel })}
+                    ? t("chat.currentReasoning", { level: reasoningLabel })
+                    : t("chat.changeReasoning", { level: reasoningLabel })}
                   aria-label={t("chat.changeReasoningLabel")}
                   style={{
                     display: "flex", alignItems: "center", justifyContent: "center", gap: 5,
@@ -2956,7 +2999,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                     <line x1="7" y1="18" x2="12" y2="18" />
                     <line x1="8" y1="21" x2="11" y2="21" />
                   </svg>
-                  {(!isMobile || controlsMenuOpen) && <span style={{ whiteSpace: "nowrap" }}>{thinkingDisplayLabel}</span>}
+                  {(!isMobile || controlsMenuOpen) && <span style={{ whiteSpace: "nowrap" }}>{reasoningLabel}</span>}
                 </button>
                 {thinkingDropdownOpen && (
                   <div style={{
@@ -2966,7 +3009,24 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                     borderRadius: 8, boxShadow: "0 -4px 16px rgba(0,0,0,0.10)",
                     overflow: "hidden", minWidth: 180,
                   }}>
-                    {THINKING_LEVELS.filter((lvl) => {
+                    {claudeEffortChange ? CLAUDE_EFFORT_ENTRIES.map((effort) => {
+                      // claude's five levels and the default entry: one active, no star.
+                      const isActive = claude?.effort === effort;
+                      return (
+                        <SelectorRow
+                          key={effort}
+                          active={isActive}
+                          onSelect={() => {
+                            setThinkingDropdownOpen(false);
+                            if (!isActive) claudeEffortChange(effort);
+                          }}
+                        >
+                          <span style={{ flex: 1 }}>{claudeEffortLabel(effort)}</span>
+                          {" "}
+                          <span style={{ fontSize: 11, color: "var(--text-dim)", marginLeft: 8 }}>{t(CLAUDE_EFFORT_DESC_KEYS[effort])}</span>
+                        </SelectorRow>
+                      );
+                    }) : THINKING_LEVELS.filter((lvl) => {
                       if (!availableThinkingLevels) return true;
                       if (lvl === "auto") return true;
                       return availableThinkingLevels.includes(lvl);
@@ -2985,10 +3045,10 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                           onSelect={() => {
                             setThinkingDropdownOpen(false);
                             if (lvl === "auto") {
-                              if (!isAutoThinkingSelection) onThinkingLevelChange("auto");
+                              if (!isAutoThinkingSelection) onThinkingLevelChange?.("auto");
                               return;
                             }
-                            if (!isActive || isAutoThinkingSelection) onThinkingLevelChange(lvl);
+                            if (!isActive || isAutoThinkingSelection) onThinkingLevelChange?.(lvl);
                           }}
                           gutter={Boolean(onSetDefaultThinkingLevel)}
                           star={onSetDefaultThinkingLevel && lvl !== "auto"
@@ -3105,10 +3165,12 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               </div>
             )}
 
-            {(!isStreaming || isCompacting) && onCompact && (
+            {/* claude's compact control stays in place while a turn runs, disabled. */}
+            {(claudeSession || !isStreaming || isCompacting) && onCompact && (
               <div>
                 <button
                   onClick={isCompacting ? onAbortCompaction : (e) => { if (!isStrayClick(e)) onCompact(); }}
+                  disabled={claudeSession && !isCompacting && (isStreaming || claude?.stateKnown === false)}
                   style={{
                     display: "flex", alignItems: "center", justifyContent: "center", gap: 5,
                     padding: isMobile ? "0 10px" : "8px 12px",
@@ -3238,6 +3300,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
           </div>
 
         </div>}
+
+        {/* Under the selectors: the claude hint / reason lines, or the line of a switch claude refused. */}
+        {!compact && claude && <ClaudeComposerControls state={claude} t={t} />}
       </div>
     </fieldset>
   );
