@@ -23,6 +23,7 @@ import {
   type AtQueryMatch, type FileIndexEntry,
 } from "@/lib/file-fuzzy";
 import { getMarkdownListContinuation } from "@/lib/markdown-list-continuation";
+import { quoteSeparator } from "@/lib/quoted-selection";
 import { isBareMcpCommand, isBuiltinMcpCommand } from "@/lib/mcp-command";
 import { FolderIcon, getFileIcon } from "./FileIcons";
 import { ImagePreview } from "./ImagePreview";
@@ -59,6 +60,7 @@ interface Props {
   onSend: (message: string, images?: AttachedImage[]) => void;
   onAbort: () => void;
   onSteer?: (message: string, images?: AttachedImage[]) => void;
+  /** Sends the draft to a new side chat instead of the running agent. */
   onFollowUp?: (message: string, images?: AttachedImage[]) => void;
   onPromptWithStreamingBehavior?: (message: string, behavior: "steer" | "followUp", images?: AttachedImage[]) => void;
   isStreaming: boolean;
@@ -73,6 +75,10 @@ interface Props {
   missingCwd?: string | null;
   /** Diagnostics from resolving `enabledModels`, e.g. a pattern that matched nothing. */
   modelScopeWarnings?: string[];
+  /** Every available model, once loaded for the selector's "all" scope. */
+  allModelList?: { id: string; name: string; provider: string }[] | null;
+  /** Set only while `enabledModels` narrows the list: loads `allModelList`. */
+  onLoadAllModels?: () => void;
   onModelChange?: (provider: string, modelId: string) => void;
   modelSwitching?: boolean;
   /** The model new sessions start with, starred in the model selector. */
@@ -232,6 +238,8 @@ export function ClaudeComposerControls({ state, t }: { state: ClaudeComposerStat
 
 export interface ChatInputHandle {
   insertText: (text: string) => void;
+  /** Insert at the caret as a paragraph of its own: a blockquote must start a line. */
+  insertQuote: (text: string) => void;
   insertIfEmpty: (text: string) => void;
   replaceMessage: (message: UserMessage) => void;
   prependText: (text: string) => void;
@@ -455,6 +463,9 @@ const BUILTIN_SLASH_COMMANDS: BuiltinSlashCommand[] = [
   { name: "session", description: "chat.commandSession", source: "builtin", availableWhileStreaming: true },
   { name: "copy", description: "chat.commandCopy", source: "builtin", availableWhileStreaming: true },
   { name: "clone", description: "chat.commandClone", source: "builtin" },
+  // A side chat forks the session while it runs (ADR 0007): the primary use
+  // case is a side question during a long parent run, so it must be offered
+  // mid-stream. The fork is file-level, never touching the running agent.
 ];
 
 function getBuiltinSlashCommand(message: string): BuiltinSlashCommand | undefined {
@@ -587,12 +598,13 @@ function isDormantSkillCommand(command: SlashCommandPaletteItem, dormancy: Recor
 export function buildSlashCommandLayout(
   commands: SlashCommandPaletteItem[],
   dormancy: Record<string, boolean>,
+  query = "",
 ) {
   let index = 0;
   const groups = SLASH_SOURCES
     .map((source) => {
       const sourceCommands = commands.filter((command) => command.source === source);
-      const orderedCommands = source === "skill"
+      const orderedCommands = source === "skill" && !query
         ? [
             ...sourceCommands.filter((command) => !isDormantSkillCommand(command, dormancy)),
             ...sourceCommands.filter((command) => isDormantSkillCommand(command, dormancy)),
@@ -823,7 +835,7 @@ export function ModelScopeWarningBanner({ warnings }: { warnings?: string[] }) {
 // Memoized: its props hold still while a reply streams or a tool runs, and the
 // chat around it re-renders through both.
 export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatInput({
-  onSend, onAbort, onSteer, onFollowUp, isStreaming, model, isAutoModelSelection, modelNames, modelList, modelError, missingCwd, modelScopeWarnings, onModelChange, modelSwitching,
+  onSend, onAbort, onSteer, onFollowUp, isStreaming, model, isAutoModelSelection, modelNames, modelList, modelError, missingCwd, modelScopeWarnings, allModelList, onLoadAllModels, onModelChange, modelSwitching,
   defaultModel, onSetDefaultModel,
   onCompact, onAbortCompaction, isCompacting, compactError, onDismissCompactError, compactResult, toolPreset, onToolPresetChange,
   thinkingLevel, isAutoThinkingSelection = false, onThinkingLevelChange, availableThinkingLevels, thinkingLevelMap,
@@ -844,6 +856,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const { ui: uiFontFamily, uiWeight } = useFontPreferences();
   const isMobile = useIsMobile();
   const isNarrowMobile = useIsNarrowMobile();
+  // The controls row under the composer: a finger's 44px on a phone.
+  const controlSize = isMobile ? 44 : 32;
   const enterSendMode = useEnterSendMode();
   const [value, setValue] = useState(() => (draftKey ? getDraft(draftKey)?.value ?? "" : ""));
   const [toolDropdownOpen, setToolDropdownOpen] = useState(false);
@@ -1078,6 +1092,17 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       const before = ta.value.slice(0, start);
       const sep = before.length > 0 && !before.endsWith(" ") ? " " : "";
       replaceTextareaRange(ta, start, end, sep + text);
+      setAtQuery(null);
+    },
+    insertQuote(text: string) {
+      const ta = textareaRef.current;
+      if (!ta) {
+        setValue((v) => v + quoteSeparator(v) + text);
+        return;
+      }
+      const start = ta.selectionStart ?? ta.value.length;
+      const end = ta.selectionEnd ?? ta.value.length;
+      replaceTextareaRange(ta, start, end, quoteSeparator(ta.value.slice(0, start)) + text);
       setAtQuery(null);
     },
     addImages(files: File[]) {
@@ -1349,7 +1374,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const {
     commands: displayedSlashCommands,
     groups: groupedSlashCommands,
-  } = buildSlashCommandLayout(filteredSlashCommands, skillDormancy);
+  } = buildSlashCommandLayout(filteredSlashCommands, skillDormancy, slashQuery ?? "");
 
   const slashCommandCountLabel = filteredSlashCommands.length === 1
     ? t(slashQuery ? "chat.match" : "chat.command")
@@ -1533,6 +1558,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       autoGrowTextarea(ta);
     });
   }, []);
+
 
   const sendQueued = useCallback((mode: "steer" | "followup") => {
     const msg = value.trim();
@@ -2659,6 +2685,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             );
           })()}
           <div
+            className={stackedComposer ? undefined : "chat-composer-row"}
             style={{
               minWidth: 0,
               display: "flex",
@@ -2678,7 +2705,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
           <textarea
             ref={textareaRef}
             className="chat-input-textarea"
-            aria-label={compact ? t("chat.quoteQuestion") : undefined}
+            aria-label={compact ? t("chat.askInSideChat") : undefined}
             value={value}
             onChange={(e) => {
               valueRef.current = e.target.value;
@@ -2777,7 +2804,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               title={t("chat.attachFiles")}
               style={{
                 flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center",
-                width: 32, height: 32, padding: 0,
+                width: controlSize, height: controlSize, padding: 0,
                 background: "none", border: "none",
                 borderRadius: 9,
                 color: attachedImages.length ? "var(--accent)" : "var(--text-muted)",
@@ -2794,7 +2821,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 e.currentTarget.style.color = attachedImages.length ? "var(--accent)" : "var(--text-muted)";
               }}
             >
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+              <svg width={isMobile ? 18 : 15} height={isMobile ? 18 : 15} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
                 <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
                 <circle cx="8.5" cy="8.5" r="1.5" />
                 <polyline points="21 15 16 10 5 21" />
@@ -2812,6 +2839,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 isAutoSelection={isAutoModelSelection}
                 defaultValue={defaultModel}
                 onSetDefault={onSetDefaultModel}
+                allOptions={allModelList?.map((m) => ({ provider: m.provider, modelId: m.id, name: m.name }))}
+                onShowAll={onLoadAllModels}
               />
             )}
           </div>
@@ -2844,7 +2873,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                   alignItems: "center",
                   justifyContent: "center",
                   width: "100%",
-                  height: 32,
+                  height: controlSize,
                   padding: "8px 10px",
                   background: "none",
                   border: "none",
@@ -2902,9 +2931,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                   aria-label={t("chat.changeReasoningLabel")}
                   style={{
                     display: "flex", alignItems: "center", justifyContent: "center", gap: 5,
-                    padding: isMobile ? "0 6px" : "8px 12px",
+                    padding: isMobile ? "0 10px" : "8px 12px",
                     width: isMobile ? "auto" : undefined,
-                    height: 32,
+                    height: controlSize,
                     background: thinkingDropdownOpen ? "var(--bg-hover)" : "none",
                     border: "none",
                     borderRadius: 9,
@@ -3000,9 +3029,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                   aria-label={t("chat.changeToolPreset")}
                   style={{
                     display: "flex", alignItems: "center", justifyContent: "center", gap: 5,
-                    padding: isMobile ? "0 6px" : "8px 12px",
+                    padding: isMobile ? "0 10px" : "8px 12px",
                     width: isMobile ? "auto" : undefined,
-                    height: 32,
+                    height: controlSize,
                     background: toolDropdownOpen ? "var(--bg-hover)" : "none",
                     border: "none",
                     borderRadius: 9,
@@ -3082,9 +3111,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                   onClick={isCompacting ? onAbortCompaction : (e) => { if (!isStrayClick(e)) onCompact(); }}
                   style={{
                     display: "flex", alignItems: "center", justifyContent: "center", gap: 5,
-                    padding: isMobile ? "0 6px" : "8px 12px",
+                    padding: isMobile ? "0 10px" : "8px 12px",
                     width: isMobile ? "auto" : undefined,
-                    height: 32,
+                    height: controlSize,
                     background: isCompacting ? "rgba(239,68,68,0.08)" : "none",
                     border: "none",
                     borderRadius: 9,
@@ -3128,8 +3157,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                  aria-label={soundEnabled ? t("chat.disableSound") : t("chat.enableSound")}
                 style={{
                   display: "flex", alignItems: "center", justifyContent: "center", gap: 5,
-                  width: isMobile ? 32 : 32,
-                  height: 32,
+                  width: controlSize,
+                  height: controlSize,
                   padding: 0,
                   background: "none",
                   border: "none",
@@ -3180,8 +3209,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                   display: "flex",
                   alignItems: "center",
                   justifyContent: "center",
-                  width: 36,
-                  height: 32,
+                  width: isMobile ? controlSize : 36,
+                  height: controlSize,
                   padding: 0,
                   marginLeft: 0,
                   background: "var(--bg-hover)",

@@ -1,6 +1,6 @@
 # Release Checklist
 
-This repo publishes two artifacts for each release:
+This repo publishes three artifacts for each release:
 
 - npm package: `@silgrid/pi-web`
 - GitHub Release: `silgrid/pi-web`
@@ -98,6 +98,8 @@ npm publish --access public
 ```
 
 Choosing the bump: look at `git log --oneline v<previous>..HEAD`. A batch of `feat:` commits (new UI, new commands, new settings) is a minor; only fixes and small adjustments is a patch. Decide before running the script, since a published version cannot be reused.
+
+The same push to `main` also redeploys the demo (`demo-pages.yml`), since the release commit changes `package.json`.
 
 Notes:
 
@@ -284,6 +286,18 @@ npm view @silgrid/pi-web@<version> version --registry https://registry.npmjs.org
 git status --short --branch
 git log --oneline --decorate -3
 git ls-remote --tags origin
+```
+
+Check that the image can be pulled without signing in:
+
+```bash
+T=$(curl -s "https://ghcr.io/token?scope=repository:agegr/pi-web:pull" | node -p 'JSON.parse(require("fs").readFileSync(0)).token')
+for tag in <version> <major>.<minor> latest; do
+  printf '%s: ' "$tag"
+  curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $T" \
+    -H 'Accept: application/vnd.oci.image.index.v1+json' \
+    "https://ghcr.io/v2/agegr/pi-web/manifests/$tag"
+done
 ```
 
 Expected:

@@ -6,6 +6,11 @@ export interface SessionFamily {
   latestModified: string;
 }
 
+/** A relation kind that hides a session as a family member instead of a sidebar row. */
+export function isHiddenRelation(relation: SessionInfo["relation"]): boolean {
+  return relation?.kind === "subagent";
+}
+
 function resolveFamilyRoots(sessions: readonly SessionInfo[]): Map<string, string | null> {
   const byId = new Map(sessions.map((session) => [session.id, session]));
   const roots = new Map<string, string | null>();

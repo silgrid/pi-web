@@ -1193,6 +1193,9 @@ export function DirectoryPicker({ onCancel, onSelect, initialPath, busy = false,
   // with the NEW value without recreating the controller.
   const [showHidden, setShowHidden] = useState(false);
   const showHiddenRef = useRef(false);
+  // #1491: a backdrop click that follows a press that started on the backdrop
+  // dismisses the picker; one that began over the path input or a row must not.
+  const backdropPressRef = useRef(false);
   // Create flows (browse-area toolbar, both modes): inline name form + typed
   // error/notice state shared by new-folder and new-file.
   const [createKind, setCreateKind] = useState<"folder" | "file" | null>(null);
@@ -1490,8 +1493,20 @@ export function DirectoryPicker({ onCancel, onSelect, initialPath, busy = false,
       role="dialog"
       aria-modal="true"
       aria-label={t("directoryPicker.selectDirectory")}
+      onPointerDown={(event) => {
+        backdropPressRef.current = event.target === event.currentTarget;
+      }}
       onClick={(event) => {
-        if (event.target === event.currentTarget && !busy) onCancel();
+        // A click's target is the common ancestor of where the press started and
+        // ended, so selecting text in the path input and releasing on the backdrop
+        // dispatches a backdrop click. Only a press that began on the backdrop
+        // dismisses the picker.
+        const pressedBackdrop = backdropPressRef.current;
+        backdropPressRef.current = false;
+        if (pressedBackdrop && event.target === event.currentTarget && !busy) onCancel();
+      }}
+      onPointerCancel={() => {
+        backdropPressRef.current = false;
       }}
       onKeyDown={(event) => dialogEscapeDismisses(event, { busy, onCancel })}
       style={{ position: "fixed", inset: 0, zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(0,0,0,0.35)" }}

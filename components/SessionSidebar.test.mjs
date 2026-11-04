@@ -254,7 +254,7 @@ test("subagent completion stays silent and never becomes unread", () => {
   assert.match(source, /if \(completedWithNotifications\.length > 0\) \{\s*onBackgroundTaskDone\?\.\(\)/);
   assert.match(
     source,
-    /filter\(\(session\) => session\.relation\?\.kind !== "subagent"\)[\s\S]*?unreadEligibleIds\.has\(id\)/,
+    /filter\(\(session\) => !isHiddenRelation\(session\.relation\)\)[\s\S]*?unreadEligibleIds\.has\(id\)/,
   );
 });
 
@@ -480,4 +480,15 @@ test("Open in new tab opens the row's session link and leaves this tab alone", (
   // Never for a transient session: the hover actions' existing guard covers
   // the open-new-tab button too.
   assert.match(sessionItemSource, /\{hovered && !session\.transient && \(/);
+});
+
+test("the favicon counts sessions that finished while the tab was hidden (#1484)", () => {
+  // The rows exclude the selected session ("already looking"), which is false
+  // while hidden: the badge takes those ids as a separate prop instead.
+  assert.match(source, /hiddenFinishedSessionIds\?: Set<string>;/);
+  assert.match(source, /countFaviconUnread\(unreadSessionIds, hiddenFinishedSessionIds\)/);
+  assert.match(
+    source,
+    /\}, \[awaitingSessionIds, unreadSessionIds, hiddenFinishedSessionIds\]\);/,
+  );
 });
