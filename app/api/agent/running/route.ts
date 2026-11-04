@@ -7,7 +7,7 @@ import {
   getRunningRpcSessionIds,
 } from "@/lib/rpc-manager";
 import { getSessionIdsWithUnsettledSubagentRuns } from "@/lib/subagent-runtime";
-import { getRunningClaudeSessionIds } from "@/lib/claude-session";
+import { getClaudeSessionIdsWithUnsettledSubagents, getRunningClaudeSessionIds } from "@/lib/claude-session";
 
 export const dynamic = "force-dynamic";
 
@@ -29,7 +29,8 @@ async function getRecentSessionWritePayload(): Promise<
 
 // GET /api/agent/running - Lightweight snapshot for visible-tab polling.
 // subagentsActiveSessionIds: sessions whose subagents can still start a run
-// there, so the sidebar announces their completion only after the last one.
+// there (pi's, and claude's background subagents), so the sidebar announces
+// their completion only after the last one.
 export async function GET() {
   return NextResponse.json(
     {
@@ -38,7 +39,7 @@ export async function GET() {
       awaitingSessionIds: getAwaitingRpcSessionIds(),
       completionNotificationSuppressedSessionIds: getCompletionNotificationSuppressedRpcSessionIds(),
       recentSessionWrites: await getRecentSessionWritePayload(),
-      subagentsActiveSessionIds: getSessionIdsWithUnsettledSubagentRuns(),
+      subagentsActiveSessionIds: [...getSessionIdsWithUnsettledSubagentRuns(), ...getClaudeSessionIdsWithUnsettledSubagents()],
     },
     { headers: { "Cache-Control": "no-store" } },
   );

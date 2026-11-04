@@ -3046,17 +3046,19 @@ export function SessionSidebar({ selectedSessionId, highlightSessionId, followHi
  * distinguishable at a glance.
  */
 /**
- * The visible harness marker of a claude session's row: "claude · <alias>".
- * pi rows show none.
+ * The visible harness marker of a claude session's row: just "claude", pushed to
+ * the right end of its title line. The model is never shown (owner intentional change,
+ *): a claude session's model can change in-session, so a listed value would go
+ * stale. pi rows show none.
  */
-export function HarnessMarker({ session }: { session: Pick<SessionInfo, "harness" | "claude"> }) {
+export function HarnessMarker({ session }: { session: Pick<SessionInfo, "harness"> }) {
   if (session.harness !== "claude") return null;
-  const alias = session.claude?.modelAlias;
   return (
     <span
       data-harness="claude"
       style={{
         flexShrink: 0,
+        marginLeft: "auto",
         fontSize: 10,
         lineHeight: 1.4,
         padding: "0 5px",
@@ -3067,7 +3069,7 @@ export function HarnessMarker({ session }: { session: Pick<SessionInfo, "harness
         whiteSpace: "nowrap",
       }}
     >
-      {alias ? `claude · ${alias}` : "claude"}
+      claude
     </span>
   );
 }
@@ -3613,7 +3615,6 @@ function SessionItem({
                   {title}
                 </a>
               )}
-              <HarnessMarker session={session} />
               {isFiltered && (
                 <span
                   title={t("sidebar.filteredMarker")}
@@ -3633,6 +3634,8 @@ function SessionItem({
                   {t("sidebar.filteredMarker")}
                 </span>
               )}
+              {/* Last element of the title line, pushed right: the title ellipsizes first. */}
+              <HarnessMarker session={session} />
             </div>
             <div style={{ marginTop: 2, display: "flex", alignItems: "center", gap: 8, color: "var(--text-dim)", fontSize: 11, minWidth: 0 }}>
               {isAwaiting ? (

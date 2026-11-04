@@ -19,7 +19,7 @@ import { dropMentionText, splitDroppedItems, uploadFiles, type DroppedItem } fro
 import { MessageView } from "./MessageView";
 import { MarkdownBody } from "./MarkdownBody";
 import { ChatInput, type ChatInputHandle, type ClaudeComposerState } from "./ChatInput";
-import { isClaudeModelAlias, isClaudeToolPreset } from "@/lib/claude-shared";
+import { normalizeClaudeEffort, normalizeClaudeModel } from "@/lib/claude-shared";
 import { ChatMinimap, MINIMAP_WIDTH, useMessageRefs } from "./ChatMinimap";
 import { ExtensionStatusBar } from "./ExtensionStatusBar";
 import { AnsiText } from "./AnsiText";
@@ -52,6 +52,8 @@ import {
 } from "@/lib/chat-lazy-load";
 import { CHAT_COLUMN_PADDING } from "@/lib/pane-state";
 import { isPullFetchTriggered, shouldArmPullFetch } from "@/lib/manual-fetch";
+import { ClaudeSubagentContext } from "./ClaudeSubagentRow";
+import { isRunningBackgroundAgentMessage } from "@/lib/claude-subagent-view";
 
 interface Props {
   session: SessionInfo | null;
@@ -331,8 +333,9 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
     loadContext, activeLeafId, scrollToBottom, scrollToMessage, scrollToOffset,
     refreshFromDisk,
     manualFetch, manualFetching, manualFetchAvailable,
-    isClaudeSession, claudeSessionChoices, newSessionHarness, setNewSessionHarness, newSessionModelAlias, setNewSessionModelAlias,
-    newSessionClaudePreset, setNewSessionClaudePreset, claudeAvailability,
+    isClaudeSession, claudeSessionChoices, newSessionHarness, chooseNewSessionHarness,
+    newSessionClaudeEffort, handleClaudeModelChange, handleClaudeEffortChange, claudeSwitchError, claudeStateKnown,
+    newSessionClaudeModel, setNewSessionClaudeModel, claudeAvailability, claudeSubagents,
   } = useAgentSession({
     session, sessionRunning, newSessionCwd, newSessionDraftKey, initialNewSessionChoices, onNewSessionChoicesChange, onAgentEnd: wrappedOnAgentEnd, onToolEnd, onAttentionNeeded, onBackgroundTasksEvent, onSessionCreated, onSessionForked,
     modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemToolsChange, onSystemInfoLoaderChange, onSessionStatsPanelOpen,
@@ -345,30 +348,35 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
   const hasStreamingContent = useStreamingSelector(streamingStore, selectHasStreamingContent);
   const getStreamingMessage = useCallback(() => streamingStore.getState().streamingMessage, [streamingStore]);
   const sessionBusy = agentRunning || bashRunning;
-  // a fresh composer picks pi or claude; a claude session shows its fixed alias and preset.
+  //, #250: a fresh composer picks pi or claude side by side with the model selector
+  // (claude's full names when claude is chosen) and, for claude, its effort; an
+  // open claude session switches its model and effort while idle, never its harness.
   const claudeComposer = useMemo<ClaudeComposerState | undefined>(() => {
     if (isNew) {
       return {
         choosing: true,
         harness: newSessionHarness,
-        modelAlias: newSessionModelAlias,
-        preset: newSessionClaudePreset,
+        model: newSessionClaudeModel,
+        effort: newSessionClaudeEffort,
         availability: claudeAvailability,
-        onHarnessChange: setNewSessionHarness,
-        onModelAliasChange: setNewSessionModelAlias,
-        onPresetChange: setNewSessionClaudePreset,
+        onHarnessChange: chooseNewSessionHarness,
+        onModelChange: setNewSessionClaudeModel,
+        onEffortChange: handleClaudeEffortChange,
       };
     }
     if (!isClaudeSession) return undefined;
-    const fixed = claudeSessionChoices;
     return {
       choosing: false,
       harness: "claude",
-      modelAlias: isClaudeModelAlias(fixed?.modelAlias) ? fixed.modelAlias : "claude-default",
-      preset: isClaudeToolPreset(fixed?.preset) ? fixed.preset : "read-only",
+      model: normalizeClaudeModel(claudeSessionChoices?.model),
+      effort: normalizeClaudeEffort(claudeSessionChoices?.effort),
       availability: null,
+      onModelChange: handleClaudeModelChange,
+      onEffortChange: handleClaudeEffortChange,
+      switchError: claudeSwitchError,
+      stateKnown: claudeStateKnown,
     };
-  }, [isNew, isClaudeSession, claudeSessionChoices, newSessionHarness, newSessionModelAlias, newSessionClaudePreset, claudeAvailability, setNewSessionHarness, setNewSessionModelAlias, setNewSessionClaudePreset]);
+  }, [isNew, isClaudeSession, claudeSessionChoices, newSessionHarness, newSessionClaudeModel, newSessionClaudeEffort, claudeAvailability, chooseNewSessionHarness, setNewSessionClaudeModel, handleClaudeModelChange, handleClaudeEffortChange, claudeSwitchError, claudeStateKnown]);
   // External-write signal: each new key reloads the mounted session from disk
   // exactly once, and only when it targets the session this window shows.
   const externalSessionChangeKeyRef = useRef<number | null>(null);
@@ -1152,8 +1160,10 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
       modelSwitching={modelSwitching}
       defaultModel={defaultModel}
       onSetDefaultModel={handleSetDefaultModel}
-      onCompact={(session || isNew) && !isClaudeSession ? handleCompact : undefined}
-      onAbortCompaction={handleAbortCompaction}
+      // claude compacts with its own /compact in an open session, never in a fresh
+      // composer; Stop ends that compaction through claude's abort, not pi's abort_compaction.
+      onCompact={(session || isNew) && !(isNew && isClaudeSession) ? handleCompact : undefined}
+      onAbortCompaction={isClaudeSession ? handleAbort : handleAbortCompaction}
       isCompacting={isCompacting}
       compactError={compactError}
       onDismissCompactError={dismissCompactError}
@@ -1248,6 +1258,8 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
   }
 
   return (
+    // A claude session's subagent runs reach every Agent row, streamed or listed.
+    <ClaudeSubagentContext.Provider value={claudeSubagents}>
     <div
       className="chat-content relative flex h-full min-w-0 flex-col overflow-hidden"
       style={{ paddingBottom: "var(--safe-area-bottom, 0px)" }}
@@ -1489,6 +1501,9 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
                 let processToolCount = 0;
                 let processRefIdx: number | undefined;
                 let revealProcess = false;
+                // The one fold exception: a running background claude
+                // subagent's Agent row stays outside the fold until its run settles.
+                const runningSubagentViews: ReactNode[] = [];
 
                 for (let processIdx = userIdx + 1; processIdx <= finalAssistantIdx; processIdx++) {
                   const processMessage = messages[processIdx];
@@ -1508,6 +1523,10 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
                   if (blocks.length === 0) {
                     const notices = withNotices ? getTranscriptNotices(processMessage) : [];
                     if (notices.length > 0) processViews.push(<TranscriptNoticeLines key={`process-notices-${messageKeys[processIdx]}`} notices={notices} />);
+                    continue;
+                  }
+                  if (processIdx !== finalAssistantIdx && isRunningBackgroundAgentMessage(blocks, claudeSubagents)) {
+                    runningSubagentViews.push(renderMessage(processIdx, { attachRef: false, keyPrefix: "subagent", showTimestamp: false }));
                     continue;
                   }
                   processRefIdx ??= visibleRefIndexByMessage.get(processIdx);
@@ -1544,6 +1563,8 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
                     </div>,
                   );
                 }
+
+                rendered.push(...runningSubagentViews);
 
                 if (finalAnswerMessage) {
                   // Each tool call is stored as its own assistant entry, so the
@@ -1793,6 +1814,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
       </div>
       {isEmptyNew && <div className="min-h-0 flex-1" />}
     </div>
+    </ClaudeSubagentContext.Provider>
   );
 }
 

@@ -63,13 +63,13 @@ test("the progress route is GET-only, gated in-route, dynamic, and never logs, r
   assert.deepEqual(params, ["wi"], "no path/file query is read");
 });
 
-test("end to end — the whole-job body: narration + one masked tool line + lifecycle lines; no tool result, thinking, prompt or raw credential", async (t) => {
+test("end to end — the whole-job body: text and thinking narration + one masked tool line + lifecycle lines; no tool result, prompt or raw credential", async (t) => {
   const f = fixture(t);
   const dir = f.capsule("wi_route210a", undefined, jsonl([
     { type: "session", id: "s" },
     { type: "message", id: "u", message: { role: "user", content: "SECRET-PROMPT" } },
     { type: "message", id: "n", message: { role: "assistant", content: [{ type: "text", text: "ROUTE-NARRATION token=SECRET-TOKEN" }] } },
-    { type: "message", id: "tc", message: { role: "assistant", content: [{ type: "thinking", thinking: "SECRET-THINKING" }, { type: "toolCall", id: "c", name: "bash", arguments: { command: "curl --token=SECRET-TOKEN https://x.invalid" } }] } },
+    { type: "message", id: "tc", message: { role: "assistant", content: [{ type: "thinking", thinking: "ROUTE-THINKING token=SECRET-TOKEN" }, { type: "toolCall", id: "c", name: "bash", arguments: { command: "curl --token=SECRET-TOKEN https://x.invalid" } }] } },
     { type: "message", id: "tr", message: { role: "toolResult", toolName: "bash", content: [{ type: "text", text: "SECRET-TOOL-RESULT" }] } },
   ]));
   writeFileSync(join(f.root, "events", "wi-wi_route210a.jsonl"), jsonl([
@@ -84,15 +84,44 @@ test("end to end — the whole-job body: narration + one masked tool line + life
   assert.deepEqual(Object.keys(body).sort(), ["available", "lines", "omitted"]);
   assert.equal(body.available, true);
   assert.equal(body.omitted, 0);
-  assert.deepEqual(body.lines.map(({ kind, text: line, tone, event }) => [kind, line.replace(/^\d{2}:\d{2}:\d{2} /, ""), tone, event]), [
-    ["event", "▶ code #1 · pi:m", "accent", "step_started"],
-    ["narration", "ROUTE-NARRATION token=***", undefined, undefined],
-    ["tool", "bash: curl --token=*** https://x.invalid", undefined, undefined],
-    ["event", "? code", "amber", "needs_input"],
-    ["event", "⚠ push token=***", "red", "push_failed"],
+  assert.deepEqual(body.lines.map(({ kind, text: line, variant, tone, event }) => [kind, line.replace(/^\d{2}:\d{2}:\d{2} /, ""), variant, tone, event]), [
+    ["event", "▶ code #1 · pi:m", undefined, "accent", "step_started"],
+    ["narration", "ROUTE-NARRATION token=***", undefined, undefined, undefined],
+    ["narration", "ROUTE-THINKING token=***", "thinking", undefined, undefined],
+    ["tool", "bash: curl --token=*** https://x.invalid", undefined, undefined, undefined],
+    ["event", "? code", undefined, "amber", "needs_input"],
+    ["event", "⚠ push token=***", undefined, "red", "push_failed"],
   ], "untimed transcript records sit at the spawn's start; dropped kinds produce no line");
+  // the wire keys per kind — event lines add their time `at`, tool
+  // lines the four light tool fields; full input/output never ride this answer.
+  assert.deepEqual(body.lines.map((line) => Object.keys(line).sort().join(",")), [
+    "at,event,id,kind,text,tone",
+    "id,kind,text",
+    "id,kind,text,variant",
+    "id,kind,text,tool",
+    "at,event,id,kind,text,tone",
+    "at,event,id,kind,text,tone",
+  ]);
+  assert.equal(body.lines[0].at, Date.parse("2026-11-01T00:00:00Z"));
+  assert.deepEqual(body.lines[3].tool, { name: "bash", argument: "curl --token=*** https://x.invalid", status: "ok" }, "paired with its (id-less) result, no timestamps so no duration");
   for (const secret of SECRETS) assert.ok(!text.includes(secret), `the response leaks ${secret}`);
-  for (const word of ["toolResult", "thinking", "user", "system", dir, f.root]) assert.ok(!text.includes(word), `the response carries ${word}`);
+  for (const word of ["toolResult", "user", "system", dir, f.root]) assert.ok(!text.includes(word), `the response carries ${word}`);
+});
+
+test("the route keeps narration whitespace (mask only, no cap) and carries no tool input or output", async (t) => {
+  const f = fixture(t);
+  const narration = `P1.\n\n- item\n\n\`\`\`\ncode\n\`\`\`\n  indented token=SECRET-TOKEN ${"L".repeat(1500)}`;
+  f.capsule("wi_route271a", undefined, jsonl([
+    { type: "message", id: "n", message: { role: "assistant", content: [{ type: "text", text: narration }] } },
+    { type: "message", id: "tc", message: { role: "assistant", content: [{ type: "toolCall", id: "c", name: "bash", arguments: { command: "ls", extra: "FULL-INPUT-ONLY" } }] } },
+    { type: "message", id: "tr", message: { role: "toolResult", toolCallId: "c", isError: true, content: [{ type: "text", text: "SECRET-TOOL-RESULT" }] } },
+  ]));
+  const { status, text } = await get("?wi=wi_route271a");
+  assert.equal(status, 200);
+  const body = JSON.parse(text);
+  assert.equal(body.lines[0].text, narration.replace("token=SECRET-TOKEN", "token=***"), "exact whitespace, masked, uncapped");
+  assert.deepEqual(body.lines[1].tool, { name: "bash", argument: "ls", status: "error" });
+  assert.ok(!text.includes("FULL-INPUT-ONLY") && !text.includes("SECRET-TOOL-RESULT") && !text.includes("SECRET-TOKEN"));
 });
 
 test("a wrong-shaped or unknown wi is a 400 before any transcript read; no path leaves", async (t) => {

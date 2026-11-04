@@ -73,14 +73,20 @@ function parseVersionCore(value: string): [number, number, number] | null {
 
 /** Non-blocking minimum-version hint (pure): semver-ish compare of the
  *  X.Y.Z cores (leading `v` tolerated, prerelease suffix ignored — the hint
- *  is coarse, it blocks nothing). Unparseable → false, never a guess. */
+ *  is coarse, it blocks nothing). Unparseable → false, never a guess —
+ *  unless the caller passes `unknownIsBelow`: then a null/unparseable
+ *  version counts as below the floor (the summarize floor
+ *  never treats an unknown pf as capable). Every other floor keeps the
+ *  default. */
 export function isPolyforgeVersionBelowMinimum(
   version: string | null,
   minimum: string = POLYFORGE_MINIMUM_PF_VERSION,
+  unknownIsBelow = false,
 ): boolean {
   const parsed = typeof version === "string" ? parseVersionCore(version) : null;
   const floor = parseVersionCore(minimum);
-  if (!parsed || !floor) return false;
+  if (!floor) return false;
+  if (!parsed) return unknownIsBelow;
   for (let i = 0; i < 3; i++) {
     if (parsed[i] !== floor[i]) return parsed[i] < floor[i];
   }

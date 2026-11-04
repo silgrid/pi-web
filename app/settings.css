@@ -1962,7 +1962,8 @@
   accent-color: var(--accent);
 }
 
-.settings-language-options {
+.settings-language-options,
+.settings-agent-language-options {
   display: flex;
   flex-direction: column;
   gap: 3px;
@@ -2803,8 +2804,13 @@ select.mcp-add-input {
   --polyforge-col-class: 96px;
   --polyforge-col-value: minmax(0, 1fr);
   --polyforge-col-daemon: 150px;
+  /* one spacing and row scale for the whole page. */
+  --polyforge-card-gap: 12px;
+  --polyforge-card-pad: 12px 14px;
+  --polyforge-row-gap: 6px;
+  --polyforge-row-pad: 6px 0;
 }
-.polyforge-config-panel { display: flex; flex-direction: column; gap: 10px; }
+.polyforge-config-panel { display: flex; flex-direction: column; gap: var(--polyforge-card-gap); }
 .polyforge-config-history-row {
   display: flex;
   align-items: center;
@@ -2815,8 +2821,8 @@ select.mcp-add-input {
 .polyforge-config-card {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding: 10px 12px;
+  gap: 8px;
+  padding: var(--polyforge-card-pad);
   border: 1px solid var(--border);
   border-radius: 6px;
   background: var(--bg-panel);
@@ -2845,7 +2851,7 @@ select.mcp-add-input {
 .polyforge-config-grid {
   display: grid;
   grid-template-columns: var(--polyforge-col-key) var(--polyforge-col-class) var(--polyforge-col-value);
-  gap: 6px 10px;
+  gap: 0 10px;
   align-items: center;
   font-size: 12px;
 }
@@ -2859,8 +2865,14 @@ select.mcp-add-input {
   grid-template-columns: subgrid;
   align-items: center;
 }
-.polyforge-config-grid-header { font-size: 11px; color: var(--text-dim); }
+.polyforge-config-grid-header { padding: 2px 0 4px; font-size: 11px; color: var(--text-dim); }
+.polyforge-config-row {
+  gap: var(--polyforge-row-gap) 10px;
+  padding: var(--polyforge-row-pad);
+  border-top: 1px solid var(--border);
+}
 .polyforge-config-row > * { min-width: 0; }
+.polyforge-config-grid-header + .polyforge-config-row { border-top: 0; }
 /* A daemon-card row whose key has no daemon value uses the daemon track's
    width for its file value instead of rendering an empty placeholder cell. */
 .polyforge-config-row.no-daemon .polyforge-config-file { grid-column: 3 / 5; }
@@ -2869,8 +2881,8 @@ select.mcp-add-input {
 .polyforge-config-write-row { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .polyforge-config-write > input,
 .polyforge-config-write-row > input { flex: 1 1 auto; min-width: 0; box-sizing: border-box; }
-.polyforge-config-key { font-family: var(--font-mono); overflow-wrap: anywhere; }
-.polyforge-config-workspace-path { font-family: var(--font-mono); overflow-wrap: anywhere; }
+.polyforge-config-key { font-family: var(--font-mono); overflow-wrap: break-word; }
+.polyforge-config-workspace-path { font-family: var(--font-mono); overflow-wrap: break-word; }
 .polyforge-config-class { min-width: 0; }
 .polyforge-config-badge {
   display: inline-block;
@@ -2885,7 +2897,7 @@ select.mcp-add-input {
   vertical-align: bottom;
   white-space: nowrap;
 }
-.polyforge-config-value { font-family: var(--font-mono); word-break: break-all; }
+.polyforge-config-value { font-family: var(--font-mono); word-break: normal; overflow-wrap: break-word; }
 /* one muted treatment for every read-only row, whatever the
    card: the value, the workspace path, chips and the unset placeholder. */
 .polyforge-config-row.is-readonly .polyforge-config-value,
@@ -2893,13 +2905,15 @@ select.mcp-add-input {
 .polyforge-config-row.is-readonly .polyforge-config-chips,
 .polyforge-config-row.is-readonly .polyforge-config-chip,
 .polyforge-config-row.is-readonly .polyforge-config-empty { color: var(--text-muted); }
-.polyforge-config-daemon { color: var(--text-muted); overflow-wrap: anywhere; }
+.polyforge-config-daemon { color: var(--text-muted); overflow-wrap: break-word; }
 .polyforge-config-empty { color: var(--text-dim); }
 .polyforge-config-chips { display: flex; flex-wrap: wrap; gap: 4px; }
 .polyforge-config-chip {
   display: inline-flex;
   align-items: center;
   gap: 3px;
+  max-width: 100%;
+  min-width: 0;
   padding: 1px 6px;
   border-radius: 4px;
   background: var(--bg-hover);
@@ -2907,6 +2921,7 @@ select.mcp-add-input {
   font-size: 11px;
   color: var(--text);
 }
+.polyforge-config-chip-label { min-width: 0; overflow-wrap: break-word; word-break: normal; }
 .polyforge-config-chip-remove {
   padding: 0 1px;
   border: 0;
@@ -2933,34 +2948,137 @@ select.mcp-add-input {
   vertical-align: middle;
 }
 .polyforge-config-subtitle { margin: 4px 0 0; font-size: 11px; font-weight: 600; color: var(--text-muted); }
+/* the cli.toml card's two file zones (top-level, [daemon]).
+   de-boxed — a subheading over one thin divider inside the one
+   card, no grey box in a grey card; both zones keep the page's key track so
+   the value column still starts at one x. */
+.polyforge-config-zone {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  padding-top: 2px;
+  border-top: 1px solid var(--border);
+}
+.polyforge-config-zone + .polyforge-config-zone { margin-top: 2px; }
+.polyforge-config-zone .polyforge-config-grid {
+  grid-template-columns: var(--polyforge-col-key) var(--polyforge-col-class) var(--polyforge-col-value);
+}
+.polyforge-config-zone .polyforge-config-grid.has-daemon {
+  grid-template-columns: var(--polyforge-col-key) var(--polyforge-col-class) var(--polyforge-col-value) var(--polyforge-col-daemon);
+}
+.polyforge-config-zone-title { margin: 0; font-family: var(--font-mono); font-size: 11px; font-weight: 600; letter-spacing: 0.02em; color: var(--text); }
+/* A saved connection key's notice + rollback, across the whole row. */
+.polyforge-config-row-notice {
+  display: flex;
+  grid-column: 1 / -1;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 11px;
+  color: #d97706;
+  overflow-wrap: anywhere;
+}
+/* The connection-key confirmation: outside every fold, page-level. */
+.polyforge-config-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 12px;
+  border: 1px solid #d97706;
+  border-radius: 6px;
+  background: var(--bg-panel);
+  font-size: 12px;
+}
+.polyforge-config-confirm-text { margin: 0; color: var(--text); overflow-wrap: anywhere; }
+.polyforge-config-confirm-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+/* the config page's machine-scope hint is one line at desktop,
+   cut with an ellipsis (the full text is its title); phones show it whole. */
+.config-machine-scope-hint {
+  min-width: 0;
+  color: var(--text-dim);
+  font-size: 11px;
+  line-height: 1.4;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 @media (max-width: 640px) {
   /* Phones: each row is two columns, the key on the left and
      its class badge on the right of the same line, then the file value and the
      daemon value each across the whole row below; the header row hides. */
   .polyforge-config-grid,
-  .polyforge-config-grid.has-daemon { grid-template-columns: minmax(0, 1fr); }
+  .polyforge-config-grid.has-daemon,
+  .polyforge-config-zone .polyforge-config-grid,
+  .polyforge-config-zone .polyforge-config-grid.has-daemon { grid-template-columns: minmax(0, 1fr); }
   .polyforge-config-grid-header { display: none; }
+  .polyforge-config-grid { gap: 0 8px; }
   .polyforge-config-row,
   .polyforge-config-row.no-daemon {
     grid-template-columns: minmax(0, 1fr) auto;
     gap: 4px 8px;
-    padding-bottom: 6px;
-    border-bottom: 1px solid var(--border);
+    padding: var(--polyforge-row-pad);
+    border-top: 1px solid var(--border);
   }
+  .polyforge-config-grid-header + .polyforge-config-row { border-top: 0; }
+  .polyforge-config-row + .polyforge-config-row { border-top: 1px solid var(--border); }
   .polyforge-config-class { justify-self: end; }
   .polyforge-config-badge { max-width: none; }
   .polyforge-config-file,
   .polyforge-config-daemon,
   .polyforge-config-row.no-daemon .polyforge-config-file { grid-column: 1 / -1; }
   .polyforge-config-status .config-detail-grid { grid-template-columns: minmax(96px, 130px) minmax(0, 1fr); }
+  /* density P4: the Jobs-card preferences and the workflow
+     attr row put their label above and their control across the full row. */
+  .polyforge-config-cards .config-detail-grid {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 4px;
+  }
+  .polyforge-config-cards .config-detail-grid-label { font-size: 11px; }
+  .polyforge-config-cards .config-detail-grid-value { grid-column: 1; }
+  .polyforge-workflow-editor > .polyforge-config-write {
+    flex-wrap: wrap;
+    align-items: stretch;
+  }
+  .polyforge-workflow-editor > .polyforge-config-write > .polyforge-workflow-label { flex-basis: 100%; }
+  .polyforge-workflow-editor > .polyforge-config-write > input { flex: 1 1 100%; }
+  .config-machine-scope-hint {
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
+    text-wrap: balance;
+    overflow-wrap: break-word;
+  }
 }
-.polyforge-config-history { display: flex; flex-direction: column; gap: 4px; }
+.polyforge-config-history { display: flex; flex-direction: column; font-size: 12px; }
+/* history entries share one rhythm, aligned key | old → new |
+   rollback, with the feedback row full-width under it. */
+.polyforge-config-history-row {
+  display: grid;
+  grid-template-columns: minmax(0, 190px) minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 6px 10px;
+  padding: var(--polyforge-row-pad);
+  border-top: 1px solid var(--border);
+}
+.polyforge-config-history-row:first-child { border-top: 0; }
+@media (max-width: 640px) {
+  .polyforge-config-history-row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 4px;
+  }
+  .polyforge-config-history-row > .config-button { justify-self: start; }
+}
+.polyforge-config-history-key { font-family: var(--font-mono); overflow-wrap: break-word; }
+.polyforge-config-history-change { min-width: 0; overflow-wrap: break-word; }
+.polyforge-config-history-row > .polyforge-config-row-feedback { grid-column: 1 / -1; }
 /* the workflow card. A title line carrying the 26px ↻
    ('s pattern; while busy the button carries animate-spin and
-   only its icon turns), the project selector, then one row per step id with
-   its live badge, next-dispatch note, bundles, declared/inherited chain,
-   effective chain and source; the write controls fold under the card's
-   disclosure region. */
+   only its icon turns), the project selector, the one card-level
+   next-dispatch note with its one live badge, then one summary line per step
+   id with its declared/inherited chain, effective chain, source and
+   right-aligned bundle suffix; attrs stay a sub-line and the write controls
+   fold under the card's disclosure region. */
 .polyforge-workflow-head { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; min-width: 0; }
 .polyforge-workflow-head > .polyforge-config-card-title { flex: 1 1 auto; }
 .polyforge-workflow-refresh {
@@ -2982,6 +3100,21 @@ select.mcp-add-input {
 .polyforge-workflow-refresh.animate-spin { animation: none; }
 .polyforge-workflow-refresh.animate-spin > svg { animation: spin 1s linear infinite; }
 .polyforge-workflow-project { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+/* the submit-precedence note is a full sentence, not a short
+   scope-switch reason: it keeps the dim 11px type but not the shared class's
+   320px cap, so it is one line at desktop widths and wraps whole on a phone. */
+.polyforge-workflow-submit-note {
+  min-width: 0;
+  color: var(--text-dim);
+  font-size: 11px;
+  line-height: 1.4;
+  white-space: normal;
+}
+/* the union's sources — each mapped workspace's yaml path
+   with the projects it contributes. */
+.polyforge-workflow-sources { display: flex; flex-direction: column; gap: 3px; margin: 0; padding: 0; list-style: none; font-size: 12px; }
+.polyforge-workflow-source { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; min-width: 0; }
+.polyforge-workflow-yaml { font-family: var(--font-mono); color: var(--text-muted); overflow-wrap: break-word; }
 .polyforge-workflow-list {
   display: flex;
   flex-direction: column;
@@ -2990,20 +3123,61 @@ select.mcp-add-input {
   padding: 0;
   list-style: none;
 }
+/* density P3: each step is its own outlined block (clearer
+   separation than a hairline), its title line is weightier, and the editor
+   fold reads as subordinate in a muted inset. No content is removed. */
 .polyforge-workflow-row {
   display: flex;
   flex-direction: column;
-  gap: 3px;
-  padding: 6px 0;
-  border-top: 1px solid var(--border);
+  gap: 4px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
   font-size: 12px;
   min-width: 0;
 }
-.polyforge-workflow-id { font-family: var(--font-mono); font-weight: 600; }
+.polyforge-workflow-live {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  margin: 0;
+  min-width: 0;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+.polyforge-workflow-id { font-family: var(--font-mono); font-size: 13px; font-weight: 700; line-height: 1.3; }
 .polyforge-workflow-kind { color: var(--text-muted); font-size: 11px; }
-.polyforge-workflow-note { margin: 0; font-size: 11px; color: var(--text-dim); }
-.polyforge-workflow-line,
-.polyforge-workflow-effective {
+/* a row is one visual line when it fits and wraps by segment
+   otherwise — the lead (id, kind, declared chain), the effective chain, the
+   bundle suffix — never overflowing horizontally. A chain wider than the card
+   breaks inside its own segment. */
+.polyforge-workflow-summary {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  margin: 0;
+  min-width: 0;
+}
+/* a divergent row lists one chain per bundle and may wrap. */
+.polyforge-workflow-summary.is-divergent { flex-wrap: wrap; }
+.polyforge-workflow-summary > * { min-width: 0; }
+.polyforge-workflow-lead {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+}
+.polyforge-workflow-lead,
+.polyforge-workflow-summary .polyforge-workflow-effective,
+.polyforge-workflow-summary .polyforge-config-chips { flex: 0 1 auto; min-width: 0; max-width: 100%; }
+.polyforge-workflow-summary .polyforge-workflow-id,
+.polyforge-workflow-summary .polyforge-workflow-kind,
+.polyforge-workflow-summary .polyforge-workflow-label,
+.polyforge-workflow-summary .polyforge-workflow-inherit,
+.polyforge-workflow-summary .polyforge-workflow-bundle-suffix { flex: none; }
+.polyforge-workflow-line {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
@@ -3013,13 +3187,57 @@ select.mcp-add-input {
 }
 .polyforge-workflow-label { color: var(--text-muted); font-size: 11px; }
 .polyforge-workflow-inherit { color: var(--text-dim); font-style: italic; }
-.polyforge-workflow-bundle,
+.polyforge-workflow-effective {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  min-width: 0;
+}
 .polyforge-workflow-chain { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 4px; min-width: 0; }
 .polyforge-workflow-bundle-name { font-family: var(--font-mono); color: var(--text-muted); }
+/* a ' · ' separator is a bare text node. Inside a flex container
+   it becomes an anonymous flex item whose spaces collapse, so the rendered line
+   (and innerText) loses them. Keep the suffix inline flow; it stays a flex item
+   of the summary, so margin-left still flushes it right. */
+.polyforge-workflow-bundle-suffix {
+  display: inline;
+  margin-left: auto;
+  min-width: 0;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  /* pre, not nowrap: each " · " separator is its own anonymous flex item,
+     and nowrap would strip its spaces at the item's edges. */
+  white-space: pre;
+}
 .polyforge-workflow-effective .polyforge-config-chip { color: var(--text-muted); }
-.polyforge-workflow-from { color: var(--text-dim); font-size: 11px; overflow-wrap: anywhere; }
-.polyforge-workflow-editor { display: flex; flex-direction: column; gap: 4px; }
+/* The source is the line's shrinkable tail: it truncates with an ellipsis and
+   keeps its full text in the title. */
+.polyforge-workflow-from {
+  flex: 1 1 0;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-dim);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.polyforge-workflow-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 8px;
+  border-left: 2px solid var(--border);
+  border-radius: 0 4px 4px 0;
+  background: color-mix(in srgb, var(--text-dim) 5%, transparent);
+  color: var(--text-muted);
+}
 .polyforge-workflow-editor[hidden] { display: none; }
+@media (max-width: 640px) {
+  /* a phone row may wrap inside its summary container. */
+  .polyforge-workflow-summary { flex-wrap: wrap; }
+}
 
 /* the page's disclosure regions. A region's toggle is one
    button line with a CSS chevron; its body is hidden until the region opens.
@@ -3065,7 +3283,7 @@ select.mcp-add-input {
   color: var(--text-muted);
 }
 .polyforge-disclosure-body[hidden] { display: none; }
-.polyforge-config-summary { min-width: 0; color: var(--text); overflow-wrap: anywhere; }
+.polyforge-config-summary { min-width: 0; color: var(--text); overflow-wrap: break-word; }
 .polyforge-config-summary.is-warning { color: #d97706; }
 .polyforge-config-fold { display: flex; flex-direction: column; gap: 6px; }
 /* Per-key results render under their own row, across the whole row. */
@@ -3080,3 +3298,13 @@ select.mcp-add-input {
 .polyforge-config-history-row > .polyforge-config-row-feedback { flex-basis: 100%; }
 .polyforge-config-install-head { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; min-width: 0; }
 .polyforge-config-install-head > .polyforge-config-card-title { flex: 1 1 auto; min-width: 0; }
+/* the install command keeps its monospace and wraps at spaces
+   first, then at the token separators its <wbr>s carry (a URL after / or .). */
+.polyforge-config-install-command {
+  margin: 0;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  word-break: normal;
+  overflow-wrap: break-word;
+}

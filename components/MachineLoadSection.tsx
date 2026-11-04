@@ -7,10 +7,12 @@ import { machineLoadRows } from "@/lib/machine-load-view";
  * The machine-load section: CPU, cores, load average and
  * memory as the HOST kernel sees them (the badge says so; no cgroup/container
  * quota is implied). One mount: the Debug panel (DebugPanelView,),
- * as the last full-width row of its `.debug-cols` grid (; the
- * Session-info popover no longer carries it). It is rendered only while that
- * panel is open, so the 2 s poll and the values live exactly as long as the
- * open panel. It performs no I/O itself (useMachineLoad does).
+ * as the rightmost column of its `.debug-cols` grid (; under the
+ * sessions' column on a middle-width panel, the foot of the phone stack; the
+ * Session-info popover no longer carries it). Its row separator there is the
+ * panel's CSS, not this markup. It is rendered only while that panel is open,
+ * so the 2 s poll and the values live exactly as long as the open panel. It
+ * performs no I/O itself (useMachineLoad does).
  */
 export function MachineLoadSection({ translate }: { translate: (key: string) => string }) {
   const metrics = useMachineLoad();
@@ -27,9 +29,6 @@ export function MachineLoadSection({ translate }: { translate: (key: string) => 
       className="machine-load-section"
       style={{
         minWidth: 0,
-        marginTop: 16,
-        paddingTop: 12,
-        borderTop: "1px solid var(--border)",
         fontSize: 12,
         lineHeight: 1.5,
         fontFamily: "var(--font-mono)",
@@ -46,7 +45,7 @@ export function MachineLoadSection({ translate }: { translate: (key: string) => 
           borderRadius: 4,
         }}>{translate("session.machineHost")}</span>
       </div>
-      <div style={{ display: "grid", gridTemplateColumns: "auto minmax(0, 1fr)", columnGap: 12, rowGap: 4 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "minmax(0, max-content) minmax(max-content, 1fr)", columnGap: 12, rowGap: 4 }}>
         {rows.map((row) => (
           <div key={row.key} style={{ display: "contents" }}>
             <div style={{ color: "var(--text-dim)", minWidth: 0, overflowWrap: "anywhere" }}>{row.label}</div>

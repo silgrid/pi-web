@@ -1,9 +1,10 @@
 import { createHash } from "node:crypto";
-import { closeSync, constants, fstatSync, openSync, readdirSync, readSync, realpathSync, statSync } from "node:fs";
+import { constants } from "node:fs";
+import { open, readdir, realpath, stat, type FileHandle } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, isAbsolute, join, sep } from "node:path";
 import { parseFrontmatter } from "./frontmatter";
-import { readRegularFileText } from "./regular-file";
+import { readRegularFileTextAsync } from "./regular-file";
 import { maskPolyforgeCredentials, type PolyforgeJob } from "./polyforge-status";
 import {
   CARD_ENTRY_MAX,
@@ -11,7 +12,6 @@ import {
   CARD_POLL_PAGE,
   CARD_RESPONSE_MAX_BYTES,
   CARD_RESPONSE_MAX_ENTRIES,
-  PROGRESS_MAX_LINES,
   capCodePoints,
   composeProgressEventLine,
   formatCardCursor,
@@ -24,6 +24,7 @@ import {
   type PolyforgeCardStep,
   type PolyforgeProgressLine,
   type PolyforgeProgressSnapshot,
+  type PolyforgeProgressTool,
 } from "./polyforge-cards-pure";
 
 /**
@@ -55,13 +56,21 @@ import {
  * narration text, credential-masked never a tool call, its
  * name or command/argument, tool results, thinking, user/system prompts. Every failure degrades to an
  * absent field or `available: false`; nothing here throws to the route.
+ * Every read is asynchronous (`node:fs/promises`,): a 2 s poll
+ * of a job's transcripts, up to the 128 MiB bound, never blocks the event loop.
  *
  * The job detail's execution-progress face (whole-job since
  * `readProgressSnapshot`) is a separate, wider projection:
- * every spawn's transcript as narration plus one masked, truncated
+ * every spawn's transcript as narration (assistant `text` and, since
+ *, non-empty `thinking`) plus one masked
  * `<name>: <primary argument>` line per tool call (`progressEntries`), merged
- * with one composed line per retained lifecycle event. It never reaches the
- * card stream above, whose whitelist stays narration only.
+ * with one composed line per retained lifecycle event. It carries every line
+ * (no per-line cap, no line bound since) and never reaches the
+ * card stream above, whose whitelist stays narration only. Since
+ * narration keeps its original whitespace (masked only), each
+ * tool line carries the light `tool` fields (name, masked argument, status,
+ * duration from its paired result) and a call's full masked input and output
+ * are read only on demand, one call at a time (`readProgressToolDetail`).
  */
 
 /** Small JSON records (job index, capsule, work item, execution). */
@@ -90,16 +99,16 @@ export function polyforgeDataRoot(): string {
 
 /** Read `[start, start+length)` of a regular file; undefined when missing,
  *  not a regular file or unreadable. `size` is the file size at open. */
-function readSlice(path: string, start: number | ((size: number) => number), length: number | ((size: number, start: number) => number)):
-  { buffer: Buffer; start: number; size: number; ino: number; dev: number } | undefined {
-  let fd: number;
+async function readSlice(path: string, start: number | ((size: number) => number), length: number | ((size: number, start: number) => number)):
+  Promise<{ buffer: Buffer; start: number; size: number; ino: number; dev: number } | undefined> {
+  let handle: FileHandle;
   try {
-    fd = openSync(path, OPEN_FLAGS);
+    handle = await open(path, OPEN_FLAGS);
   } catch {
     return undefined;
   }
   try {
-    const stats = fstatSync(fd);
+    const stats = await handle.stat();
     if (!stats.isFile()) return undefined;
     const size = stats.size;
     const from = Math.max(0, Math.min(size, typeof start === "function" ? start(size) : start));
@@ -107,21 +116,21 @@ function readSlice(path: string, start: number | ((size: number) => number), len
     const buffer = Buffer.alloc(want);
     let read = 0;
     while (read < want) {
-      const n = readSync(fd, buffer, read, want - read, from + read);
-      if (n === 0) break;
-      read += n;
+      const { bytesRead } = await handle.read(buffer, read, want - read, from + read);
+      if (bytesRead === 0) break;
+      read += bytesRead;
     }
     return { buffer: buffer.subarray(0, read), start: from, size, ino: stats.ino, dev: stats.dev };
   } catch {
     return undefined;
   } finally {
-    closeSync(fd);
+    await handle.close().catch(() => undefined);
   }
 }
 
-function readJson(path: string, maxBytes = RECORD_MAX_BYTES): unknown {
+async function readJson(path: string, maxBytes = RECORD_MAX_BYTES): Promise<unknown> {
   try {
-    const text = readRegularFileText(path, maxBytes);
+    const text = await readRegularFileTextAsync(path, maxBytes);
     return text === undefined ? undefined : JSON.parse(text);
   } catch {
     return undefined;
@@ -152,8 +161,8 @@ export interface PolyforgeJobRecord {
 }
 
 /** `runtime-state.json` → wi → its record's capsule dir (`readJobIndex`). */
-export function readJobRecords(root: string): Map<string, PolyforgeJobRecord> {
-  return readJobIndex(root).records;
+export async function readJobRecords(root: string): Promise<Map<string, PolyforgeJobRecord>> {
+  return (await readJobIndex(root)).records;
 }
 
 // ---- events and step durations ----
@@ -166,8 +175,8 @@ export interface PolyforgeCardEvent {
 
 /** The WI event file's lines, bounded: whole up to EVENTS_MAX_BYTES, else a
  *  head window (where `job_started` lives) plus the newest tail window. */
-export function readCardEvents(path: string): PolyforgeCardEvent[] {
-  const head = readSlice(path, 0, EVENTS_MAX_BYTES);
+export async function readCardEvents(path: string): Promise<PolyforgeCardEvent[]> {
+  const head = await readSlice(path, 0, EVENTS_MAX_BYTES);
   if (!head) return [];
   let lines: string[];
   if (head.size <= EVENTS_MAX_BYTES) {
@@ -175,7 +184,7 @@ export function readCardEvents(path: string): PolyforgeCardEvent[] {
   } else {
     const headText = head.buffer.subarray(0, EVENTS_HEAD_BYTES).toString("utf8");
     const headLines = headText.split("\n").slice(0, -1);
-    const tail = readSlice(path, (size) => size - (EVENTS_MAX_BYTES - EVENTS_HEAD_BYTES), EVENTS_MAX_BYTES - EVENTS_HEAD_BYTES);
+    const tail = await readSlice(path, (size) => size - (EVENTS_MAX_BYTES - EVENTS_HEAD_BYTES), EVENTS_MAX_BYTES - EVENTS_HEAD_BYTES);
     const tailLines = tail ? tail.buffer.toString("utf8").split("\n").slice(1) : [];
     lines = [...headLines, ...tailLines];
   }
@@ -207,8 +216,8 @@ export interface PolyforgeExecutionSteps {
   steps: Map<string, { status: string; startedAt?: string }>;
 }
 
-export function readExecution(capsuleDir: string): PolyforgeExecutionSteps | undefined {
-  const execution = asObject(readJson(join(capsuleDir, "runtime-state", "execution.json")));
+export async function readExecution(capsuleDir: string): Promise<PolyforgeExecutionSteps | undefined> {
+  const execution = asObject(await readJson(join(capsuleDir, "runtime-state", "execution.json")));
   if (!execution) return undefined;
   const steps = new Map<string, { status: string; startedAt?: string }>();
   for (const [id, value] of Object.entries(asObject(execution.steps) ?? {})) {
@@ -221,12 +230,12 @@ export function readExecution(capsuleDir: string): PolyforgeExecutionSteps | und
 }
 
 /** Declared step ids from the bundle's workflow.md frontmatter, in order. */
-export function readDeclaredSteps(capsuleDir: string): string[] | undefined {
-  const bundle = asString(asObject(readJson(join(capsuleDir, "capsule.json")))?.bundle_name);
+export async function readDeclaredSteps(capsuleDir: string): Promise<string[] | undefined> {
+  const bundle = asString(asObject(await readJson(join(capsuleDir, "capsule.json")))?.bundle_name);
   if (!bundle || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(bundle)) return undefined;
   let text: string | undefined;
   try {
-    text = readRegularFileText(join(capsuleDir, "workflows", bundle, "workflow.md"), WORKFLOW_MAX_BYTES);
+    text = await readRegularFileTextAsync(join(capsuleDir, "workflows", bundle, "workflow.md"), WORKFLOW_MAX_BYTES);
   } catch {
     return undefined;
   }
@@ -335,17 +344,17 @@ export interface PolyforgeTranscriptSource {
   step?: string;
 }
 
-function realInside(path: string, roots: string[]): string | undefined {
+async function realInside(path: string, roots: string[]): Promise<string | undefined> {
   let real: string;
   try {
-    real = realpathSync(path);
+    real = await realpath(path);
   } catch {
     return undefined;
   }
   for (const root of roots) {
     let realRoot: string;
     try {
-      realRoot = realpathSync(root);
+      realRoot = await realpath(root);
     } catch {
       continue;
     }
@@ -372,13 +381,13 @@ const SESSION_HEAD_BYTES = 4 * 1024;
 /** pi's session file name: `<ISO timestamp, ':' and '.' → '-'>_<uuid>.jsonl`. */
 const PI_SESSION_FILE_STAMP = /^(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})-(\d{2})-(\d{3})Z_/;
 
-function newestJsonl(dir: string): { path: string; mtime: number } | undefined {
+async function newestJsonl(dir: string): Promise<{ path: string; mtime: number } | undefined> {
   try {
-    const names = readdirSync(dir).filter((name) => name.endsWith(".jsonl"));
+    const names = (await readdir(dir)).filter((name) => name.endsWith(".jsonl"));
     let best: { path: string; mtime: number } | undefined;
     for (const name of names) {
       const path = join(dir, name);
-      const stats = statSync(path);
+      const stats = await stat(path);
       if (stats.isFile() && (!best || stats.mtimeMs > best.mtime)) best = { path, mtime: stats.mtimeMs };
     }
     return best;
@@ -392,8 +401,8 @@ function newestJsonl(dir: string): { path: string; mtime: number } | undefined {
  *  the file name, else the file's mtime. A previous step's
  *  session can still be written after the next step starts, so its mtime
  *  says nothing about which step it belongs to. */
-function piSessionStartMs(path: string, mtime: number): number {
-  const head = readSlice(path, 0, SESSION_HEAD_BYTES);
+async function piSessionStartMs(path: string, mtime: number): Promise<number> {
+  const head = await readSlice(path, 0, SESSION_HEAD_BYTES);
   const first = head ? parseLine(head.buffer.toString("utf8").split("\n")[0] ?? "") : undefined;
   if (first?.type === "session") {
     const stamp = Date.parse(asString(first.timestamp) ?? "");
@@ -411,8 +420,8 @@ function piSessionStartMs(path: string, mtime: number): number {
  *  newest line: the harness's live session file first, then the journal's
  *  `transcript`. Undefined when no candidate resolves inside the
  *  capsule/data root or the harness is not one this reader parses. */
-export function resolveTranscript(root: string, capsuleDir: string): PolyforgeTranscriptSource | undefined {
-  const journal = readSlice(join(capsuleDir, "runtime-state", "spawn-journal.jsonl"), (size) => size - JOURNAL_TAIL_BYTES, JOURNAL_TAIL_BYTES);
+export async function resolveTranscript(root: string, capsuleDir: string): Promise<PolyforgeTranscriptSource | undefined> {
+  const journal = await readSlice(join(capsuleDir, "runtime-state", "spawn-journal.jsonl"), (size) => size - JOURNAL_TAIL_BYTES, JOURNAL_TAIL_BYTES);
   let latest: Record<string, unknown> | undefined;
   if (journal) {
     const lines = journal.buffer.toString("utf8").split("\n");
@@ -427,9 +436,9 @@ export function resolveTranscript(root: string, capsuleDir: string): PolyforgeTr
   if (harness === "pi") {
     // The newest session of this capsule, unless it started before the step
     // (a previous step's session: the current step has not written its own yet).
-    const newest = newestJsonl(join(root, "step-agent-sessions", encodePiSessionDir(capsuleDir)));
+    const newest = await newestJsonl(join(root, "step-agent-sessions", encodePiSessionDir(capsuleDir)));
     const startedMs = Date.parse(asString(latest?.started_at) ?? "");
-    if (newest && (!Number.isFinite(startedMs) || piSessionStartMs(newest.path, newest.mtime) >= startedMs - SESSION_START_SKEW_MS)) {
+    if (newest && (!Number.isFinite(startedMs) || await piSessionStartMs(newest.path, newest.mtime) >= startedMs - SESSION_START_SKEW_MS)) {
       candidates.push(newest.path);
     }
   } else {
@@ -441,7 +450,7 @@ export function resolveTranscript(root: string, capsuleDir: string): PolyforgeTr
   candidates.push(asString(latest?.transcript));
   for (const candidate of candidates) {
     if (!candidate || !isAbsolute(candidate)) continue;
-    const path = realInside(candidate, roots);
+    const path = await realInside(candidate, roots);
     if (path) return { path, harness, ...(step ? { step } : {}) };
   }
   return undefined;
@@ -451,6 +460,13 @@ export function resolveTranscript(root: string, capsuleDir: string): PolyforgeTr
 
 function cleanText(value: string): string {
   return capCodePoints(maskPolyforgeCredentials(value.replace(/\s+/g, " ").trim()), CARD_ENTRY_MAX);
+}
+
+/** Progress-face text: the credential mask only — no cap
+ *  and, since, the original whitespace kept so the UI can
+ *  render it as Markdown; text that is blank after a trim is no text. */
+function cleanProgressText(value: string): string {
+  return value.trim() ? maskPolyforgeCredentials(value) : "";
 }
 
 /** Whether a record belongs to the harness's transcript format at all. */
@@ -480,9 +496,6 @@ export function transcriptEntries(record: Record<string, unknown>, harness: Poly
   return entries;
 }
 
-/** A tool-call line's cap, in code points after masking. */
-export const PROGRESS_TOOL_MAX = 200;
-
 /** A tool call's primary argument: a string `command`, else the first
  *  string-valued argument in key order, else nothing. */
 function primaryArgument(args: unknown): string | undefined {
@@ -495,13 +508,26 @@ function primaryArgument(args: unknown): string | undefined {
   return undefined;
 }
 
-/** The execution-progress entries of one transcript record:
- *  each assistant text block → `narration` (as `transcriptEntries`), each pi
+/** The execution-progress entries of one transcript record (;
+ *  thinking since): each assistant `text` block → `narration`
+ *  (as `transcriptEntries`), each non-empty `thinking` block → `narration`
+ *  with `variant:"thinking"` (the UI renders it dim italic), each pi
  *  `toolCall` / claude `tool_use` block → one `tool` line `<name>: <primary
- *  argument>`, credential-masked and capped at PROGRESS_TOOL_MAX. Tool
- *  results, thinking, user/system records and every other field produce
- *  nothing. Only `readProgressSnapshot` uses it; the card face never does. */
-export function progressEntries(record: Record<string, unknown>, harness: PolyforgeHarness, idPrefix: string): PolyforgeProgressLine[] {
+ *  argument>` (whitespace-collapsed) with its light `tool` fields — the name,
+ *  the masked primary argument and `status: "running"` until
+ *  `projectTranscript` pairs a result. Every line is
+ *  credential-masked with no length cap; narration keeps its
+ *  whitespace. Tool results, empty thinking, user/system
+ *  records and every other field produce nothing. `onCall` sees each tool
+ *  line with its call id and raw input (for pairing and the on-demand detail;
+ *  neither enters a line). Only the progress face uses it; the card face never
+ *  does. */
+export function progressEntries(
+  record: Record<string, unknown>,
+  harness: PolyforgeHarness,
+  idPrefix: string,
+  onCall?: (line: PolyforgeProgressLine, callId: string | undefined, input: unknown) => void,
+): PolyforgeProgressLine[] {
   const message = asObject(record.message);
   if (!message || message.role !== "assistant") return [];
   if (harness === "pi" ? record.type !== "message" : record.type !== "assistant") return [];
@@ -513,20 +539,156 @@ export function progressEntries(record: Record<string, unknown>, harness: Polyfo
     if (!block) return;
     const id = `${idPrefix}.${index}`;
     if (block.type === "text" && typeof block.text === "string") {
-      const text = cleanText(block.text);
+      const text = cleanProgressText(block.text);
       if (text) entries.push({ id, kind: "narration", text });
+      return;
+    }
+    if (block.type === "thinking" && typeof block.thinking === "string") {
+      const text = cleanProgressText(block.thinking);
+      if (text) entries.push({ id, kind: "narration", text, variant: "thinking" });
       return;
     }
     const toolBlock = harness === "pi" ? "toolCall" : "tool_use";
     if (block.type !== toolBlock) return;
     const name = asString(block.name);
     if (!name) return;
-    const argument = primaryArgument(harness === "pi" ? block.arguments : block.input);
-    const line = (argument ? `${name}: ${argument}` : name).replace(/\s+/g, " ").trim();
-    const text = capCodePoints(maskPolyforgeCredentials(line), PROGRESS_TOOL_MAX);
-    if (text) entries.push({ id, kind: "tool", text });
+    const input = harness === "pi" ? block.arguments : block.input;
+    const argument = primaryArgument(input);
+    const text = maskPolyforgeCredentials((argument ? `${name}: ${argument}` : name).replace(/\s+/g, " ").trim());
+    const tool: PolyforgeProgressTool = { name: maskPolyforgeCredentials(name), ...(argument ? { argument: maskPolyforgeCredentials(argument) } : {}), status: "running" };
+    const line: PolyforgeProgressLine = { id, kind: "tool", text, tool };
+    entries.push(line);
+    onCall?.(line, asString(block.id), input);
   });
   return entries;
+}
+
+/** A tool result a transcript record carries: pi's `toolResult` message
+ *  (`toolCallId` when present), claude's `tool_result` blocks of a user
+ *  record (`tool_use_id`). */
+interface ProgressToolResult {
+  callId?: string;
+  isError: boolean;
+  content: unknown;
+}
+
+function progressToolResults(record: Record<string, unknown>, harness: PolyforgeHarness): ProgressToolResult[] {
+  const message = asObject(record.message);
+  if (!message) return [];
+  if (harness === "pi") {
+    if (record.type !== "message" || message.role !== "toolResult") return [];
+    const callId = asString(message.toolCallId);
+    return [{ ...(callId ? { callId } : {}), isError: message.isError === true, content: message.content }];
+  }
+  if (record.type !== "user" || !Array.isArray(message.content)) return [];
+  const results: ProgressToolResult[] = [];
+  for (const value of message.content) {
+    const block = asObject(value);
+    if (block?.type !== "tool_result") continue;
+    const callId = asString(block.tool_use_id);
+    results.push({ ...(callId ? { callId } : {}), isError: block.is_error === true, content: block.content });
+  }
+  return results;
+}
+
+/** A tool result's content as text: text blocks joined by a newline, any
+ *  other block a neutral `[image]` / `[<type>]` placeholder (never invented
+ *  text), masked, uncapped. */
+function toolResultText(content: unknown): string {
+  if (typeof content === "string") return maskPolyforgeCredentials(content);
+  if (!Array.isArray(content)) return "";
+  return maskPolyforgeCredentials(content.map((value) => {
+    const block = asObject(value);
+    if (block?.type === "text" && typeof block.text === "string") return block.text;
+    return `[${asString(block?.type) ?? "content"}]`;
+  }).join("\n"));
+}
+
+/** One tool call's full masked detail: what the expanded
+ *  progress card shows. `output` is null while no result is paired. */
+export interface PolyforgeProgressToolDetail extends PolyforgeProgressTool {
+  input: string;
+  output: string | null;
+  isError: boolean;
+}
+
+/** `GET /api/polyforge/progress/tool` — one call's detail, or why not. */
+export type PolyforgeProgressToolAnswer =
+  | { available: true; hasResult: boolean; tool: PolyforgeProgressToolDetail }
+  | { available: false; error: string };
+
+interface ProgressCall {
+  line: PolyforgeProgressLine;
+  callId?: string;
+  callAt?: number;
+  input?: unknown;
+  result?: ProgressToolResult & { at?: number };
+}
+
+/**
+ * One transcript projected for the progress face: every record's
+ * `progressEntries` pushed with its time (the record's `timestamp`, else its
+ * spawn's start plus its ordinal in microseconds), and each tool call paired
+ * with its result by call id (pi `toolCallId`, claude
+ * `tool_use_id`) when the result names one (an id no call of this transcript
+ * carries pairs nothing), else the oldest unpaired call of the same
+ * transcript (the recorded pi format names none). A paired call's
+ * status is `error` on the result's error flag, else `ok`; unpaired stays
+ * `running`; `durationMs` only when both records carry a readable timestamp
+ * in order. Only the call whose line id is `keep` retains its raw input and
+ * result (the detail read); the poll keeps none.
+ */
+function projectTranscript(
+  buffer: Buffer,
+  harness: PolyforgeHarness,
+  identity: string,
+  startMs: number,
+  push: (atMs: number, line: PolyforgeProgressLine) => void,
+  keep?: string,
+): ProgressCall | undefined {
+  const calls: ProgressCall[] = [];
+  const byId = new Map<string, ProgressCall>();
+  let next = 0;
+  let kept: ProgressCall | undefined;
+  let lineStart = 0;
+  let ordinal = 0;
+  while (lineStart < buffer.length) {
+    const newline = buffer.indexOf(0x0a, lineStart);
+    if (newline < 0) break; // a line still being written
+    ordinal += 1;
+    if (newline - lineStart <= PROGRESS_LINE_MAX_BYTES) {
+      const record = parseLine(buffer.subarray(lineStart, newline).toString("utf8"));
+      if (record) {
+        const stamp = Date.parse(asString(record.timestamp) ?? "");
+        const atMs = Number.isFinite(stamp) ? stamp : startMs + ordinal / 1000;
+        const real = Number.isFinite(stamp) ? stamp : undefined;
+        const lines = progressEntries(record, harness, `${identity}.${lineStart}`, (line, callId, input) => {
+          const call: ProgressCall = { line, ...(callId ? { callId } : {}), ...(real !== undefined ? { callAt: real } : {}) };
+          if (line.id === keep) { call.input = input; kept = call; }
+          calls.push(call);
+          if (callId && !byId.has(callId)) byId.set(callId, call);
+        });
+        for (const line of lines) push(atMs, line);
+        for (const result of progressToolResults(record, harness)) {
+          let call: ProgressCall | undefined;
+          if (result.callId) {
+            call = byId.get(result.callId);
+          } else {
+            while (next < calls.length && calls[next].result) next += 1;
+            call = calls[next];
+          }
+          if (!call || call.result) continue;
+          call.result = { ...result, ...(real !== undefined ? { at: real } : {}) };
+          const tool = call.line.tool!;
+          tool.status = result.isError ? "error" : "ok";
+          if (call.callAt !== undefined && real !== undefined && real >= call.callAt) tool.durationMs = real - call.callAt;
+          if (call !== kept) call.result.content = undefined;
+        }
+      }
+    }
+    lineStart = newline + 1;
+  }
+  return kept;
 }
 
 export interface PolyforgeCardBudget {
@@ -547,12 +709,12 @@ function entryBytes(entries: PolyforgeCardEntry[]): number {
  * last whole line consumed. `budget` (shared across the response) is
  * decremented; a card it cannot serve keeps its cursor.
  */
-export function readCardProgress(
+export async function readCardProgress(
   source: PolyforgeTranscriptSource,
   cursor: string | undefined,
   budget: PolyforgeCardBudget,
-): PolyforgeCardProgress {
-  const head = readSlice(source.path, 0, 0);
+): Promise<PolyforgeCardProgress> {
+  const head = await readSlice(source.path, 0, 0);
   if (!head) return { available: false, entries: [] };
   const identity = createHash("sha256")
     .update(`${source.path}\0${head.dev}\0${head.ino}\0${source.harness}\0${source.step ?? ""}`)
@@ -562,7 +724,7 @@ export function readCardProgress(
   const incremental = parsed && parsed.identity === identity && parsed.offset <= head.size ? parsed.offset : null;
 
   if (incremental !== null) {
-    const slice = readSlice(source.path, incremental, TRANSCRIPT_WINDOW_BYTES);
+    const slice = await readSlice(source.path, incremental, TRANSCRIPT_WINDOW_BYTES);
     if (!slice) return { available: false, entries: [] };
     const text = slice.buffer;
     const fullBudget = budget.entries >= CARD_RESPONSE_MAX_ENTRIES && budget.bytes >= CARD_RESPONSE_MAX_BYTES;
@@ -596,7 +758,7 @@ export function readCardProgress(
     return { available: true, entries, cursor: formatCardCursor(identity, incremental + consumed) };
   }
 
-  const slice = readSlice(source.path, (size) => size - TRANSCRIPT_WINDOW_BYTES, TRANSCRIPT_WINDOW_BYTES);
+  const slice = await readSlice(source.path, (size) => size - TRANSCRIPT_WINDOW_BYTES, TRANSCRIPT_WINDOW_BYTES);
   if (!slice) return { available: false, entries: [] };
   const text = slice.buffer;
   let lineStart = 0;
@@ -649,8 +811,8 @@ const PROGRESS_TRANSCRIPTS_MAX_BYTES = 128 * 1024 * 1024;
  *  partial line dropped when the window starts mid-file, the trailing one
  *  (a line still being written) always dropped. Each line keeps its byte
  *  offset in the file. Undefined when the file is not readable. */
-function readWholeLines(path: string, max: number): { offset: number; text: string }[] | undefined {
-  const slice = readSlice(path, (size) => size - max, max);
+async function readWholeLines(path: string, max: number): Promise<{ offset: number; text: string }[] | undefined> {
+  const slice = await readSlice(path, (size) => size - max, max);
   if (!slice) return undefined;
   const buffer = slice.buffer;
   let lineStart = 0;
@@ -676,9 +838,9 @@ export interface PolyforgeJobIndex {
 
 /** `runtime-state.json` → whether the daemon's job index is readable at all,
  *  and wi → its record's capsule dir (the first record per wi). */
-export function readJobIndex(root: string): PolyforgeJobIndex {
+export async function readJobIndex(root: string): Promise<PolyforgeJobIndex> {
   const records = new Map<string, PolyforgeJobRecord>();
-  const index = asObject(readJson(join(root, "runtime-state.json")));
+  const index = asObject(await readJson(join(root, "runtime-state.json")));
   if (!index) return { readable: false, records };
   const jobs = index.jobs;
   if (Array.isArray(jobs)) {
@@ -705,8 +867,8 @@ export interface PolyforgeSpawn {
 /** Every spawn of the job, in journal (file) order: one per line of
  *  `<capsule>/runtime-state/spawn-journal.jsonl`. Undefined when the journal
  *  is not readable. */
-export function readSpawnJournal(capsuleDir: string): PolyforgeSpawn[] | undefined {
-  const lines = readWholeLines(join(capsuleDir, "runtime-state", "spawn-journal.jsonl"), PROGRESS_JOURNAL_MAX_BYTES);
+export async function readSpawnJournal(capsuleDir: string): Promise<PolyforgeSpawn[] | undefined> {
+  const lines = await readWholeLines(join(capsuleDir, "runtime-state", "spawn-journal.jsonl"), PROGRESS_JOURNAL_MAX_BYTES);
   if (!lines) return undefined;
   const spawns: PolyforgeSpawn[] = [];
   for (const line of lines) {
@@ -741,9 +903,9 @@ export interface PolyforgeProgressEvent {
 /** The WI's event log `<root>/events/wi-<wi>.jsonl`, whole up to
  *  PROGRESS_EVENTS_MAX_BYTES (else its newest whole lines), each line's
  *  time, kind and raw body. Undefined when the log is not readable. */
-export function readProgressEventLog(root: string, wi: string): PolyforgeProgressEvent[] | undefined {
+export async function readProgressEventLog(root: string, wi: string): Promise<PolyforgeProgressEvent[] | undefined> {
   if (!isPolyforgeWorkItemId(wi)) return undefined;
-  const lines = readWholeLines(join(root, "events", `wi-${wi}.jsonl`), PROGRESS_EVENTS_MAX_BYTES);
+  const lines = await readWholeLines(join(root, "events", `wi-${wi}.jsonl`), PROGRESS_EVENTS_MAX_BYTES);
   if (!lines) return undefined;
   const events: PolyforgeProgressEvent[] = [];
   for (const line of lines) {
@@ -762,11 +924,11 @@ export function readProgressEventLog(root: string, wi: string): PolyforgeProgres
  *  journal's `transcript` (the capsule copy), else, for claude, its
  *  `claude-config` session. Same realpath containment; an unknown harness
  *  or an outside/missing path is no transcript. */
-function spawnTranscript(root: string, capsuleDir: string, spawn: PolyforgeSpawn, newest: boolean): PolyforgeTranscriptSource | undefined {
+async function spawnTranscript(root: string, capsuleDir: string, spawn: PolyforgeSpawn, newest: boolean): Promise<PolyforgeTranscriptSource | undefined> {
   if (spawn.harness !== "pi" && spawn.harness !== "claude") return undefined;
   const harness: PolyforgeHarness = spawn.harness;
   if (newest) {
-    const live = resolveTranscript(root, capsuleDir);
+    const live = await resolveTranscript(root, capsuleDir);
     if (live && live.harness === harness) return live;
   }
   const candidates = [spawn.transcript];
@@ -775,7 +937,7 @@ function spawnTranscript(root: string, capsuleDir: string, spawn: PolyforgeSpawn
   }
   for (const candidate of candidates) {
     if (!candidate || !isAbsolute(candidate)) continue;
-    const path = realInside(candidate, [capsuleDir, root]);
+    const path = await realInside(candidate, [capsuleDir, root]);
     if (path) return { path, harness, ...(spawn.step ? { step: spawn.step } : {}) };
   }
   return undefined;
@@ -791,6 +953,38 @@ interface ProgressStreamItem {
 
 const unavailableSnapshot = (): PolyforgeProgressSnapshot => ({ available: false, lines: [], omitted: 0 });
 
+/** The distinct transcripts of a job's spawns, in journal order, each with
+ *  its spawn's start (0 when unreadable): `spawnTranscript` per spawn, the
+ *  newest reading the live session first; a transcript several spawns name
+ *  (a `--resume` continuation) counts once. */
+async function progressSources(root: string, capsuleDir: string, spawns: PolyforgeSpawn[]): Promise<{ source: PolyforgeTranscriptSource; startMs: number }[]> {
+  const sources: { source: PolyforgeTranscriptSource; startMs: number }[] = [];
+  const seen = new Set<string>();
+  for (const [index, spawn] of spawns.entries()) {
+    const source = await spawnTranscript(root, capsuleDir, spawn, index === spawns.length - 1);
+    if (!source || seen.has(source.path)) continue;
+    seen.add(source.path);
+    const startMs = Date.parse(spawn.startedAt ?? "");
+    sources.push({ source, startMs: Number.isFinite(startMs) ? startMs : 0 });
+  }
+  return sources;
+}
+
+/** A transcript's line-id identity: path, device, inode and harness hashed,
+ *  so an id names no path and a replaced file is a different transcript. */
+function transcriptIdentity(path: string, slice: { dev: number; ino: number }, harness: PolyforgeHarness): string {
+  return createHash("sha256").update(`${path}\0${slice.dev}\0${slice.ino}\0${harness}`).digest("hex").slice(0, 16);
+}
+
+/** A tool line's id as `progressEntries` builds it:
+ *  `<16-hex transcript identity>.<record byte offset>.<block index>`. */
+const PROGRESS_TOOL_ID = /^([0-9a-f]{16})\.(\d{1,15})\.(\d{1,6})$/;
+
+/** Whether a reference has a progress line id's shape (no read). Pure. */
+export function isProgressToolId(value: unknown): value is string {
+  return typeof value === "string" && PROGRESS_TOOL_ID.test(value);
+}
+
 /**
  * The job detail's whole-job execution progress for one
  * capsule: every spawn in the spawn journal (reruns included), each spawn's
@@ -801,19 +995,22 @@ const unavailableSnapshot = (): PolyforgeProgressSnapshot => ({ available: false
  * since its `step_started` of the same step and spawn). The stream is the
  * stable sort by time — events before transcript lines at the same instant,
  * then build order; a record without a readable `timestamp` sits at its
- * spawn's start plus its ordinal in microseconds — bounded to the newest
- * PROGRESS_MAX_LINES with the exact `omitted` count.
+ * spawn's start plus its ordinal in microseconds — complete, no line bound
+ * (; `omitted` stays 0 for the wire shape).
  *
- * `wi` defaults to the capsule's own `work-item.json` id. `available:
- * false`: neither the journal nor the event log readable, the transcripts
- * over PROGRESS_TRANSCRIPTS_MAX_BYTES, or any error. Never throws; no line
- * id names a path.
+ * `wi` defaults to the capsule's own `work-item.json` id. With no capsule
+ * dir (a job the daemon has dropped from its index, or a record without one,
+ *) only the WI's event log is read: its lifecycle lines, no
+ * spawn journal and no transcript. `available: false`: neither the journal
+ * nor the event log readable, the transcripts over
+ * PROGRESS_TRANSCRIPTS_MAX_BYTES, or any error. Never throws; no line id
+ * names a path.
  */
-export function readProgressSnapshot(root: string, capsuleDir: string, wi?: string): PolyforgeProgressSnapshot {
+export async function readProgressSnapshot(root: string, capsuleDir: string | undefined, wi?: string): Promise<PolyforgeProgressSnapshot> {
   try {
-    const workItem = wi ?? asString(asObject(readJson(join(capsuleDir, "runtime-state", "work-item.json")))?.id);
-    const spawns = readSpawnJournal(capsuleDir);
-    const events = workItem ? readProgressEventLog(root, workItem) : undefined;
+    const workItem = wi ?? (capsuleDir ? asString(asObject(await readJson(join(capsuleDir, "runtime-state", "work-item.json")))?.id) : undefined);
+    const spawns = capsuleDir ? await readSpawnJournal(capsuleDir) : undefined;
+    const events = workItem ? await readProgressEventLog(root, workItem) : undefined;
     if (!spawns && !events) return unavailableSnapshot();
     const items: ProgressStreamItem[] = [];
     const push = (atMs: number, rank: 0 | 1, line: PolyforgeProgressLine) => items.push({ atMs, rank, order: items.length, line });
@@ -835,59 +1032,87 @@ export function readProgressSnapshot(root: string, capsuleDir: string, wi?: stri
       if (line) push(Number.isFinite(atMs) ? atMs : 0, 0, line);
     }
 
-    const sources: { source: PolyforgeTranscriptSource; startMs: number }[] = [];
-    const seen = new Set<string>();
+    const sources = capsuleDir && spawns ? await progressSources(root, capsuleDir, spawns) : [];
     let transcriptBytes = 0;
-    (spawns ?? []).forEach((spawn, index, all) => {
-      const source = spawnTranscript(root, capsuleDir, spawn, index === all.length - 1);
-      if (!source || seen.has(source.path)) return;
-      seen.add(source.path);
-      const startMs = Date.parse(spawn.startedAt ?? "");
-      sources.push({ source, startMs: Number.isFinite(startMs) ? startMs : 0 });
-    });
     for (const { source } of sources) {
-      transcriptBytes += readSlice(source.path, 0, 0)?.size ?? 0;
+      transcriptBytes += (await readSlice(source.path, 0, 0))?.size ?? 0;
     }
     if (transcriptBytes > PROGRESS_TRANSCRIPTS_MAX_BYTES) return unavailableSnapshot();
 
     for (const { source, startMs } of sources) {
-      const slice = readSlice(source.path, 0, PROGRESS_TRANSCRIPTS_MAX_BYTES);
+      const slice = await readSlice(source.path, 0, PROGRESS_TRANSCRIPTS_MAX_BYTES);
       if (!slice) continue;
-      const identity = createHash("sha256")
-        .update(`${source.path}\0${slice.dev}\0${slice.ino}\0${source.harness}`)
-        .digest("hex")
-        .slice(0, 16);
-      const buffer = slice.buffer;
-      let lineStart = 0;
-      let ordinal = 0;
-      while (lineStart < buffer.length) {
-        const newline = buffer.indexOf(0x0a, lineStart);
-        if (newline < 0) break; // a line still being written
-        ordinal += 1;
-        if (newline - lineStart <= PROGRESS_LINE_MAX_BYTES) {
-          const record = parseLine(buffer.subarray(lineStart, newline).toString("utf8"));
-          if (record) {
-            const stamp = Date.parse(asString(record.timestamp) ?? "");
-            const atMs = Number.isFinite(stamp) ? stamp : startMs + ordinal / 1000;
-            for (const entry of progressEntries(record, source.harness, `${identity}.${lineStart}`)) push(atMs, 1, entry);
-          }
-        }
-        lineStart = newline + 1;
-      }
+      projectTranscript(slice.buffer, source.harness, transcriptIdentity(source.path, slice, source.harness), startMs, (atMs, line) => push(atMs, 1, line));
     }
 
     items.sort((a, b) => a.atMs - b.atMs || a.rank - b.rank || a.order - b.order);
-    const kept = items.slice(-PROGRESS_MAX_LINES);
-    return { available: true, lines: kept.map((item) => item.line), omitted: items.length - kept.length };
+    return { available: true, lines: items.map((item) => item.line), omitted: 0 };
   } catch {
     return unavailableSnapshot();
   }
 }
 
+/** The input a detail shows: a string as is, anything else as indented
+ *  JSON; masked, uncapped. */
+function toolInputText(input: unknown): string {
+  if (typeof input === "string") return maskPolyforgeCredentials(input);
+  if (input === undefined) return "";
+  try {
+    return maskPolyforgeCredentials(JSON.stringify(input, null, 2) ?? "");
+  } catch {
+    return "";
+  }
+}
+
+const unavailableTool = (error: string): PolyforgeProgressToolAnswer => ({ available: false, error });
+
+/**
+ * One tool call's full detail for the expanded progress card,
+ * read on demand: `id` is the tool line's id from `readProgressSnapshot`.
+ * The same spawn journal and transcript resolution as the snapshot (same
+ * realpath containment, same bounds); only the transcript whose identity the
+ * id names is read whole, and only that call keeps its raw input and paired
+ * result: `input` (a string, else indented JSON) and `output` (text blocks,
+ * other blocks as `[<type>]`) masked by `maskPolyforgeCredentials`, uncapped;
+ * `output: null` and `hasResult: false` while no result is paired. A
+ * malformed id, no capsule or journal, a transcript no longer readable (moved,
+ * replaced — a new inode is a new identity — or over the bound), or no such
+ * call is `available: false` with a fixed reason. Never throws; no answer
+ * names a path. The caller validates `wi` and the id shape first.
+ */
+export async function readProgressToolDetail(root: string, capsuleDir: string | undefined, id: string): Promise<PolyforgeProgressToolAnswer> {
+  try {
+    const match = PROGRESS_TOOL_ID.exec(id);
+    if (!match) return unavailableTool("unknown tool call");
+    if (!capsuleDir) return unavailableTool("the job's transcripts are no longer readable");
+    const spawns = await readSpawnJournal(capsuleDir);
+    if (!spawns) return unavailableTool("the job's transcripts are no longer readable");
+    for (const { source, startMs } of await progressSources(root, capsuleDir, spawns)) {
+      const head = await readSlice(source.path, 0, 0);
+      if (!head || transcriptIdentity(source.path, head, source.harness) !== match[1]) continue;
+      if (head.size > PROGRESS_TRANSCRIPTS_MAX_BYTES) return unavailableTool("the transcript is too large to read");
+      const slice = await readSlice(source.path, 0, PROGRESS_TRANSCRIPTS_MAX_BYTES);
+      if (!slice || slice.ino !== head.ino || slice.dev !== head.dev) break;
+      const call = projectTranscript(slice.buffer, source.harness, match[1], startMs, () => undefined, id);
+      if (!call) return unavailableTool("the tool call is no longer in its transcript");
+      const tool = call.line.tool!;
+      const output = call.result ? toolResultText(call.result.content) : null;
+      return {
+        available: true,
+        hasResult: call.result !== undefined,
+        tool: { ...tool, input: toolInputText(call.input), output, isError: call.result?.isError ?? false },
+      };
+    }
+    return unavailableTool("the tool call's transcript is no longer readable");
+  } catch {
+    return unavailableTool("the tool call could not be read");
+  }
+}
+
 // ---- the card stream ----
 
-function readGoal(capsuleDir: string): string | undefined {
-  const goal = asString(asObject(readJson(join(capsuleDir, "runtime-state", "work-item.json")))?.goal);
+async function readGoal(capsuleDir: string): Promise<string | undefined> {
+  const goal = asString(asObject(await readJson(join(capsuleDir, "runtime-state", "work-item.json")))?.goal);
   return goal ? capCodePoints(goal, GOAL_MAX) : undefined;
 }
 
@@ -896,14 +1121,14 @@ function bareCard(job: PolyforgeJob): PolyforgeCard {
 }
 
 /** Facts of one card except its progress (no budget needed). */
-function cardFacts(job: PolyforgeJob, root: string, record: PolyforgeJobRecord | undefined, now: number): PolyforgeCard {
+async function cardFacts(job: PolyforgeJob, root: string, record: PolyforgeJobRecord | undefined, now: number): Promise<PolyforgeCard> {
   if (!isPolyforgeWorkItemId(job.wi)) return bareCard(job);
-  const events = readCardEvents(join(root, "events", `wi-${job.wi}.jsonl`));
+  const events = await readCardEvents(join(root, "events", `wi-${job.wi}.jsonl`));
   const startedAt = earliestJobStarted(events);
   const capsuleDir = record?.capsuleDir;
-  const execution = capsuleDir ? readExecution(capsuleDir) : undefined;
-  const order = cardStepOrder(capsuleDir ? readDeclaredSteps(capsuleDir) : undefined, events, execution);
-  const goal = capsuleDir ? readGoal(capsuleDir) : undefined;
+  const execution = capsuleDir ? await readExecution(capsuleDir) : undefined;
+  const order = cardStepOrder(capsuleDir ? await readDeclaredSteps(capsuleDir) : undefined, events, execution);
+  const goal = capsuleDir ? await readGoal(capsuleDir) : undefined;
   return {
     job,
     ...(goal ? { goal } : {}),
@@ -920,25 +1145,25 @@ function cardFacts(job: PolyforgeJob, root: string, record: PolyforgeJobRecord |
  * from its cursor under one per-response entry/byte budget. Never throws:
  * a card whose files cannot be read keeps only its job facts.
  */
-export function readPolyforgeCards(
+export async function readPolyforgeCards(
   jobs: PolyforgeJob[],
   cursors: Map<string, string>,
   now: number,
   root: string = polyforgeDataRoot(),
-): PolyforgeCard[] {
+): Promise<PolyforgeCard[]> {
   let records: Map<string, PolyforgeJobRecord>;
   try {
-    records = readJobRecords(root);
+    records = await readJobRecords(root);
   } catch {
     records = new Map();
   }
-  const cards = sortPolyforgeCards(jobs.map((job) => {
+  const cards = sortPolyforgeCards(await Promise.all(jobs.map(async (job) => {
     try {
-      return cardFacts(job, root, isPolyforgeWorkItemId(job.wi) ? records.get(job.wi) : undefined, now);
+      return await cardFacts(job, root, isPolyforgeWorkItemId(job.wi) ? records.get(job.wi) : undefined, now);
     } catch {
       return bareCard(job);
     }
-  }));
+  })));
   const budget: PolyforgeCardBudget = { entries: CARD_RESPONSE_MAX_ENTRIES, bytes: CARD_RESPONSE_MAX_BYTES };
   for (const card of cards) {
     const wi = card.job.wi;
@@ -946,14 +1171,14 @@ export function readPolyforgeCards(
     if (!record?.capsuleDir) continue;
     const cursor = cursors.get(wi);
     try {
-      const source = resolveTranscript(root, record.capsuleDir);
+      const source = await resolveTranscript(root, record.capsuleDir);
       if (!source) continue;
       if (budget.entries <= 0 || budget.bytes <= 0) {
         // Out of budget: nothing read, the client's cursor stays as it is.
         card.progress = { available: true, entries: [], ...(cursor ? { cursor } : {}) };
         continue;
       }
-      card.progress = readCardProgress(source, cursor, budget);
+      card.progress = await readCardProgress(source, cursor, budget);
     } catch {
       card.progress = { available: false, entries: [] };
     }

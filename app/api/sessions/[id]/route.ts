@@ -25,13 +25,13 @@ import { attachTranscriptNotices, readSessionTranscriptNotices } from "@/lib/tra
 import { getClaudeSessionRecord, removeClaudeSessionRecord, updateClaudeSessionRecord, type ClaudeSessionRecord } from "@/lib/claude-index";
 import { claudeSessionInfo, claudeSessionStats, getClaudeSession, readClaudeHistory } from "@/lib/claude-session";
 import { removeClaudeTranscript } from "@/lib/claude-config-dir";
-import { claudePresetTools } from "@/lib/claude-argv";
 import { CLAUDE_PROVIDER } from "@/lib/claude-shared";
 import { normalizeToolCalls } from "@/lib/normalize";
 
 /**
  * A claude session's detail: the index's row, and the history read from
- * claude's own transcript through the adapter. No branch tree: a claude session is linear.
+ * claude's own transcript through the adapter, with the subagent runs rebuilt from its
+ * sidecars. No branch tree: a claude session is linear.
  */
 async function claudeSessionDetail(req: Request, record: ClaudeSessionRecord) {
   const history = readClaudeHistory(record.id);
@@ -52,11 +52,14 @@ async function claudeSessionDetail(req: Request, record: ClaudeSessionRecord) {
       hasMore: false,
       turnsBefore: 0,
       thinkingLevel: "off",
-      model: { provider: CLAUDE_PROVIDER, modelId: record.modelAlias },
+      model: { provider: CLAUDE_PROVIDER, modelId: record.model },
     },
     stats: claudeSessionStats(record, history.messages),
     totalActiveMs: 0,
-    toolNames: [...claudePresetTools(record.preset)],
+    // claude's tools are the user's claude config's; pi-web selects none.
+    toolNames: [],
+    // Its subagents' runs, their entries from claude's sidecars.
+    claudeSubagents: history.subagents,
   });
 }
 

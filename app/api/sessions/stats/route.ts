@@ -45,7 +45,7 @@ async function readSummary(id: string): Promise<SessionUsageSummary | null> {
       cost: stats.cost,
       toolCalls: stats.toolCalls,
       totalActiveMs: 0,
-      model: { provider: CLAUDE_PROVIDER, modelId: claudeRecord.modelAlias },
+      model: { provider: CLAUDE_PROVIDER, modelId: claudeRecord.model },
     };
   }
   const rpc = getRpcSession(id);

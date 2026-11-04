@@ -40,9 +40,15 @@ const READ_TIMEOUT_MS = 15000;
  *  Each per-project members read shares the same bound. */
 const CONTACT_READ_TIMEOUT_MS = 2000;
 const WRITE_TIMEOUT_MS = 15000;
-/** A real analyzer one-shot is an LLM call: the ruling sets the wait at
- *  no less than five minutes. */
-const ANALYZE_TIMEOUT_MS = 300000;
+/** One analysis is one pf task: `pf msg analyze` blocks until
+ *  it ends, and the daemon's own wait is bounded at 6 minutes (the task's
+ *  fixed 5-minute budget plus a minute). 7 minutes outlasts that plus the
+ *  spawn and parse overhead, so a task that finishes inside its budget is
+ *  never reported as a client timeout. */
+const ANALYZE_TIMEOUT_MS = 420000;
+/** A structured answer's summary is bounded only by the task report cap; the
+ *  spawn's stdout bound must hold it (the sanitizer then cuts the summary). */
+const ANALYZE_MAX_BUFFER = 8 * 1024 * 1024;
 /** pf's own stderr passes through under this cap; nothing else is echoed. */
 const STDERR_CAP = 512;
 const MESSAGE_TEXT_MAX_BYTES = 4096;
@@ -52,6 +58,8 @@ const DEFAULT_PAGE_SIZE = 50;
 const NEWEST_BEFORE = "9223372036854775807";
 
 export type {
+  PolyforgeAnalysis,
+  PolyforgePrompt,
   PolyforgeContact,
   PolyforgeConversation,
   PolyforgeMessage,
@@ -59,6 +67,10 @@ export type {
   PolyforgeProjectGroup,
 } from "./polyforge-messages-pure";
 export {
+  FILE_TICKET_CONTENT_MAX_BYTES,
+  FILE_TICKET_GOAL_MAX_RUNES,
+  POLYFORGE_ANALYZE_MINIMUM_PF_VERSION,
+  POLYFORGE_PROMPT_MINIMUM_PF_VERSION,
   ackDecision,
   isPolyforgeConversationId,
   isPolyforgeMessageId,
@@ -86,12 +98,20 @@ export interface PolyforgeMessagesRead {
 }
 
 import {
+  FILE_TICKET_CONTENT_MAX_BYTES,
+  FILE_TICKET_GOAL_MAX_RUNES,
+  POLYFORGE_ANALYZE_MINIMUM_PF_VERSION,
+  POLYFORGE_PROMPT_MINIMUM_PF_VERSION,
   buildProjectGroups,
   isPolyforgeConversationId,
   normalizeProjectNames,
   isPolyforgeMessageId,
   isPolyforgeRecipient,
   isPositiveSeq,
+  parsePolyforgeAnalysis,
+  parsePolyforgePrompt,
+  type PolyforgeAnalysis,
+  type PolyforgePrompt,
   type PolyforgeContact,
   type PolyforgeConversation,
   type PolyforgeMessage,
@@ -234,6 +254,44 @@ export function validateMembershipInput(
   return { ok: true, value: { action: body.action, project, userId: body.user_id } };
 }
 
+/** A 【建票】 confirm after validation, in the CLI's face. */
+export interface PolyforgeFileTicketInput {
+  goal: string;
+  project: string;
+  content: string;
+}
+
+/** Validate a 【建票】 body before any spawn: a non-blank one-line goal of at
+ *  most 500 runes, exactly one currently mapped project, and a non-blank
+ *  content of at most 64 KiB that pf would not read as a file or stdin
+ *  (`@path`, `-`). */
+export function validateFileTicketInput(
+  raw: unknown,
+  mappedProjects: string[],
+): ValidationResult<PolyforgeFileTicketInput> {
+  if (!raw || typeof raw !== "object") return { ok: false, error: "invalid ticket body" };
+  const body = raw as { goal?: unknown; project?: unknown; content?: unknown };
+  const goal = typeof body.goal === "string" ? body.goal.trim() : "";
+  if (!goal) return { ok: false, error: "goal is required" };
+  if (hasControlBytes(goal)) return { ok: false, error: "goal must be one line" };
+  if (Array.from(goal).length > FILE_TICKET_GOAL_MAX_RUNES) {
+    return { ok: false, error: `goal is over the ${FILE_TICKET_GOAL_MAX_RUNES}-character bound` };
+  }
+  const project = typeof body.project === "string" ? body.project.trim() : "";
+  if (!project || !mappedProjects.includes(project)) {
+    return { ok: false, error: "project must be one of this machine's mapped projects" };
+  }
+  const content = typeof body.content === "string" ? body.content.trim() : "";
+  if (!content) return { ok: false, error: "content is required" };
+  if (Buffer.byteLength(content, "utf8") > FILE_TICKET_CONTENT_MAX_BYTES) {
+    return { ok: false, error: `content is over the ${FILE_TICKET_CONTENT_MAX_BYTES}-byte bound` };
+  }
+  if (content === "-" || content.startsWith("@")) {
+    return { ok: false, error: "content must not start with @ or be - (pf would read a file or stdin)" };
+  }
+  return { ok: true, value: { goal, project, content } };
+}
+
 // ---- pure sanitizers ----
 
 function str(value: unknown): string {
@@ -359,9 +417,12 @@ function pageWithOldestFlag(page: PolyforgeMessagePage, limit: number): Polyforg
 
 // ---- transport ----
 
-async function runPfJson(argv: string[], timeoutMs = READ_TIMEOUT_MS): Promise<unknown> {
+async function runPfJson(argv: string[], timeoutMs = READ_TIMEOUT_MS, maxBuffer?: number): Promise<unknown> {
   try {
-    const { stdout } = await execFileAsync(polyforgePfBin(), argv, { timeout: timeoutMs });
+    const { stdout } = await execFileAsync(polyforgePfBin(), argv, {
+      timeout: timeoutMs,
+      ...(maxBuffer !== undefined ? { maxBuffer } : {}),
+    });
     return JSON.parse(stdout);
   } catch (error) {
     throw PolyforgeMessagesError.fromSpawnError(error);
@@ -501,23 +562,47 @@ export interface PolyforgeMessagesCapability {
   reason?: string;
 }
 
-/** The Messages floor gate: presence + the 2.20.12 capability floor. Below it
- *  no message or contact verb is spawned (the panel renders the upgrade
- *  state); there is no degraded list below it. */
-export async function readPolyforgeMessagesCapability(): Promise<PolyforgeMessagesCapability> {
-  const presence = await probePolyforgeVersion();
+/** One floor compare over the one version probe: capable at or above
+ *  `minimum`, else the named reason. */
+async function capabilityAtFloor(minimum: string, surface: string, fresh = false): Promise<PolyforgeMessagesCapability> {
+  const presence = await probePolyforgeVersion(fresh);
   if (!presence.present) {
     return { pfPresent: false, pfVersion: null, capable: false };
   }
-  if (isPolyforgeVersionBelowMinimum(presence.version, POLYFORGE_MESSAGES_MINIMUM_PF_VERSION)) {
+  if (isPolyforgeVersionBelowMinimum(presence.version, minimum)) {
     return {
       pfPresent: true,
       pfVersion: presence.version,
       capable: false,
-      reason: `the Messages tab needs pf ${POLYFORGE_MESSAGES_MINIMUM_PF_VERSION} or newer (found ${presence.version ?? "an unparseable version"})`,
+      reason: `${surface} needs pf ${minimum} or newer (found ${presence.version ?? "an unparseable version"})`,
     };
   }
   return { pfPresent: true, pfVersion: presence.version, capable: true };
+}
+
+/** The Messages floor gate: presence + the 2.20.12 capability floor. Below it
+ *  no message or contact verb is spawned (the panel renders the upgrade
+ *  state); there is no degraded list below it. */
+export async function readPolyforgeMessagesCapability(): Promise<PolyforgeMessagesCapability> {
+  return capabilityAtFloor(POLYFORGE_MESSAGES_MINIMUM_PF_VERSION, "the Messages tab");
+}
+
+/** The analysis floor gate: the same probe at
+ *  POLYFORGE_ANALYZE_MINIMUM_PF_VERSION. Below it no `pf msg analyze` is
+ *  spawned — the structured answer does not exist there, and no older shape
+ *  is translated; the rest of the Messages tab keeps its own floor. */
+export async function readPolyforgeAnalysisCapability(): Promise<PolyforgeMessagesCapability> {
+  return capabilityAtFloor(POLYFORGE_ANALYZE_MINIMUM_PF_VERSION, "message analysis");
+}
+
+/** The prompt floor gate: the same probe at
+ *  POLYFORGE_PROMPT_MINIMUM_PF_VERSION. Below it no `pf msg prompt` is
+ *  spawned (that verb does not exist there); nothing else changes floor.
+ *  The probe is fresh (one `pf --version`): a 「@」 click is a rare human
+ *  action starting a minutes-long task, so it never trusts a version cached
+ *  up to a minute before — an upgrade or downgrade of pf counts at once. */
+export async function readPolyforgePromptCapability(): Promise<PolyforgeMessagesCapability> {
+  return capabilityAtFloor(POLYFORGE_PROMPT_MINIMUM_PF_VERSION, "the message @ action", true);
 }
 
 /** Read the conversations the pf caller may see, filtered server-side to its
@@ -741,17 +826,55 @@ export async function acknowledgePolyforgeMessage(conversationId: string, seq: n
   }
 }
 
-export async function analyzePolyforgeMessage(messageId: string): Promise<{ conclusion: string; model?: string }> {
+/** One analysis: exactly one `pf --json msg analyze <id>`,
+ *  which blocks until the analysis task ends. The answer passes the one
+ *  structured sanitizer; anything that is not that shape (for the same
+ *  message) is the typed "no structured result" failure — there is no other
+ *  shape and no second read. */
+export async function analyzePolyforgeMessage(messageId: string): Promise<PolyforgeAnalysis> {
   if (!isPolyforgeMessageId(messageId)) {
     throw new PolyforgeMessagesError("message_id must be a message id", "CORE-400");
   }
-  const raw = await runPfJson(["--json", "msg", "analyze", messageId], ANALYZE_TIMEOUT_MS);
-  if (!raw || typeof raw !== "object") {
-    throw new PolyforgeMessagesError("the analyzer answered no conclusion", "DAEMON-500");
+  const raw = await runPfJson(["--json", "msg", "analyze", messageId], ANALYZE_TIMEOUT_MS, ANALYZE_MAX_BUFFER);
+  const analysis = parsePolyforgeAnalysis(raw);
+  if (!analysis || analysis.message_id !== messageId) {
+    throw new PolyforgeMessagesError("the analyzer answered no structured result", "DAEMON-500");
   }
-  const body = raw as { conclusion?: unknown; model?: unknown };
-  const conclusion = typeof body.conclusion === "string" ? body.conclusion.trim() : "";
-  if (!conclusion) throw new PolyforgeMessagesError("the analyzer answered no conclusion", "DAEMON-500");
-  const model = typeof body.model === "string" && body.model.trim() ? body.model.trim() : undefined;
-  return model ? { conclusion, model } : { conclusion };
+  return analysis;
+}
+
+const TICKET_SLUG = /^[A-Za-z0-9][A-Za-z0-9_.#-]{0,127}$/;
+
+/** One 【建票】 confirm exactly one pf subprocess:
+ *  `pf --json file create --project <p> --goal <g> --content <c>`, never
+ *  `--bundle`: a registration ticket, not claimable, no lane chosen. pi-web
+ *  writes no config file and never calls aihub directly; a refusal throws
+ *  pf's typed failure. Only the created ticket's slug leaves. */
+export async function createPolyforgeFileTicket(input: PolyforgeFileTicketInput): Promise<{ slug: string }> {
+  const raw = await runPfJson(
+    ["--json", "file", "create", "--project", input.project, "--goal", input.goal, "--content", input.content],
+    WRITE_TIMEOUT_MS,
+  );
+  const slug = raw && typeof raw === "object" ? str((raw as { slug?: unknown }).slug) : "";
+  if (!TICKET_SLUG.test(slug)) {
+    throw new PolyforgeMessagesError("pf answered no ticket slug", "DAEMON-500");
+  }
+  return { slug };
+}
+
+/** One message turned into an execution prompt: exactly one
+ *  `pf --json msg prompt <id>`, which blocks until its read-only task ends
+ *  (the analyze bound: the daemon's wait is the same 6 minutes). The answer
+ *  passes the one prompt sanitizer; any other shape is the typed "no prompt"
+ *  failure — no prompt is ever invented and nothing is stored. */
+export async function promptPolyforgeMessage(messageId: string): Promise<PolyforgePrompt> {
+  if (!isPolyforgeMessageId(messageId)) {
+    throw new PolyforgeMessagesError("message_id must be a message id", "CORE-400");
+  }
+  const raw = await runPfJson(["--json", "msg", "prompt", messageId], ANALYZE_TIMEOUT_MS, ANALYZE_MAX_BUFFER);
+  const prompt = parsePolyforgePrompt(raw);
+  if (!prompt) {
+    throw new PolyforgeMessagesError("the prompt task answered no prompt", "DAEMON-500");
+  }
+  return prompt;
 }

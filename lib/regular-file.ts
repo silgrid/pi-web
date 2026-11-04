@@ -1,4 +1,5 @@
 import { closeSync, constants, fstatSync, openSync, readFileSync, readSync } from "node:fs";
+import { open, type FileHandle } from "node:fs/promises";
 
 /** Windows defines no O_NONBLOCK; it has no FIFOs either. */
 const OPEN_FLAGS = constants.O_RDONLY | (constants.O_NONBLOCK || 0);
@@ -26,7 +27,11 @@ function isMissing(error: unknown): boolean {
  *
  * For a settings file a GET reads beside a session, such as a trusted
  * project's `.pi/settings.json`: anything there would otherwise stall the
- * whole server, since the read is synchronous.
+ * whole server, since the read is synchronous. This synchronous form serves
+ * the settings, skill and extension reads; a read path polled often enough
+ * that blocking the event loop matters (the Polyforge cards/progress reader,
+ *) uses `readRegularFileTextAsync`, the same rules on
+ * `node:fs/promises`.
  */
 export function readRegularFileText(path: string, maxBytes?: number): string | undefined {
   let fd: number;
@@ -56,5 +61,42 @@ export function readRegularFileText(path: string, maxBytes?: number): string | u
     return Buffer.concat(chunks, length).toString("utf8");
   } finally {
     closeSync(fd);
+  }
+}
+
+/**
+ * `readRegularFileText` on `node:fs/promises`: the same non-blocking open, the
+ * same refusal of anything but a regular file, the same `maxBytes` cap and
+ * one-byte-past-the-limit rule, without blocking the event loop while the
+ * bytes are read.
+ */
+export async function readRegularFileTextAsync(path: string, maxBytes?: number): Promise<string | undefined> {
+  let handle: FileHandle;
+  try {
+    handle = await open(path, OPEN_FLAGS);
+  } catch (error) {
+    if (isMissing(error)) return undefined;
+    throw error;
+  }
+  try {
+    const stats = await handle.stat();
+    if (!stats.isFile()) throw new Error(`${path} is not a regular file`);
+    if (maxBytes === undefined) return await handle.readFile("utf8");
+    if (stats.size > maxBytes) throw new Error(`${path} is larger than ${maxBytes} bytes`);
+    // One byte past the limit: a file still growing past it is refused rather than cut short.
+    const limit = maxBytes + 1;
+    const chunks: Buffer[] = [];
+    let length = 0;
+    while (length < limit) {
+      const chunk = Buffer.alloc(Math.min(limit - length, 64 * 1024));
+      const { bytesRead } = await handle.read(chunk, 0, chunk.length, null);
+      if (bytesRead === 0) break;
+      chunks.push(chunk.subarray(0, bytesRead));
+      length += bytesRead;
+    }
+    if (length > maxBytes) throw new Error(`${path} is larger than ${maxBytes} bytes`);
+    return Buffer.concat(chunks, length).toString("utf8");
+  } finally {
+    await handle.close();
   }
 }

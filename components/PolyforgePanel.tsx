@@ -8,9 +8,12 @@ import {
   formatProgressClock,
   isProgressPinnedToBottom,
   polyforgeCardKey,
+  progressBlocks,
   shortJobTitle,
   truncateCardTitle,
   type PolyforgeCard,
+  type PolyforgeProgressBlock,
+  type PolyforgeProgressBlockStatus,
   type PolyforgeProgressLine,
   type PolyforgeProgressTone,
 } from "@/lib/polyforge-cards-pure";
@@ -20,10 +23,12 @@ import type { PolyforgeContact, PolyforgeConversation, PolyforgeMessage, Polyfor
 import type { PolyforgeTab, PolyforgeWorkTab } from "@/hooks/usePolyforge";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { usePolyforgeProgress } from "@/hooks/usePolyforgeProgress";
-import { PolyforgeMessages } from "./PolyforgeMessages";
+import { PolyforgeMessages, type PolyforgeMessagesProps } from "./PolyforgeMessages";
 import { PolyforgeMemory } from "./PolyforgeMemory";
 import { PolyforgeTasks } from "./PolyforgeTasks";
 import { PolyforgeWorkItems } from "./PolyforgeWorkItems";
+import { MAX_MARKDOWN_CHARS, SafeMarkdownBody } from "./SafeMarkdownBody";
+import { PolyforgeProgressToolCard, fetchProgressToolDetail, type PolyforgeProgressToolDetailState } from "./PolyforgeProgressToolCard";
 import { useI18n } from "@/hooks/useI18n";
 
 const STEP_STATUS_COLORS: Record<string, string> = {
@@ -212,57 +217,242 @@ const PROGRESS_TONE_COLORS: Record<PolyforgeProgressTone, string> = {
   green: "#16a34a",
 };
 
-/** One stream line's style: narration in the text colour, a tool line mono
- *  and dim, an event line in its tone (neutral `var(--text-muted)`). */
+/** A spawn block header's mark, from the block's own lifecycle lines
+ *; an older block with none carries no mark. */
+const PROGRESS_BLOCK_STATUS_MARKS: Record<PolyforgeProgressBlockStatus, string> = {
+  done: "✓",
+  failed: "✕",
+  needs_input: "?",
+  stopped: "⏸",
+  running: "▶",
+  none: "",
+};
+
+/** One stream line's style: narration in the text colour (a `thinking`
+ *  narration dim italic,), an event line in its tone (neutral
+ *  `var(--text-muted)`); a tool line is a card of its own.
+ *  The Markdown body sets its own `color: var(--text)`, so a thinking line
+ *  also rebinds `--text` to the dim colour for its subtree: the body's own
+ *  colour (and its strong/heading mixes) resolve dim, not just the wrapper. */
 function progressLineStyle(line: PolyforgeProgressLine): CSSProperties {
-  if (line.kind === "tool") return { color: "var(--text-dim)", fontFamily: "var(--font-mono, monospace)" };
   if (line.kind === "event") return { color: line.tone ? PROGRESS_TONE_COLORS[line.tone] : "var(--text-muted)", fontFamily: "var(--font-mono, monospace)" };
+  if (line.variant === "thinking") return { color: "var(--text-dim)", fontStyle: "italic", "--text": "var(--text-dim)" } as CSSProperties;
   return { color: "var(--text)" };
 }
 
+/** Narration Markdown two pixels under the chat's 14px: the
+ *  progress area is a dense side panel. */
+const PROGRESS_MARKDOWN_STYLE = { "--chat-font-size-offset": "-2px" } as CSSProperties;
+
+/** A spawn block head's duration: the block's own lifecycle
+ *  times when both exist, a running block's age at render (the 2 s poll
+ *  re-renders it, liveElapsedSec's clock-at-render pattern), else none. */
+function progressBlockDurationSec(block: PolyforgeProgressBlock): number | undefined {
+  if (block.durationMs !== undefined) return Math.round(block.durationMs / 1000);
+  if (block.status === "running" && block.startAt !== undefined) return Math.max(0, Math.round(liveElapsedSec(block.startAt)));
+  return undefined;
+}
+
+/** Lines added per animation frame by the progress renderer (:
+ *  a large transcript is rendered in bounded chunks, never truncated). */
+export const PROGRESS_RENDER_CHUNK = 200;
+
 /**
  * The job detail's execution progress (; whole-job since
- *): a heading, the omitted-lines marker when the 2000-line
- * bound left earlier lines out, then the selected job's stream — every
- * spawn of every step, narration, one masked tool line per call and the
- * lifecycle lines — one nowrap/ellipsized line each, oldest first, the full
- * text (and an event line's raw kind) on hover, inline in the detail's one
- * scroll region (no overflowY of its own, pi#120). The localized loading
- * (only until the first read settles), empty and unavailable states; a
- * failed or degraded later read keeps the last good snapshot without an
- * error readout (usePolyforgeProgress). Mounted only while the Jobs detail
- * of a selected job renders, so deselecting or closing the dock stops its
- * reads.
+ *; full lines since; spawn blocks and the
+ * open-at-bottom follow; structured rendering):
+ * a heading, the omitted-lines marker when a snapshot still carries one,
+ * then the selected job's stream — every spawn of every step, oldest first,
+ * inline in the detail's one scroll region (no overflowY of its own, pi#120).
+ * Each entry renders by kind: narration through the
+ * transcript's SafeMarkdownBody (paragraphs, lists, code; a `thinking` one
+ * in the same Markdown, dim italic, never folded) — one over
+ * MAX_MARKDOWN_CHARS skips Markdown and renders inline in full as plain
+ * wrapped text (the guard's click-to-reveal box would be a per-entry gate
+ * and a nested scroller here); a tool call as one
+ * PolyforgeProgressToolCard on the transcript's ToolCallCard shell (header
+ * from the poll's light fields, the full detail fetched only when that card
+ * is expanded, at most once per call per selection, a failed read leaving
+ * only that card unavailable); every other lifecycle event a restrained
+ * marker row in its tone, wrapping in full, its raw kind and text on hover.
+ * A snapshot renders the first PROGRESS_RENDER_CHUNK lines at once, then
+ * appends the rest one chunk per animation frame, so a large stream stays
+ * responsive without dropping a line ('s measured bound); a
+ * poll keeps the already-shown count, so it never re-chunks an unchanged
+ * stream. The localized loading (only until the first read settles), empty
+ * and unavailable states; a failed or degraded later read keeps the last
+ * good snapshot without an error readout (usePolyforgeProgress). Mounted
+ * only while the Jobs detail of a selected job renders, so deselecting or
+ * closing the dock stops its reads.
  *
- * Follow: `scrollRef` is the detail's one scroll region. A
- * passive scroll listener keeps `pinned` — whether the reader is at its
- * bottom (isProgressPinnedToBottom); after a new snapshot renders, the
- * region scrolls to its bottom only when it was pinned, otherwise it does
- * not move. No control is added for it. Another job starts unpinned.
+ * Spawn blocks: `progressBlocks` cuts the stream at every
+ * `step_started` line in stream order; lines before the first stay leading
+ * and unfolded. Every block — a lone one too has a group
+ * head (`aria-expanded`) carrying its step, spawn number, status mark,
+ * duration (its lifecycle times; a running block's age; none without times)
+ * and line count. The head absorbs the block's `step_started` and terminal
+ * lines: neither renders as a body row, both texts and raw
+ * kinds are on the head's title. Only the newest block starts expanded; a
+ * user's toggle is kept per block until another job is selected or the
+ * detail remounts, while a new spawn moves the default to the new block. No
+ * line is dropped: leading lines plus every head count equal the snapshot's
+ * length, and each block's body is its count minus the absorbed lines.
+ *
+ * Follow (reversed at the owner's ruling):
+ * `scrollRef` is the detail's one scroll region. `pinned` starts true for
+ * every selection and remount; once the first snapshot with lines has
+ * rendered (every chunk), the whole region sits at its bottom. A passive
+ * scroll listener keeps `pinned` — whether the reader is at its bottom
+ * (isProgressPinnedToBottom); loading, empty and unavailable states force
+ * nothing. A new snapshot or chunk follows growth only while pinned. The
+ * `↓ Latest` button (`[data-pf-detail-latest]`) floats over the region's
+ * bottom-right whenever it is not at its bottom (overlay, no in-flow
+ * height); one click jumps to the bottom immediately and restores
+ * following. Folding never treats its own click as a scroll: collapsing
+ * while pinned clamps the region to its new bottom and stays pinned,
+ * expanding an older block leaves `scrollTop` untouched (so the reader
+ * leaves the bottom, unpins, and the button appears). A tool card's
+ * expand/collapse and its detail settling are folds too.
  */
 function PolyforgeDetailProgress({ wi, running, scrollRef }: { wi: string | null; running: boolean; scrollRef: RefObject<HTMLDivElement | null> }) {
   const { t } = useI18n();
   const snapshot = usePolyforgeProgress(wi, running);
-  const pinned = useRef(false);
+  const [visibleCount, setVisibleCount] = useState(PROGRESS_RENDER_CHUNK);
+  const [folded, setFolded] = useState<Map<string, boolean>>(() => new Map());
+  const [foldVersion, setFoldVersion] = useState(0);
+  const [details, setDetails] = useState<Map<string, PolyforgeProgressToolDetailState>>(() => new Map());
+  const detailsRef = useRef(details);
+  detailsRef.current = details;
+  const selection = useRef(wi);
+  const pinned = useRef(true);
+  const [atBottom, setAtBottom] = useState(true);
+  const lines = snapshot?.lines ?? [];
+  const layout = progressBlocks(lines);
+  const lastBlockId = layout.blocks.length > 0 ? lines[layout.blocks[layout.blocks.length - 1].start]?.id ?? null : null;
+  const streamed = Boolean(snapshot?.available && lines.length > 0);
   useEffect(() => {
-    pinned.current = false;
+    selection.current = wi;
+    setVisibleCount(PROGRESS_RENDER_CHUNK);
+    setFolded(new Map());
+    setFoldVersion(0);
+    setDetails(new Map());
+    pinned.current = true;
+    setAtBottom(true);
   }, [wi]);
+  useEffect(() => {
+    const total = snapshot?.lines.length ?? 0;
+    if (visibleCount >= total) return;
+    const frame = requestAnimationFrame(() => {
+      setVisibleCount((current) => Math.min(total, current + PROGRESS_RENDER_CHUNK));
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [snapshot, visibleCount]);
   useEffect(() => {
     const region = scrollRef.current;
     if (!region) return;
-    const onScroll = () => { pinned.current = isProgressPinnedToBottom(region); };
+    const onScroll = () => {
+      const at = isProgressPinnedToBottom(region);
+      pinned.current = at;
+      setAtBottom(at);
+    };
     region.addEventListener("scroll", onScroll, { passive: true });
     return () => region.removeEventListener("scroll", onScroll);
   }, [scrollRef]);
   useLayoutEffect(() => {
     const region = scrollRef.current;
-    if (region && pinned.current) region.scrollTop = region.scrollHeight;
-  }, [snapshot, scrollRef]);
+    if (region && streamed && pinned.current) region.scrollTop = region.scrollHeight;
+  }, [snapshot, visibleCount, streamed, scrollRef]);
+  useLayoutEffect(() => {
+    const region = scrollRef.current;
+    if (region) setAtBottom(isProgressPinnedToBottom(region));
+  }, [snapshot, visibleCount, foldVersion, scrollRef]);
+  useLayoutEffect(() => {
+    // A fold click is not a scroll: measure the position the toggle left
+    // behind. A collapse at the bottom clamps to the new bottom (still
+    // pinned); an expansion of an older block leaves scrollTop where it was
+    // (no longer at the bottom, so it unpins).
+    if (foldVersion === 0) return;
+    const region = scrollRef.current;
+    if (!region) return;
+    const at = isProgressPinnedToBottom(region);
+    pinned.current = at;
+    setAtBottom(at);
+  }, [foldVersion, scrollRef]);
+  // One tool card's detail, read when that card is expanded:
+  // a call already loading or loaded is never asked again; an unavailable one
+  // is asked again on its next expansion. An answer for another selection
+  // writes nothing.
+  const loadDetail = useCallback((id: string) => {
+    const held = detailsRef.current.get(id);
+    if (!wi || (held && held.status !== "unavailable")) return;
+    const asked = wi;
+    const settle = (state: PolyforgeProgressToolDetailState) => {
+      if (selection.current !== asked) return;
+      setDetails((current) => new Map(current).set(id, state));
+      setFoldVersion((current) => current + 1);
+    };
+    settle({ status: "loading" });
+    void fetchProgressToolDetail(asked, id).then(settle);
+  }, [wi]);
+  // A tool card's expand/collapse is a fold like a block's: it
+  // and its detail settling re-measure through foldVersion, so an expansion
+  // that leaves the view off the bottom unpins (↓ Latest, no pull on the next
+  // poll) and a collapse at the bottom stays pinned.
+  const toggleTool = useCallback((id: string, open: boolean) => {
+    if (open) loadDetail(id);
+    setFoldVersion((current) => current + 1);
+  }, [loadDetail]);
   const message = !wi || snapshot?.available === false ? t("polyforge.progress.unavailable")
     : !snapshot ? t("polyforge.loading")
       : snapshot.lines.length === 0 ? t("polyforge.progress.empty") : null;
+  const chunkLimit = Math.max(PROGRESS_RENDER_CHUNK, visibleCount);
+  const expanded = (start: number) => {
+    const id = lines[start]?.id;
+    return id && folded.has(id) ? folded.get(id)! : id === lastBlockId;
+  };
+  const toggle = (start: number) => {
+    const id = lines[start]?.id;
+    if (!id) return;
+    const open = expanded(start);
+    setFolded((current) => new Map(current).set(id, !open));
+    setFoldVersion((current) => current + 1);
+  };
+  const jumpToLatest = () => {
+    const region = scrollRef.current;
+    if (region) region.scrollTop = region.scrollHeight;
+    pinned.current = true;
+    setAtBottom(true);
+  };
+  const lineRow = (line: PolyforgeProgressLine, index: number) => {
+    if (index >= chunkLimit) return null;
+    if (line.kind === "tool") {
+      return <PolyforgeProgressToolCard key={line.id} line={line} detail={details.get(line.id)} onToggle={toggleTool} />;
+    }
+    if (line.kind === "narration") {
+      return (
+        <div key={line.id} data-pf-progress-kind="narration" data-pf-progress-variant={line.variant} style={{ minWidth: 0, ...PROGRESS_MARKDOWN_STYLE, ...progressLineStyle(line) }}>
+          {line.text.length > MAX_MARKDOWN_CHARS
+            ? <div style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{line.text}</div>
+            : <SafeMarkdownBody>{line.text}</SafeMarkdownBody>}
+        </div>
+      );
+    }
+    return (
+      <div
+        key={line.id}
+        data-pf-progress-kind={line.kind}
+        data-pf-progress-tone={line.tone ?? "neutral"}
+        title={line.event ? `${line.event}\n${line.text}` : line.text}
+        style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere", minWidth: 0, ...progressLineStyle(line) }}
+      >
+        {line.text}
+      </div>
+    );
+  };
+  const blockBody = (block: PolyforgeProgressBlock) => lines.slice(block.start + 1, block.start + block.count)
+    .map((line, offset) => (block.start + 1 + offset === block.terminal ? null : lineRow(line, block.start + 1 + offset)));
   return (
-    <div data-pf-progress="" style={{ padding: "6px 12px", borderBottom: "1px solid var(--border)", flexShrink: 0, display: "flex", flexDirection: "column", gap: 2, fontSize: 11, lineHeight: "16px", minWidth: 0 }}>
+    <div data-pf-progress="" style={{ padding: "6px 12px", borderBottom: "1px solid var(--border)", flexShrink: 0, display: "flex", flexDirection: "column", gap: 4, fontSize: 11, lineHeight: "16px", minWidth: 0 }}>
       <span style={{ color: "var(--text-dim)" }}>{t("polyforge.progress.title")}</span>
       {!snapshot || message !== null ? (
         <span style={{ color: "var(--text-dim)" }}>{message}</span>
@@ -271,26 +461,78 @@ function PolyforgeDetailProgress({ wi, running, scrollRef }: { wi: string | null
           {snapshot.omitted > 0 && (
             <span data-pf-progress-omitted="" style={{ color: "var(--text-dim)" }}>{t("polyforge.progress.omitted", { count: snapshot.omitted })}</span>
           )}
-          {snapshot.lines.map((line) => (
-            <div
-              key={line.id}
-              data-pf-progress-kind={line.kind}
-              data-pf-progress-tone={line.kind === "event" ? (line.tone ?? "neutral") : undefined}
-              title={line.event ? `${line.event}\n${line.text}` : line.text}
-              style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", minWidth: 0, ...progressLineStyle(line) }}
-            >
-              {line.text}
-            </div>
-          ))}
+          {lines.slice(0, layout.leading).map((line, index) => lineRow(line, index))}
+          {layout.blocks.map((block) => {
+            if (block.start >= chunkLimit) return null;
+            const open = expanded(block.start);
+            const mark = PROGRESS_BLOCK_STATUS_MARKS[block.status];
+            const durationSec = progressBlockDurationSec(block);
+            const header = `${open ? "▾" : "▸"} ${block.step ?? ""}${block.spawn ? ` #${block.spawn}` : ""}${mark ? ` ${mark}` : ""}${durationSec !== undefined ? ` ${formatCardDuration(durationSec)}` : ""} · ${t("polyforge.progress.lines", { count: block.count })}`;
+            const absorbed = [lines[block.start], block.terminal !== undefined ? lines[block.terminal] : undefined]
+              .filter((line): line is PolyforgeProgressLine => Boolean(line))
+              .map((line) => `${line.event ?? line.kind}\n${line.text}`).join("\n\n");
+            return (
+              <div key={`block-${lines[block.start].id}`} data-pf-progress-block="" data-pf-progress-block-status={block.status} data-pf-progress-block-count={block.count} style={{ display: "flex", flexDirection: "column", gap: 4, minWidth: 0 }}>
+                <button
+                  type="button"
+                  data-pf-progress-block-toggle=""
+                  data-pf-progress-block-step={block.step}
+                  data-pf-progress-block-spawn={block.spawn}
+                  aria-expanded={open}
+                  title={absorbed}
+                  onClick={() => toggle(block.start)}
+                  style={{ alignSelf: "flex-start", padding: 0, background: "none", border: "none", color: "var(--text-muted)", cursor: "pointer", font: "inherit", fontFamily: "var(--font-mono, monospace)", textAlign: "left", whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}
+                >
+                  {header}
+                </button>
+                {open && blockBody(block)}
+              </div>
+            );
+          })}
         </>
+      )}
+      {!atBottom && (
+        <div data-pf-detail-latest="" style={{ position: "sticky", bottom: 8, alignSelf: "flex-end", width: 0, height: 0, marginTop: -2, zIndex: 1 }}>
+          <button
+            type="button"
+            onClick={jumpToLatest}
+            title={t("polyforge.progress.latest")}
+            aria-label={t("polyforge.progress.latest")}
+            style={{ position: "absolute", right: 0, bottom: 0, whiteSpace: "nowrap", padding: "3px 8px", borderRadius: 10, border: "1px solid var(--border)", background: "var(--bg-panel)", color: "var(--text)", fontSize: 11, lineHeight: "16px", cursor: "pointer", boxShadow: "0 1px 4px rgba(0,0,0,0.25)" }}
+          >
+            {t("polyforge.progress.latest")}
+          </button>
+        </div>
       )}
     </div>
   );
 }
 
-/** Job card width: the 150px the Tasks blocks' column minimum shares
- *, fixed rather than stretched. */
-const JOB_CARD_WIDTH = 150;
+/** (owner's intentional change): a job's status shows on the
+ *  card frame's colour — 1px width unchanged, the four loud states get their
+ *  own colour, the three quiet ones one shared gray and an unknown status keeps
+ *  the shared block default (`var(--border)`). Existing tokens and the panel's
+ *  own status colours only; no new colour value. */
+const JOB_STATUS_BORDER_COLORS: Record<string, string> = {
+  running: "var(--accent)",
+  needs_input: "#d97706",
+  completed: "#16a34a",
+  failed: "#dc2626",
+  queued: "var(--text-dim)",
+  paused: "var(--text-dim)",
+  cancelled: "var(--text-dim)",
+};
+
+/** The card frame colour for a job status; an unknown status keeps the block
+ *  default. */
+export function jobCardBorderColor(status: string): string {
+  return JOB_STATUS_BORDER_COLORS[status] ?? "var(--border)";
+}
+
+/** Job card width: 180px, decoupled from the Tasks grid's own 150px column
+ *  minimum (the owner's intentional change of #213/#220's
+ *  shared 150px), fixed rather than stretched. */
+const JOB_CARD_WIDTH = 180;
 
 /**
  * One Jobs card (compact card) in the shared
@@ -321,9 +563,17 @@ const JOB_CARD_WIDTH = 150;
  * narration): the card-only vertical padding drops to 4px (left/right stay
  * 8px) and the slug/goal gap to 0, so a card with a goal is 42px + its slug
  * row — 58px with a 1-line slug, 74px with a 2-line one. A `running` job's
- * label carries the job's age in whole minutes (`运行中 23m`), from the card's
- * existing earliest `job_started`, advanced by a local render clock and no
- * request.
+ * age in whole minutes comes from the card's existing earliest `job_started`,
+ * advanced by a local render clock and no request; shows that
+ * age alone (`23m`) as the visible status text (the full `运行中 23m` stays in
+ * the title/aria-label).
+ *
+ * (owner's intentional change): the frame's 1px colour is the
+ * job's status (see `JOB_STATUS_BORDER_COLORS`); a `running` card shows the
+ * duration alone (`23m`) and falls back to the localized status word when the
+ * start time is unknown; every other status keeps its status text. The full
+ * status text (`运行中 23m`) stays in the card's `aria-label` and in the
+ * visible status element's `title`.
  */
 const PolyforgeJobCard = memo(function PolyforgeJobCard({
   card,
@@ -355,9 +605,12 @@ const PolyforgeJobCard = memo(function PolyforgeJobCard({
   }, [running]);
   const runningMinutes = running ? cardRunningMinutes(card.startedAt, now) : null;
   const baseStatusLabel = jobStatusLabel(job.status);
-  // Only a running job carries the age; a missing/unparsable `startedAt`
-  // keeps the bare label.
-  const statusLabel = runningMinutes === null ? baseStatusLabel : `${baseStatusLabel} ${runningMinutes}m`;
+  // only a running job carries the age; a missing/unparsable
+  // `startedAt` keeps the bare status word. The full text (status + age) stays
+  // in the aria-label and the status element's title, while a running card's
+  // visible text is the duration alone — the frame colour already says it runs.
+  const fullStatusLabel = runningMinutes === null ? baseStatusLabel : `${baseStatusLabel} ${runningMinutes}m`;
+  const visibleStatusLabel = runningMinutes === null ? baseStatusLabel : `${runningMinutes}m`;
 
   const toggle = () => onSelect(selected ? null : job.slug);
   return (
@@ -367,7 +620,7 @@ const PolyforgeJobCard = memo(function PolyforgeJobCard({
       role="button"
       tabIndex={0}
       aria-pressed={selected}
-      aria-label={`${job.slug} · ${statusLabel}`}
+      aria-label={`${job.slug} · ${fullStatusLabel}`}
       aria-disabled={pending || undefined}
       onClick={pending ? undefined : toggle}
       onKeyDown={pending ? undefined : (event) => {
@@ -379,7 +632,10 @@ const PolyforgeJobCard = memo(function PolyforgeJobCard({
       }}
       style={{
         ...POLYFORGE_BLOCK_STYLE,
-        // a fixed 150px cell of the one horizontally scrolling
+        // the shared block keeps its 1px width; only the colour
+        // follows the job's status.
+        borderColor: jobCardBorderColor(job.status),
+        // a fixed 180px cell of the one horizontally scrolling
         // row — a flex basis, so a narrow row scrolls instead of squeezing it.
         flex: `0 0 ${JOB_CARD_WIDTH}px`,
         display: "flex", flexDirection: "column", gap: 4, minWidth: 0,
@@ -398,11 +654,11 @@ const PolyforgeJobCard = memo(function PolyforgeJobCard({
         <div style={{ display: "flex", alignItems: "flex-start", gap: 6, minWidth: 0 }}>
           <div style={{ flex: "1 1 0", minWidth: 0, color: "var(--text)", fontWeight: 600, overflowWrap: "anywhere", lineHeight: "16px" }}>{job.slug}</div>
           {needsInput ? (
-            <div data-pf-needs-input="" style={{ flex: "0 1 auto", minWidth: 0, maxWidth: "60%", padding: "0 5px", borderRadius: 4, border: "1px solid #d97706", color: "#d97706", fontWeight: 600, fontSize: 11, lineHeight: "14px", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-              {statusLabel}
+            <div data-pf-needs-input="" title={fullStatusLabel} style={{ flex: "0 1 auto", minWidth: 0, maxWidth: "60%", padding: "0 5px", borderRadius: 4, border: "1px solid #d97706", color: "#d97706", fontWeight: 600, fontSize: 11, lineHeight: "14px", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+              {visibleStatusLabel}
             </div>
           ) : (
-            <div style={{ flex: "0 1 auto", minWidth: 0, maxWidth: "60%", fontSize: 11, lineHeight: "16px", color: "var(--text-dim)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{statusLabel}</div>
+            <div title={fullStatusLabel} style={{ flex: "0 1 auto", minWidth: 0, maxWidth: "60%", fontSize: 11, lineHeight: "16px", color: "var(--text-dim)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{visibleStatusLabel}</div>
           )}
         </div>
         {goal && (
@@ -511,10 +767,15 @@ export function PolyforgePanel({
     onLoadOlder: () => void;
     onAcknowledge: () => void;
     onSend: (input: { to: string; text: string; aboutWi?: string; replyTo?: string }) => Promise<unknown>;
-    onAnalyze: (messageId: string) => Promise<string>;
-    analyses: Record<string, string>;
+    onAnalyze: PolyforgeMessagesProps["onAnalyze"];
+    analyses: PolyforgeMessagesProps["analyses"];
     onOpenAnchor: (ref: string) => void;
     unreadTotal: number;
+    /** the 「@」 action's click-time fill-target binding
+     *  (AppShell's focused composer snapshot), passed through unchanged. */
+    bindPromptTarget: PolyforgeMessagesProps["bindPromptTarget"];
+    onPrompt: PolyforgeMessagesProps["onPrompt"];
+    onPromptBusyChange: PolyforgeMessagesProps["onPromptBusyChange"];
   };
 }) {
   const { t, locale } = useI18n();
@@ -524,6 +785,17 @@ export function PolyforgePanel({
   // the 40px icon rail, both on the right of the main area.
   const isMobile = useIsMobile();
   const itemCountKey = workItemCountKey(opsStatus);
+
+  // an analysis card's task link switches to Work › Tasks and
+  // hands that sub-tab the one task id to open (its existing detail read);
+  // the Tasks surface clears it once handled. Component memory only.
+  const [taskToOpen, setTaskToOpen] = useState<string | null>(null);
+  const openTask = useCallback((taskId: string) => {
+    setTaskToOpen(taskId);
+    onWorkTab("tasks");
+    onActiveTab("work");
+  }, [onActiveTab, onWorkTab]);
+  const clearTaskToOpen = useCallback(() => setTaskToOpen(null), []);
 
   // Manual-refresh in-flight feedback (pi#113): the icon spins and the button
   // disables until the status fetch settles, floored at ~400 ms so a fast
@@ -617,13 +889,10 @@ export function PolyforgePanel({
   const detailStatus = selectedJob
     ? jobStatusLabel(selectedJob.status)
     : watchStatus ? workflowStatusLabel(watchStatus.workflowStatus) : null;
-  // The detail's one scroll region: it opens at the top of
-  // the detail whenever another job is selected; the progress block follows
-  // new lines only for a reader already at the bottom.
+  // The detail's one scroll region (open at its bottom since
+  //): the progress block seeds the follow pinned for every
+  // selection and remount, so the first stream with lines ends at the bottom.
   const detailScrollRef = useRef<HTMLDivElement | null>(null);
-  useLayoutEffect(() => {
-    if (detailScrollRef.current) detailScrollRef.current.scrollTop = 0;
-  }, [selectedWi]);
   // The goal's expanded state, for one selected job only: selecting another
   // job folds it again without an effect.
   const [goalExpandedFor, setGoalExpandedFor] = useState<string | null>(null);
@@ -739,6 +1008,11 @@ export function PolyforgePanel({
             onAnalyze={messagesSurface.onAnalyze}
             analyses={messagesSurface.analyses}
             onOpenAnchor={messagesSurface.onOpenAnchor}
+            onOpenTask={openTask}
+            unreadTotal={messagesSurface.unreadTotal}
+            bindPromptTarget={messagesSurface.bindPromptTarget}
+            onPrompt={messagesSurface.onPrompt}
+            onPromptBusyChange={messagesSurface.onPromptBusyChange}
           />
         ) : activeTab === "memory" ? (
           <PolyforgeMemory cwd={memoryCwd} onOpenWorkItem={messagesSurface.onOpenAnchor} />
@@ -758,7 +1032,11 @@ export function PolyforgePanel({
               ) : workTab === "tasks" ? (
                 // one list re-read per status task-count change
                 // while this sub-page is visible; none elsewhere (it unmounts).
-                <PolyforgeTasks taskCountKey={opsStatus ? `${opsStatus.tasks?.running ?? 0}:${opsStatus.tasks?.completed ?? 0}` : null} />
+                <PolyforgeTasks
+                  taskCountKey={opsStatus ? `${opsStatus.tasks?.running ?? 0}:${opsStatus.tasks?.completed ?? 0}` : null}
+                  openTaskId={taskToOpen}
+                  onOpenTaskHandled={clearTaskToOpen}
+                />
               ) : opsStatus ? (
                 <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
                   {/* Queue line + job card stream: the stream
@@ -808,7 +1086,7 @@ export function PolyforgePanel({
                       [data-pf-detail-scroll]). No nested vertical scroller exists
                       inside it, so every line is reachable by scrolling at any
                       sheet height and in the desktop dock. */}
-                  <div ref={detailScrollRef} data-pf-detail-scroll="" style={{ flex: 1, minHeight: 0, overflowY: "auto", display: "flex", flexDirection: "column" }}>
+                  <div ref={detailScrollRef} data-pf-detail-scroll="" style={{ flex: 1, minHeight: 0, overflowY: "auto", overflowAnchor: "none", display: "flex", flexDirection: "column" }}>
                     {selectedWi ? (
                         <>
                           {/* order: ① summary → ② DAG → ③ execution

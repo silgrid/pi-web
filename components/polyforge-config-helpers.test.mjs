@@ -80,3 +80,8 @@ test("candidates group per project, sorted, with the project-less steps last as 
   assert.deepEqual(steps.map((step) => step.step), ["fix", "review", "plan", "code"], "the input is not mutated");
   assert.deepEqual(helpers.groupStepsByProject([]), []);
 });
+
+test("one workspace path's memory_policy entries list default first, then the projects sorted", () => {
+  assert.deepEqual(helpers.policyEntryNames({ zeta: {}, default: {}, alpha: {} }), ["default", "alpha", "zeta"]);
+  assert.deepEqual(helpers.policyEntryNames({ beta: {} }), ["beta"], "a path without a default block keeps its projects");
+});

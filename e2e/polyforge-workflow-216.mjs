@@ -22,6 +22,10 @@
 // build or a missing cmd/pf still FAILS the suite.
 //
 //   node e2e/polyforge-workflow-216.mjs
+// summarize and memory_policy moved into cli.toml — the
+// fixture's cli.toml carries them, the workspace yaml steps only, the memory
+// policy is read from `pf config list` (W216-5) and renders in the cli.toml
+// card (W216-26); the real pf is built at the summarize floor (2.20.21).
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -67,7 +71,8 @@ function agentDirPath(homeDir) {
 }
 
 const cliToml = join(configDir, "cli.toml");
-writeFileSync(cliToml, `server = "http://127.0.0.1:1"\nuser_id = "usr_root"\n\n[workspace."${ws}"]\nprojects = ["workbench", "other"]\n`);
+// summarize and memory_policy are cli.toml tables.
+writeFileSync(cliToml, `server = "http://127.0.0.1:1"\nuser_id = "usr_root"\n\n[workspace."${ws}"]\nprojects = ["workbench", "other"]\n\n[summarize]\nmodels = ["pi:summarize-one"]\nlanguage = "English"\ninterval_sec = 30\n\n[memory_policy."${ws}".default]\nrecord = ["mem-base"]\nskip = ["skip-base"]\n\n[memory_policy."${ws}".workbench]\nrecord = ["mem-workbench"]\n`);
 const yamlPath = join(ws, ".polyforge.yaml");
 function bytes(path) { return readFileSync(path); }
 function text(path) { return readFileSync(path, "utf8"); }
@@ -75,11 +80,7 @@ function fileSha(path) { return createHash("sha256").update(bytes(path)).digest(
 
 const WORKSPACE_YAML = `# dense per-step comments must survive every write
 # second header line
-summarize:
-  models: ["pi:summarize-one"]
-  language: "English"
-  # unrelated summarize comment
-  interval_sec: 30
+# unrelated comment above the steps section
 steps:
   workbench:
     # grill's declared chain
@@ -94,12 +95,6 @@ steps:
       models: ["pi:ws-fix"]
     default:
       models: ["pi:ws-default"]
-memory_policy:
-  default:
-    record: ["mem-base"]
-    skip: ["skip-base"]
-  workbench:
-    record: ["mem-workbench"]
 `;
 function resetWorkspace() { writeFileSync(yamlPath, WORKSPACE_YAML); }
 
@@ -208,7 +203,7 @@ const setDaemon = (patch = {}) => Object.assign(daemon, patch);
 // ---- real pf: capsule tree, GOWORK=off, version at the card's floor ----
 const built = spawnSync("go", [
   "build", "-o", join(binDir, "pf"),
-  "-ldflags", "-X github.com/silgrid/polyforge/internal/version.Version=v2.20.16",
+  "-ldflags", "-X github.com/silgrid/polyforge/internal/version.Version=v2.20.21",
   "./cmd/pf",
 ], { cwd: acme, env: { ...process.env, GOWORK: "off" }, encoding: "utf8", timeout: 300_000 });
 assert.equal(built.status, 0, `real pf build failed: ${built.stderr || built.stdout}`);
@@ -340,14 +335,18 @@ await check("W216-4", async () => {
 
 await check("W216-5", async () => {
   resetWorkflows(); resetWorkspace();
-  const result = await pfJson(["config", "workspace", "--cwd", ws]);
-  assert.equal(result.status, 0, `workspace read exited ${result.status}: ${result.stderr}`);
-  const policy = result.json?.memory_policy;
-  assert.ok(policy, `memory_policy is missing: ${result.stdout.slice(0, 400)}`);
-  assert.equal(policy.source, "file", "memory_policy is declared in this file");
-  assert.equal(policy.append_to_default, true, "the read must state that project entries append to the default");
+  // the memory policy is read from `pf config list`, keyed by
+  // the workspace path; the workspace read no longer carries it.
+  const workspace = await pfJson(["config", "workspace", "--cwd", ws]);
+  assert.equal(workspace.status, 0, `workspace read exited ${workspace.status}: ${workspace.stderr}`);
+  assert.equal(workspace.json?.memory_policy, undefined, "the workspace read still carries memory_policy");
+  const result = await pfJson(["config", "list"]);
+  assert.equal(result.status, 0, `config list exited ${result.status}: ${result.stderr}`);
+  const policy = result.json?.memory_policy?.[ws];
+  assert.ok(policy, `memory_policy for the workspace path is missing: ${result.stdout.slice(0, 400)}`);
+  assert.equal(policy.default?.declared, true, "the default entry is declared in cli.toml");
   assert.ok((policy.default?.record ?? []).includes("mem-base"), "the default record list is not returned");
-  assert.ok((policy.projects?.workbench?.record ?? []).includes("mem-workbench"), "the project's record list is not returned");
+  assert.ok((policy.workbench?.record ?? []).includes("mem-workbench"), "the project's record list is not returned");
 });
 
 await check("W216-6", async () => {
@@ -376,7 +375,7 @@ await check("W216-7", async () => {
   const changed = a.map((line, index) => (line === b[index] ? null : index)).filter((index) => index !== null);
   assert.equal(changed.length, 1, `only the addressed key may change, changed lines: ${JSON.stringify(changed.map((i) => [a[i], b[i]]))}`);
   assert.match(b[changed[0]], /^\s*models:\s*\[.*claude:declared-grill.*pi:alt.*\]$/, `the written chain is not the requested value: ${b[changed[0]]}`);
-  for (const comment of ["# dense per-step comments must survive every write", "# second header line", "# unrelated summarize comment", "# grill's declared chain", "# declared-but-empty list"]) {
+  for (const comment of ["# dense per-step comments must survive every write", "# second header line", "# unrelated comment above the steps section", "# grill's declared chain", "# declared-but-empty list"]) {
     assert.ok(after.includes(comment), `the write dropped the comment ${comment}`);
   }
   const readBack = await pfJson(["config", "workspace", "--cwd", ws]);
@@ -545,8 +544,16 @@ try {
     assert.ok(stepOf(feature, "grill"), "the real pf document has no feature-full grill step");
     assert.ok(reads.workflows > 0, "the panel never called the real read route");
     await workflow().waitFor({ state: "visible", timeout: 30_000 });
+    // The card's header renders before its read lands (one pf spawn per read):
+    // the section is visible before its first workflows read settles (the newest
+    // of two mount-effect reads writes the card), so wait, bounded, for the
+    // asserted content itself — the #135 pattern, not a longer timeout.
+    // fixed the same race with a literal 30s; NAV_MS keeps the
+    // repository's nav ceiling (E2E_NAV_MS, default 180s) instead.
+    const facts = /claude:declared-grill|pi:fg-grill/;
+    await waitFor(async () => facts.test(await workflow().innerText()), NAV_MS);
     const card = await workflow().innerText();
-    assert.match(card, /claude:declared-grill|pi:fg-grill/, `the card does not carry the real pf's facts: ${card.slice(0, 400)}`);
+    assert.match(card, facts, `the card does not carry the real pf's facts: ${card.slice(0, 400)}`);
   });
 
   await check("W216-16", async () => {
@@ -589,10 +596,15 @@ try {
   });
 
   await check("W216-19", async () => {
-    const text = await rowText(workflow(), "grill");
+    // (owner 有意变更): the row keeps its declared chain and its
+    // marker; the live badge is the card's, exactly once, and none sits in a row.
+    const card = workflow();
+    const text = await rowText(card, "grill");
     assert.match(text, /claude:declared-grill/, `the declared chain is not shown: ${text}`);
     assert.match(text, /declared/i, `the row must mark the chain as declared: ${text}`);
-    assert.match(text, /live/i, `a chain row must carry its live class: ${text}`);
+    assert.equal(await (await rowOf(card, "grill")).locator(".polyforge-config-badge").count(), 0, "a step row still carries the live badge");
+    const badges = await card.locator(".polyforge-config-badge").allInnerTexts();
+    assert.deepEqual(badges.map((value) => value.trim()), ["Live"], `the card must carry exactly one live badge: ${badges}`);
   });
 
   await check("W216-20", async () => {
@@ -602,13 +614,18 @@ try {
   });
 
   await check("W216-21", async () => {
-    const text = await rowText(workflow(), "code");
+    // (owner 有意变更): the bundles are named in the row's
+    // inline ' · '-joined suffix, one name element each.
+    const row = await rowOf(workflow(), "code");
+    const text = await row.innerText();
     assert.match(text, /pi:fg-code/, `feature-full's effective chain is missing: ${text}`);
     assert.match(text, /pi:auto-code/, `autopilot's effective chain is missing: ${text}`);
     assert.match(text, /pi:chore-code/, `chore's effective chain is missing: ${text}`);
-    assert.match(text, /feature-full/, "the row must name feature-full");
-    assert.match(text, /autopilot/, "the row must name autopilot");
-    assert.match(text, /chore/, "the row must name chore");
+    const suffix = row.locator(".polyforge-workflow-bundle-suffix");
+    assert.equal(await suffix.count(), 1, "the row has no inline bundle suffix");
+    const names = (await suffix.locator(".polyforge-workflow-bundle-name").allInnerTexts()).map((name) => name.trim());
+    for (const name of ["feature-full", "autopilot", "chore"]) assert.ok(names.includes(name), `the suffix must name ${name}: ${names}`);
+    assert.match(await suffix.innerText(), / · /, "the suffix is not a ' · '-joined name list");
   });
 
   await check("W216-22", async () => {
@@ -621,9 +638,15 @@ try {
   });
 
   await check("W216-29", async () => {
-    const text = await rowText(workflow(), "grill");
-    assert.match(text, /live/i, "a step chain row must carry the live badge");
-    assert.match(text, /next step dispatch|next dispatch|下一次 step 派发/i, `a live row must state its next-dispatch latency: ${text}`);
+    // (owner 有意变更): the next-dispatch note is stated once at
+    // card level, next to the one live badge, and no row repeats it.
+    const card = workflow();
+    const note = "Takes effect at the next step dispatch; a running step does not change.";
+    assert.equal(await card.getByText(note, { exact: true }).count(), 1, "the card must state the next-dispatch note exactly once");
+    for (const row of await card.locator(".polyforge-workflow-row").all()) {
+      assert.equal(await row.getByText(note, { exact: true }).count(), 0, "a step row repeats the card-level next-dispatch note");
+    }
+    assert.equal(await card.locator(".polyforge-config-badge").filter({ hasText: /live/i }).count(), 1, "the card must carry exactly one live badge");
   });
 
   await check("W216-30", async () => {
@@ -644,15 +667,19 @@ try {
   });
 
   await check("W216-26", async () => {
+    // the workspace card keeps the mapping rows only; the
+    // read-only memory policy renders inside the cli.toml card.
     const card = workspaceCard();
     await card.waitFor({ state: "visible", timeout: 30_000 });
-    const rows = card.locator(".polyforge-config-row");
-    const texts = await rows.allInnerTexts();
-    assert.ok(texts.length >= 3, `the merged workspace card has no grouped rows: ${texts.length}`);
-    for (const value of texts) assert.match(value, /cli\.toml|\.polyforge\.yaml/, `a workspace row carries no source-file tag: ${value}`);
-    assert.match(await card.innerText(), /memory policy|记忆策略/i, "memory_policy is not shown in the workspace card");
-    const memory = rows.filter({ hasText: /memory policy|记忆策略/i }).first();
-    if (await memory.count()) assert.equal(await memory.locator("input, textarea").count(), 0, "memory_policy must be read-only");
+    const texts = await card.locator(".polyforge-config-row").allInnerTexts();
+    assert.ok(texts.length >= 1, `the workspace card has no mapping row: ${texts.length}`);
+    for (const value of texts) assert.match(value, /cli\.toml/, `a workspace row carries no cli.toml tag: ${value}`);
+    assert.doesNotMatch(await card.innerText(), /memory policy|记忆策略|summarize\./i, "the workspace card still presents a moved family");
+    const cli = dialog.locator('section[aria-label="cli.toml"]').first();
+    await waitFor(async () => /mem-base/.test(await cli.innerText()));
+    assert.match(await cli.innerText(), /memory policy|记忆策略/i, "memory_policy is not shown in the cli.toml card");
+    const memory = cli.locator(".polyforge-config-zone.is-memory-policy").first();
+    assert.equal(await memory.locator("input, textarea").count(), 0, "memory_policy must be read-only");
   });
 
   await check("W216-27", async () => {

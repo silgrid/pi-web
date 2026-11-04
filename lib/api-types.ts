@@ -1,4 +1,5 @@
 import type { McpExposure, ResourceDiagnostic } from "@earendil-works/pi-coding-agent";
+import type { AgentLanguage } from "./agent-language";
 import type { McpImportNote } from "./mcp-import-core";
 import type { SubagentProfile } from "./subagents";
 
@@ -36,6 +37,11 @@ export interface CodemodeModeSetting {
   value: CodemodeMode;
   /** A value that is neither mode, which pi reads as "on", as shortened JSON. */
   invalid?: string;
+}
+
+/** GET/PUT /api/agent-language: the server-side Agent language. */
+export interface AgentLanguageResponse {
+  language: AgentLanguage;
 }
 
 export interface ToolSettingsResponse {

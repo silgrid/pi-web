@@ -20,11 +20,13 @@ results; claude `queue-operation`, `attachment`, `api-request*`, `api-request-bl
 plus up to two or three of the shapes that carry progress (pi assistant
 `text`/`thinking`/`toolCall`, claude assistant `tool_use`).
 
-**Redaction.** Assistant text kept (cut at 160 characters) and tool-call arguments kept
-as scalar strings (cut at 160 characters); thinking text, tool results, user/system
-prompts and every other content replaced by a `[redacted …]` marker, thinking signatures
-dropped; every top-level field outside the record's identity, type, timestamp and
-`message` replaced by `"[redacted]"`; `cwd` replaced by `/redacted/capsule`;
-credential-shaped values (`token=`, `password=`, `api_key=`, `sk-`/`ghp_`/`npm_`
-prefixes) replaced before the cut. Timestamps, ids, block order and record shapes are the
-recorded ones.
+**Redaction.** Assistant text kept (cut at 160 characters), tool-call arguments kept
+as scalar strings (cut at 160 characters), and pi thinking text kept (cut at 160
+characters — makes a non-empty thinking block a progress narration line);
+claude thinking is stored as the empty string the real records carry (Claude redacts it).
+Tool results, user/system prompts and every other content are replaced by a
+`[redacted …]` marker, thinking signatures dropped; every top-level field outside the
+record's identity, type, timestamp and `message` replaced by `"[redacted]"`; `cwd`
+replaced by `/redacted/capsule`; credential-shaped values (`token=`, `password=`,
+`api_key=`, `sk-`/`ghp_`/`npm_` prefixes) replaced before the cut. Timestamps, ids,
+block order and record shapes are the recorded ones.

@@ -60,7 +60,7 @@ test("all three locales carry the bgTasks keys", () => {
   }
 });
 
-test("AppShell wires the panel, the toolbar badge, and the event callback", () => {
+test("AppShell wires the panel and the event callback; the top-bar badge is gone", () => {
   // pi#28: the panel follows the focused pane's session (activeBgSessionId),
   // never the classic selectedSession alone.
   assert.match(appShellSource, /useBackgroundTasks\(activeBgSessionId, bgPanelOpen\)/);
@@ -76,7 +76,11 @@ test("AppShell wires the panel, the toolbar badge, and the event callback", () =
   assert.match(appShellSource, /sessionId=\{activeBgSessionId\}/);
   assert.doesNotMatch(appShellSource, /<BackgroundTasksPanel\n\s*sessionId=\{selectedSession/,
     "the panel must not read selectedSession directly (pi#28)");
-  assert.match(appShellSource, /bgRunningCount > 0/);
+  // (owner 有意变更): the pi top bar's bg-tasks toggle and its
+  // running-count badge are gone; the dock opens from the terminal
+  // notification's jump only (pinned below).
+  assert.doesNotMatch(appShellSource, /bgRunningCount/, "the top bar still renders a bg-tasks running-count badge");
+  assert.doesNotMatch(appShellSource, /translate\("bgTasks\.open"\)/, "the top bar still renders the bg-tasks toggle");
   // Terminal events notify exactly once and jump to the task.
   assert.match(appShellSource, /markTerminalNotified\(task\.id\)/);
   assert.match(appShellSource, /tag: `pi-bg-task:\$\{task\.id\}`/);

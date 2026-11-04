@@ -38,6 +38,6 @@ export async function GET(request: Request) {
     return NextResponse.json({ pfPresent: true, cards: null, error: "polyforge is unavailable" });
   }
   const cursors = parseCardCursors(new URL(request.url).searchParams.get("cursors"));
-  const cards = readPolyforgeCards(status.jobs, cursors, Date.now());
+  const cards = await readPolyforgeCards(status.jobs, cursors, Date.now());
   return NextResponse.json({ pfPresent: true, cards });
 }

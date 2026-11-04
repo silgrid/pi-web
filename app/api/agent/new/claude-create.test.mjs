@@ -20,6 +20,8 @@ fs.copyFileSync(new URL("../../../../lib/__fixtures__/claude-stub/claude.mjs", i
 fs.chmodSync(path.join(binDir, "claude"), 0o755);
 fs.symlinkSync(decodeURIComponent(new URL("../../../../lib/__fixtures__/claude-2.1.312", import.meta.url).pathname), path.join(scratch, "claude-2.1.312"));
 process.env.PI_CODING_AGENT_DIR = agentDir;
+// The inherited claude config dir the stub writes its transcripts under: never the operator's.
+process.env.CLAUDE_CONFIG_DIR = path.join(scratch, "claude-config");
 const originalPath = process.env.PATH;
 process.env.PATH = `${binDir}${path.delimiter}${originalPath}`;
 process.env.PI_TEST_CLAUDE_STUB_LOG = stubLog;
@@ -67,7 +69,7 @@ async function waitFor(predicate, timeoutMs, message) {
 }
 
 test("an unregistrable cwd is refused with the pi route's reason before any side effect", async () => {
-  const response = await post({ cwd: path.parse(path.resolve(os.tmpdir())).root, type: "prompt", message: "hi", harness: "claude", modelAlias: "sonnet" });
+  const response = await post({ cwd: path.parse(path.resolve(os.tmpdir())).root, type: "prompt", message: "hi", harness: "claude", model: "claude-sonnet-5-5" });
   assert.equal(response.status, 403);
   const body = await response.json();
   assert.equal(body.reason, "outsideRegistrationPrefix");
@@ -77,13 +79,15 @@ test("an unregistrable cwd is refused with the pi route's reason before any side
   assert.equal(startRpcCalls.length, 0);
 });
 
-test("alias and preset are validated; other commands are refused for claude", async () => {
+test("the model must be one of the four full names; other commands are refused for claude", async () => {
   for (const body of [
-    { harness: "claude", modelAlias: "gpt" },
+    { harness: "claude", model: "gpt" },
     { harness: "claude" },
-    { harness: "claude", modelAlias: "sonnet", claudePreset: "full" },
-    { harness: "codex", modelAlias: "sonnet" },
-    { harness: "claude", modelAlias: "sonnet", type: "bash", command: "ls" },
+    { harness: "claude", model: "sonnet" },
+    { harness: "claude", model: "claude-default" },
+    { harness: "claude", modelAlias: "sonnet" },
+    { harness: "codex", model: "claude-sonnet-5-5" },
+    { harness: "claude", model: "claude-sonnet-5-5", type: "bash", command: "ls" },
   ]) {
     const response = await post({ cwd: project, type: "prompt", message: "hi", ...body });
     assert.equal(response.status, 400, JSON.stringify(body));
@@ -95,7 +99,7 @@ test("alias and preset are validated; other commands are refused for claude", as
 test("claude missing from PATH is refused without an index entry or a config dir", async () => {
   process.env.PATH = path.join(scratch, "empty");
   try {
-    const response = await post({ cwd: project, type: "prompt", message: "hi", harness: "claude", modelAlias: "sonnet" });
+    const response = await post({ cwd: project, type: "prompt", message: "hi", harness: "claude", model: "claude-sonnet-5-5" });
     assert.equal(response.status, 400);
     assert.match((await response.json()).error, /claude was not found on PATH/);
   } finally {
@@ -104,21 +108,24 @@ test("claude missing from PATH is refused without an index entry or a config dir
   assert.equal(fs.existsSync(agentDir), false);
 });
 
-test("a claude create writes the index entry and the config dir, spawns --session-id with the chosen flags and sends the prompt", async () => {
-  const response = await post({ cwd: project, type: "prompt", message: "first words", harness: "claude", modelAlias: "haiku", claudePreset: "writable" });
+test("a claude create writes the index entry (full name, no preset, no config dir), spawns --session-id with the reduced argv and sends the prompt", async () => {
+  const response = await post({ cwd: project, type: "prompt", message: "first words", harness: "claude", model: "claude-haiku-5-5" });
   assert.equal(response.status, 200);
   const body = await response.json();
   assert.equal(body.success, true);
-  assert.deepEqual(body.model, { provider: "claude", modelId: "haiku" });
+  assert.deepEqual(body.model, { provider: "claude", modelId: "claude-haiku-5-5" });
   const record = index.getClaudeSessionRecord(body.sessionId);
   assert.equal(record.cwd, fs.realpathSync(project));
-  assert.equal(record.modelAlias, "haiku");
-  assert.equal(record.preset, "writable");
+  assert.equal(record.model, "claude-haiku-5-5");
   assert.equal(record.firstMessage, "first words");
-  assert.equal(fs.readFileSync(path.join(agentDir, "claude", "settings.json"), "utf8"), "{}\n");
+  const stored = JSON.parse(fs.readFileSync(index.claudeIndexPath(), "utf8")).sessions.find((entry) => entry.id === body.sessionId);
+  assert.ok(!("preset" in stored) && !("modelAlias" in stored), "no preset or alias is stored");
+  assert.equal(fs.existsSync(path.join(agentDir, "claude")), false, "no dedicated config dir is created");
   const launch = await waitFor(() => launches()[0], 5_000, "no claude launch");
-  assert.deepEqual(launch.argv.slice(-4), ["--model", "haiku", "--session-id", body.sessionId]);
-  assert.ok(launch.argv.includes("acceptEdits"));
+  assert.deepEqual(launch.argv, [
+    "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--include-partial-messages",
+    "--model", "claude-haiku-5-5", "--permission-prompts", "none", "--session-id", body.sessionId,
+  ]);
   const stdin = await waitFor(
     () => fs.readFileSync(stubLog, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line)).find((entry) => entry.kind === "stdin"),
     5_000,
@@ -128,16 +135,18 @@ test("a claude create writes the index entry and the config dir, spawns --sessio
   assert.equal(startRpcCalls.length, 0, "no pi session for a claude create");
 });
 
-test("ensure_session with the default preset creates a read-only session and sends nothing", async () => {
+test("a supplied claudePreset is dropped unread: ensure_session creates the session with the reduced argv and sends nothing", async () => {
   const before = launches().length;
-  const response = await post({ cwd: project, type: "ensure_session", harness: "claude", modelAlias: "claude-default" });
+  const response = await post({ cwd: project, type: "ensure_session", harness: "claude", model: "claude-opus-5-5", claudePreset: "writable" });
   assert.equal(response.status, 200);
   const body = await response.json();
   assert.equal(body.data, null);
-  assert.equal(index.getClaudeSessionRecord(body.sessionId).preset, "read-only");
+  const stored = JSON.parse(fs.readFileSync(index.claudeIndexPath(), "utf8")).sessions.find((entry) => entry.id === body.sessionId);
+  assert.equal(stored.model, "claude-opus-5-5");
+  assert.ok(!("preset" in stored));
   const launch = await waitFor(() => launches()[before], 5_000, "no claude launch");
-  assert.ok(!launch.argv.includes("--model"));
-  assert.ok(launch.argv.includes("--bare"));
+  assert.equal(launch.argv[launch.argv.indexOf("--model") + 1], "claude-opus-5-5");
+  for (const flag of ["--bare", "--permission-mode", "--tools", "--allowedTools", "acceptEdits"]) assert.ok(!launch.argv.includes(flag), flag);
 });
 
 test("without a harness (or with pi) the pi path runs unchanged and spawns no claude", async () => {
@@ -151,4 +160,95 @@ test("without a harness (or with pi) the pi path runs unchanged and spawns no cl
   }
   await delay(100);
   assert.equal(launches().length, before);
+});
+
+// claude images are validated before a record or a child exists.
+const PNG = { type: "image", data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGD4DwABBAEAfbLI3wAAAABJRU5ErkJggg==", mimeType: "image/png" };
+const stdinLines = () => (fs.existsSync(stubLog) ? fs.readFileSync(stubLog, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line)).filter((entry) => entry.kind === "stdin") : []);
+const indexSize = () => (fs.existsSync(index.claudeIndexPath()) ? index.readClaudeIndex().length : 0);
+
+test("invalid claude images are refused with 400 and a reason: no record, no child, nothing on stdin", async () => {
+  const oversized = "AAAA".repeat(Math.ceil((10 * 1024 * 1024 + 1) / 3));
+  const cases = [
+    [[{ ...PNG, data: "not base64!" }], /valid base64/],
+    [Array.from({ length: 11 }, () => PNG), /at most 10/],
+    [[{ ...PNG, data: oversized }], /10MB/],
+    [[{ ...PNG, mimeType: "image/svg+xml" }], /PNG, JPEG, GIF and WebP/],
+  ];
+  const before = { launches: launches().length, stdin: stdinLines().length, records: indexSize() };
+  for (const [images, reason] of cases) {
+    const response = await post({ cwd: project, type: "prompt", message: "look", images, harness: "claude", model: "claude-haiku-5-5" });
+    assert.equal(response.status, 400);
+    const body = await response.json();
+    assert.match(body.error, reason);
+    assert.equal(body.code, "prompt_rejected");
+    assert.equal(body.accepted, false);
+  }
+  await delay(100);
+  assert.deepEqual({ launches: launches().length, stdin: stdinLines().length, records: indexSize() }, before);
+});
+
+test("an image-only claude create starts the turn, writes the image once and lists the session as [Image]", async () => {
+  const before = stdinLines().length;
+  const response = await post({ cwd: project, type: "prompt", message: "", images: [PNG], harness: "claude", model: "claude-haiku-5-5" });
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(index.getClaudeSessionRecord(body.sessionId).firstMessage, "[Image]");
+  const line = await waitFor(() => stdinLines()[before], 5_000, "the prompt never reached stdin");
+  assert.deepEqual(JSON.parse(line.line).message.content, [{ type: "image", source: { type: "base64", media_type: "image/png", data: PNG.data } }]);
+  await delay(100);
+  assert.equal(stdinLines().length, before + 1, "written once");
+});
+
+test("a claude create stores the composer's effort and passes it to the first child; untouched is the default; an invalid one is 400", async () => {
+  let before = launches().length;
+  const seeded = await post({ cwd: project, type: "ensure_session", harness: "claude", model: "claude-opus-5-5", effort: "medium" });
+  assert.equal(seeded.status, 200);
+  const seededId = (await seeded.json()).sessionId;
+  assert.equal(index.getClaudeSessionRecord(seededId).effort, "medium");
+  const launch = await waitFor(() => launches()[before], 5_000, "no claude launch");
+  assert.equal(launch.argv[launch.argv.indexOf("--effort") + 1], "medium");
+
+  before = launches().length;
+  const untouched = await post({ cwd: project, type: "ensure_session", harness: "claude", model: "claude-opus-5-5" });
+  const untouchedId = (await untouched.json()).sessionId;
+  assert.equal(JSON.parse(fs.readFileSync(index.claudeIndexPath(), "utf8")).sessions.find((entry) => entry.id === untouchedId).effort, "default");
+  assert.ok(!(await waitFor(() => launches()[before], 5_000, "no claude launch")).argv.includes("--effort"));
+
+  const count = index.readClaudeIndex().length;
+  before = launches().length;
+  for (const effort of ["off", "minimal", "auto", 3]) {
+    const refused = await post({ cwd: project, type: "prompt", message: "x", harness: "claude", model: "claude-opus-5-5", effort });
+    assert.equal(refused.status, 400, String(effort));
+  }
+  assert.equal(index.readClaudeIndex().length, count, "no record for an invalid effort");
+  await delay(100);
+  assert.equal(launches().length, before, "no child for an invalid effort");
+});
+
+const INSTRUCTION = "Use Simplified Chinese (简体中文) for replies, narration and reports. Keep code, code comments, commit messages, files you write, technical terms and identifiers as they are, or as the project's conventions require. Thinking in Chinese is best effort only.";
+
+test("a claude create stores the server's Agent language; a 中文 record launches with the instruction and a later setting change does not rewrite it", async () => {
+  const settings = path.join(agentDir, "pi-web-settings.json");
+  fs.mkdirSync(agentDir, { recursive: true });
+  fs.writeFileSync(settings, JSON.stringify({ version: 1, agentLanguage: "zh-CN" }));
+  let before = launches().length;
+  const zh = await post({ cwd: project, type: "ensure_session", harness: "claude", model: "claude-haiku-5-5" });
+  assert.equal(zh.status, 200);
+  const zhId = (await zh.json()).sessionId;
+  assert.equal(index.getClaudeSessionRecord(zhId).agentLanguage, "zh-CN");
+  const launch = await waitFor(() => launches()[before], 5_000, "no claude launch");
+  assert.deepEqual(launch.argv, [
+    "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--include-partial-messages",
+    "--model", "claude-haiku-5-5", "--append-system-prompt", INSTRUCTION, "--permission-prompts", "none", "--session-id", zhId,
+  ]);
+
+  fs.writeFileSync(settings, JSON.stringify({ version: 1, agentLanguage: "en" }));
+  assert.equal(index.getClaudeSessionRecord(zhId).agentLanguage, "zh-CN", "the setting change rewrote nothing");
+  before = launches().length;
+  const en = await post({ cwd: project, type: "ensure_session", harness: "claude", model: "claude-haiku-5-5" });
+  const enId = (await en.json()).sessionId;
+  assert.equal(index.getClaudeSessionRecord(enId).agentLanguage, "en");
+  assert.ok(!(await waitFor(() => launches()[before], 5_000, "no claude launch")).argv.includes("--append-system-prompt"));
+  fs.rmSync(settings, { force: true });
 });

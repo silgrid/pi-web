@@ -26,6 +26,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
 import { startNextServer } from "./next-server.mjs";
+import { openPolyforgeDock, settlePolyforgeToggle } from "./polyforge-dock.mjs";
 import { NAV_MS } from "./timeouts.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
@@ -153,19 +154,33 @@ const machineSection = (state) => state.page.evaluate((values) => {
   const grid = document.querySelector(".debug-cols");
   // Every ancestor up to <html> holds the text: stop below the column grid (the owner answer).
   while (scope.parentElement && scope.parentElement !== grid && holds(scope.parentElement)) scope = scope.parentElement;
-  const box = scope.getBoundingClientRect();
+  const box = (node) => { const r = node?.getBoundingClientRect(); return r ? { left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: r.width } : null; };
+  const scopeBox = box(scope);
   const gridBox = grid?.getBoundingClientRect();
   const style = grid ? getComputedStyle(grid) : null;
   const innerLeft = gridBox && style ? gridBox.left + parseFloat(style.paddingLeft) + parseFloat(style.borderLeftWidth) : null;
   const innerRight = gridBox && style ? gridBox.right - parseFloat(style.paddingRight) - parseFloat(style.borderRightWidth) : null;
+  const load = document.querySelector(".debug-load");
+  const section = document.querySelector(".machine-load-section");
+  const scroll = document.querySelector(".debug-panel-scroll");
+  const columns = [...document.querySelectorAll(".debug-col")];
   return {
     found: true,
     inGrid: Boolean(grid?.contains(scope)),
     text: scope.innerText ?? "",
-    left: box.left, right: box.right, top: box.top,
+    left: scopeBox.left, right: scopeBox.right, top: scopeBox.top,
     gridLeft: innerLeft, gridRight: innerRight,
+    // The computed track areas, an oracle this suite never restates as a stylesheet regex.
+    areas: style?.gridTemplateAreas ?? null,
     panelWidth: document.querySelector(".debug-panel")?.getBoundingClientRect().width ?? null,
-    columnBottoms: [...document.querySelectorAll(".debug-col")].map((column) => column.getBoundingClientRect().bottom),
+    columnTops: columns.map((column) => column.getBoundingClientRect().top),
+    columnBottoms: columns.map((column) => column.getBoundingClientRect().bottom),
+    load: box(load),
+    section: box(section),
+    sessions: box(document.querySelector(".debug-col-sessions")),
+    loadLeftRule: load ? parseFloat(getComputedStyle(load).borderLeftWidth) : null,
+    sectionTopRule: section ? parseFloat(getComputedStyle(section).borderTopWidth) : null,
+    scrollOverflow: scroll ? scroll.scrollWidth - scroll.clientWidth : null,
   };
 }, ML_VALUES);
 
@@ -215,6 +230,17 @@ const JOBS = [
   { wi: "wi_E2E198A", slug: "task#9181", status: "running", stepAgeSec: 5, idleAgeSec: 1, candidate: "pi:e2e/model", spawnN: 1 },
   { wi: "wi_E2E198B", slug: "task#9182", status: "needs_input", stepAgeSec: 6, idleAgeSec: 2, candidate: "claude:e2e/model", spawnN: 1 },
 ];
+// one card per status, for the frame-colour and status-text
+// oracle; the four loud states must be pairwise distinct and distinct from the
+// one shared quiet gray (queued/paused/cancelled).
+const STATUS_JOBS = [
+  JOBS[0], JOBS[1],
+  { wi: "wi_E2E198C", slug: "task#9183", status: "completed", stepAgeSec: 7, idleAgeSec: 3, candidate: "pi:e2e/model", spawnN: 1 },
+  { wi: "wi_E2E198D", slug: "task#9184", status: "failed", stepAgeSec: 8, idleAgeSec: 4, candidate: "pi:e2e/model", spawnN: 1 },
+  { wi: "wi_E2E198E", slug: "task#9185", status: "queued", stepAgeSec: 9, idleAgeSec: 5, candidate: "pi:e2e/model", spawnN: 1 },
+  { wi: "wi_E2E198F", slug: "task#9186", status: "paused", stepAgeSec: 10, idleAgeSec: 6, candidate: "pi:e2e/model", spawnN: 1 },
+  { wi: "wi_E2E198G", slug: "task#9187", status: "cancelled", stepAgeSec: 11, idleAgeSec: 7, candidate: "pi:e2e/model", spawnN: 1 },
+];
 const CARD = (job) => ({
   job, goal: job.status === "running" ? GOAL : "E2E-B-GOAL", startedAt: TS,
   steps: [], progress: { available: true, entries: Array.from({ length: 12 }, (_, index) => ({ id: `${job.wi}-${index}`, text: `NARRATION-${job.wi}-${index}` })) },
@@ -225,22 +251,13 @@ const jobsRoutes = [
   ["**/api/polyforge/cards*", (route) => route.fulfill(json({ pfPresent: true, cards: JOBS.map(CARD) }))],
   ["**/api/polyforge/messages", (route) => route.fulfill(json({ pfPresent: true, capable: true, conversations: [], contacts: [] }))],
 ];
-const jobsDock = (page) => page.locator("#polyforge-dock").or(page.getByRole("dialog", { name: /polyforge/i })).first();
+const statusRoutes = [
+  ["**/api/polyforge/status", (route) => route.fulfill(json({ pfPresent: true, status: { ...OPS, jobs: STATUS_JOBS } }))],
+  ["**/api/polyforge/cards*", (route) => route.fulfill(json({ pfPresent: true, cards: STATUS_JOBS.map(CARD) }))],
+  ["**/api/polyforge/messages", (route) => route.fulfill(json({ pfPresent: true, capable: true, conversations: [], contacts: [] }))],
+];
 async function openJobsDock(page) {
-  // the toggle renders only after the mount-time status probe
-  // (`pfPresent`) and, since, is resident at ≤480px / inline
-  // wider. Never open ⋯ to reveal it: ⋯'s overlay covers that slot and
-  // intercepts the click. Wait for the toggle, close ⋯ if it is open, click.
-  const more = page.locator('[data-mobile-toolbar-more="true"]');
-  const pf = page.getByRole("button", { name: /^(?!.*close).*polyforge/i }).first();
-  await waitFor(async () => (await pf.count()) > 0, "the Polyforge toggle renders", 20_000);
-  if ((await more.count()) > 0 && (await more.getAttribute("aria-expanded")) === "true") {
-    await more.click();
-    await page.locator('[data-mobile-toolbar-actions="true"]').waitFor({ state: "hidden", timeout: 10_000 });
-  }
-  await pf.click();
-  const dock = jobsDock(page);
-  await dock.waitFor({ timeout: 20_000 });
+  const dock = await openPolyforgeDock(page);
   await page.locator("[data-pf-card-wi]").first().waitFor({ timeout: 30_000 });
   return dock;
 }
@@ -252,9 +269,10 @@ async function cardGeometry(page, wi, slug, statusText) {
     const style = getComputedStyle(el);
     const contentRight = el.getBoundingClientRect().right - parseFloat(style.paddingRight);
     const slugNode = leaf(slugText);
-    // a running card's status label is `Running <n>m`, so the
-    // status element is matched by its prefix.
-    const statusNode = [...el.querySelectorAll("*")].find((node) => node.children.length === 0 && (node.textContent ?? "").trim().startsWith(status)) ?? null;
+    // the status element carries its full status text as its
+    // title (a running card's visible text is the duration alone), so match by
+    // the title's prefix instead of the visible text.
+    const statusNode = [...el.querySelectorAll("[title]")].find((node) => (node.getAttribute("title") ?? "").startsWith(status)) ?? null;
     const goalNode = [...el.querySelectorAll("[title]")].find((node) => (node.getAttribute("title") ?? "").startsWith("E2E-")) ?? null;
     let progress = null;
     for (const child of [el, ...el.querySelectorAll("*")]) {
@@ -264,7 +282,8 @@ async function cardGeometry(page, wi, slug, statusText) {
         break;
       }
     }
-    return { card: box(el), contentRight, slug: box(slugNode), status: box(statusNode), goal: box(goalNode), progress };
+    return { card: box(el), contentRight, slug: box(slugNode), status: box(statusNode), goal: box(goalNode), progress,
+      statusText: (statusNode?.textContent ?? "").trim(), statusTitle: statusNode?.getAttribute("title") ?? "", aria: el.getAttribute("aria-label") ?? "" };
   }, { slugText: slug, status: statusText });
 }
 
@@ -308,30 +327,59 @@ try {
     } finally { await closePage(state); }
   });
 
-  // S2 — spec Req 2 / AC 2: last grid area of `.debug-cols`, full width at all three layouts.
-  await check("S2", "Debug machine load is the last full-width .debug-cols row at wide, <=1239 and <=760", async () => {
+  // S2 — spec Req 2 / AC 2, owner 有意变更 (the load is no longer a full-width last
+  // row): on a wide panel it is the grid's narrow rightmost column, behind the same 20px gutter + 20px
+  // padding + left rule the server and sessions columns use, its top on their tops and its right edge
+  // on the grid's, with no top rule of its own; between the four-column width (a measured 1412px panel)
+  // and 760px it is the right column under the sessions, that top rule back as the separator; on a
+  // phone it stays the last block of the stack, full width. Nothing scrolls horizontally, and the
+  // block stays narrow instead of stretching with the panel.
+  await check("S2", "Debug machine load is the narrow rightmost column at wide, under the sessions in the middle and last on a phone", async () => {
     const state = await openPage({ session: MAIN, marker: "E2E ui polish reply" });
     try {
       await openDebug(state);
       await waitFor(() => state.mlHits >= 1, "the Debug panel's first machine-load request");
       await waitFor(async () => (await machineSection(state))?.text.includes(ML.memory), "the section's values");
-      const widths = [];
-      // 1600px: with the 260px sidebar a 1440px viewport leaves a 1180px (<=1239) panel.
-      for (const width of [1600, 1100, 700]) {
+      const measured = [];
+      // 1800px: with the 260px sidebar the panel is ~1540px, above the 1412px four-column width;
+      // 1440px leaves a ~1180px (middle) panel; 700px is the phone stack.
+      for (const width of [1800, 1440, 700]) {
         await state.page.setViewportSize({ width, height: 900 });
         await state.page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
-        const section = await machineSection(state);
-        assert.ok(section, `no Machine load section at ${width}px`);
-        assert.ok(section.inGrid, `at ${width}px the section is outside .debug-cols`);
-        assert.ok(Math.abs(section.left - section.gridLeft) <= 1, `at ${width}px left edge ${section.left} is not on the grid edge ${section.gridLeft}`);
-        assert.ok(Math.abs(section.right - section.gridRight) <= 1, `at ${width}px right edge ${section.right} is not on the grid edge ${section.gridRight}`);
-        assert.ok(section.columnBottoms.length >= 1, `at ${width}px no other column is rendered`);
-        assert.ok(section.columnBottoms.every((bottom) => section.top >= bottom - 1), `at ${width}px the section's top ${section.top} is above a column bottom ${Math.max(...section.columnBottoms)}`);
-        widths.push({ width, panel: Math.round(section.panelWidth) });
+        const s = await machineSection(state);
+        assert.ok(s, `no Machine load section at ${width}px`);
+        assert.ok(s.inGrid, `at ${width}px the section is outside .debug-cols`);
+        assert.ok(s.scrollOverflow <= 1, `at ${width}px .debug-panel-scroll scrolls horizontally by ${s.scrollOverflow}px`);
+        assert.ok(Math.abs(s.right - s.gridRight) <= 1, `at ${width}px the load block's right edge ${s.right} is not on the grid edge ${s.gridRight}`);
+        const panel = s.panelWidth;
+        if (panel >= 1412) {
+          assert.equal(s.areas, `"page server sessions load"`, `the wide layout's tracks: ${s.areas}`);
+          assert.ok(Math.abs(s.load.top - Math.min(...s.columnTops)) <= 1, `the load's top ${s.load.top} is not on the columns' tops ${Math.min(...s.columnTops)}`);
+          assert.ok(s.load.left >= s.sessions.right + 19, `the load column starts ${s.load.left - s.sessions.right}px after the sessions' right edge, not behind the 20px gutter`);
+          assert.ok(Math.abs(s.load.left - s.sessions.right - 20) <= 1, `the load's gutter measures ${s.load.left - s.sessions.right}px`);
+          assert.ok(Math.abs(s.section.left - s.sessions.right - 41) <= 1, `the load's rule and padding measure ${s.section.left - s.sessions.right}px, not 41`);
+          assert.equal(s.loadLeftRule, 1, "the load column carries the left rule the server and sessions columns use");
+          assert.equal(s.sectionTopRule, 0, "the load keeps a top rule on a wide panel, where the left rule separates it");
+          assert.ok(s.load.width <= 281, `the load column stretches to ${s.load.width}px instead of staying narrow (<=280px)`);
+          assert.ok(s.section.width >= 190 && s.section.width <= 241, `the load block measures ${s.section.width}px, not the narrow 200-240px`);
+        } else if (panel > 760) {
+          assert.equal(s.areas, `"page server" "page sessions" "page load"`, `the middle layout's tracks: ${s.areas}`);
+          assert.ok(Math.abs(s.load.left - s.sessions.left) <= 1, `the load's left edge ${s.load.left} is not on the sessions' ${s.sessions.left}`);
+          assert.ok(s.load.top >= s.sessions.bottom - 1, `the load's top ${s.load.top} is above the sessions' bottom ${s.sessions.bottom}`);
+          assert.ok(Math.abs(s.load.right - s.sessions.right) <= 1, `the load's right edge ${s.load.right} is not on the sessions' ${s.sessions.right}`);
+          assert.equal(s.sectionTopRule, 1, "the load under the sessions has no horizontal separator");
+        } else {
+          assert.equal(s.areas, `"page" "server" "sessions" "load"`, `the phone layout's tracks: ${s.areas}`);
+          assert.ok(s.load.top >= Math.max(...s.columnBottoms) - 1, `the load's top ${s.load.top} is above a column bottom ${Math.max(...s.columnBottoms)}`);
+          assert.ok(Math.abs(s.load.left - s.gridLeft) <= 1, `the load's left edge ${s.load.left} is not on the grid edge ${s.gridLeft}`);
+          assert.equal(s.sectionTopRule, 1, "the phone stack's last block lost its top rule");
+          assert.equal(s.loadLeftRule, 0, "the phone stack's last block keeps a left rule");
+        }
+        measured.push({ width, panel: Math.round(panel) });
       }
-      assert.ok(widths[0].panel > 1239, `the wide case measured ${widths[0].panel}px, not above the 1239 breakpoint: ${JSON.stringify(widths)}`);
-      assert.ok(widths[1].panel <= 1239 && widths[1].panel > 760, `the middle case measured ${widths[1].panel}px, not 761..1239: ${JSON.stringify(widths)}`);
-      assert.ok(widths[2].panel <= 760, `the narrow case measured ${widths[2].panel}px, not <=760: ${JSON.stringify(widths)}`);
+      assert.ok(measured[0].panel >= 1412, `the wide case measured ${measured[0].panel}px, not above the four-column width: ${JSON.stringify(measured)}`);
+      assert.ok(measured[1].panel > 760 && measured[1].panel < 1412, `the middle case measured ${measured[1].panel}px, not 761..1411: ${JSON.stringify(measured)}`);
+      assert.ok(measured[2].panel <= 760, `the narrow case measured ${measured[2].panel}px, not <=760: ${JSON.stringify(measured)}`);
     } finally { await closePage(state); }
   });
 
@@ -384,6 +432,8 @@ try {
     const phone = await openPage({ session: MAIN, viewport: { width: 390, height: 844 } });
     try {
       assert.equal(await toolbarRefresh(phone.page), null, "the phone toolbar still offers a manual-fetch control");
+      ///#247: the resident Polyforge toggle settles (bounded) before ⋯ opens.
+      await settlePolyforgeToggle(phone.page);
       const more = phone.page.locator('[data-mobile-toolbar-more="true"]');
       if (await more.count()) {
         if ((await more.getAttribute("aria-expanded")) !== "true") await more.click();
@@ -465,7 +515,8 @@ try {
       await page.getByRole("button", { name: "Settings", exact: true }).first().click();
       const dialog = page.getByRole("dialog", { name: "Settings", exact: true });
       await dialog.getByRole("button", { name: "Polyforge", exact: true }).click();
-      await dialog.locator('[aria-label="cli.toml · [daemon]"]').first().waitFor({ state: "attached", timeout: 30_000 });
+      // [daemon] is a zone of the one cli.toml card, no card of its own.
+      await dialog.locator('section[aria-label="cli.toml"] .polyforge-config-zone.is-daemon').first().waitFor({ state: "attached", timeout: 30_000 });
       await page.setViewportSize({ width: 390, height: 844 });
       await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
       const geometry = await page.evaluate(() => {
@@ -496,17 +547,19 @@ try {
     } finally { await closePage(state); }
   });
 
-  // S8 — spec Req 8 / AC 8: the Jobs cards are one row of fixed 150px cards.
+  // S8 — spec Req 8 / AC 8: the Jobs cards are one row of fixed-width cards.
   // owner 有意变更: the shared Jobs/Tasks minimum is
   // 150px (was 160px). owner 有意变更 the Jobs stream is one
-  // horizontally scrolling row, so the two cards share one row at every width
-  // (they were two columns at 460/375 and stacked at 340) and the row scrolls
-  // once the cards no longer fit (the 340px dock).
-  await check("S8", "Jobs cards are one row of fixed 150px cards at 460/375/340", async () => {
+  // horizontally scrolling row, so the cards share one row at every width and
+  // the row scrolls once the cards no longer fit. owner 有意变更:
+  // that fixed width is 180px (decoupled from the Tasks grid's 150px), checked
+  // at the 390/768/1280 viewports (#311's method) — the 390 sheet scrolls two
+  // 180px cards, the 768 and 1280 docks (460px) still fit them with free space.
+  await check("S8", "Jobs cards are one row of fixed 180px cards at 390/768/1280", async () => {
     const cases = [
-      [{ width: 460, storage: { "pi-web:polyforge-dock-width": "460" } }, "460 dock", false],
-      [{ width: 375, storage: {} }, "375 sheet", false],
-      [{ width: 340, storage: { "pi-web:polyforge-dock-width": "340" } }, "340 dock", true],
+      [{ width: 390 }, "390 viewport (sheet)", true],
+      [{ width: 768 }, "768 viewport", false],
+      [{ width: 1280 }, "1280 viewport", false],
     ];
     for (const [opts, label, overflows] of cases) {
       const state = await openPage({ session: MAIN, marker: "E2E ui polish reply", viewport: { width: opts.width, height: 800 }, storage: opts.storage, routes: jobsRoutes });
@@ -525,25 +578,28 @@ try {
         assert.equal(measured.cards.length, 2, `${label}: expected two cards`);
         const rows = new Set(measured.cards.map((card) => card.top));
         assert.equal(rows.size, 1, `${label}: the cards share one row (${JSON.stringify(measured.cards)})`);
-        assert.ok(measured.cards.every((card) => Math.abs(card.width - 150) <= 0.5),
-          `${label}: each card is a fixed 150px wide (${JSON.stringify(measured.cards.map((card) => card.width))})`);
+        assert.ok(measured.cards.every((card) => Math.abs(card.width - 180) <= 0.5),
+          `${label}: each card is a fixed 180px wide (${JSON.stringify(measured.cards.map((card) => card.width))}) (owner 有意变更)`);
         assert.ok(measured.cards[1].left - (measured.cards[0].left + measured.cards[0].width) >= 6,
           `${label}: the two cards keep the 8px gap (${JSON.stringify(measured.cards)})`);
         assert.equal(measured.overflowX, "auto", `${label}: the card row scrolls horizontally (${measured.overflowX})`);
         assert.equal(measured.scrollbarWidth, "thin", `${label}: the row's scrollbar stays visible but thin (${measured.scrollbarWidth})`);
         if (overflows) assert.ok(measured.scrollWidth > measured.clientWidth,
-          `${label}: two 150px cards exceed the ${measured.clientWidth}px row and it scrolls (${measured.scrollWidth})`);
+          `${label}: two 180px cards exceed the ${measured.clientWidth}px row and it scrolls (${measured.scrollWidth}) (owner 有意变更)`);
         else assert.ok(measured.scrollWidth <= measured.clientWidth,
-          `${label}: two 150px cards fit the ${measured.clientWidth}px row with free space at the right (${measured.scrollWidth})`);
+          `${label}: two 180px cards fit the ${measured.clientWidth}px row with free space at the right (${measured.scrollWidth})`);
       } finally { await closePage(state); }
     }
   });
 
   // S9 — spec Req 9 / AC 10: status on the title row's right end. owner 有意变更
   // (reverses the 32px narration): the card has no
-  // progress region any more.
-  await check("S9", "Jobs card status shares the slug row at the right and has no progress region", async () => {
-    const state = await openPage({ session: MAIN, marker: "E2E ui polish reply", viewport: { width: 460, height: 800 }, storage: { "pi-web:polyforge-dock-width": "460" }, routes: jobsRoutes });
+  // progress region any more. owner 有意变更 a running card's
+  // visible status is the duration alone (`23m`), the full status text lives in
+  // the element's title and the card's aria-label, and the card frame's colour
+  // is the job's status.
+  await check("S9", "Jobs card status: duration-only running text, frame colour by status, full status in title/aria", async () => {
+    const state = await openPage({ session: MAIN, marker: "E2E ui polish reply", viewport: { width: 460, height: 800 }, storage: { "pi-web:polyforge-dock-width": "460" }, routes: statusRoutes });
     try {
       await openJobsDock(state.page);
       const running = await cardGeometry(state.page, "wi_E2E198A", "task#9181", "Running");
@@ -555,10 +611,56 @@ try {
       // owner 有意变更 (reverses the 32px narration):
       // nothing in the card scrolls on its own — the narration area is gone.
       assert.equal(running.progress, null, "the running card has no progress region");
+      // owner 有意变更 duration-only visible text; the status word
+      // and age stay in the element's title and the card's aria-label.
+      assert.match(running.statusText, /^\d+m$/, `the running card's visible status is the duration alone (${JSON.stringify(running.statusText)})`);
+      assert.doesNotMatch(running.statusText, /running|运行中/i, "no status word in the running visible text");
+      assert.match(running.statusTitle, /^Running \d+m$/, `the running status element carries the full status as its title (${JSON.stringify(running.statusTitle)})`);
+      assert.equal(running.aria, ` · ${running.statusTitle}`, `the running card's aria-label keeps the slug and the full status (${JSON.stringify(running.aria)})`);
       const needs = await cardGeometry(state.page, "wi_E2E198B", "task#9182", "Needs input");
       assert.ok(needs.slug && needs.status, "the needs_input card's slug and badge did not render");
       assert.ok(Math.abs(needs.status.top - needs.slug.top) <= 2, `the needs_input badge is not on the slug's row (slug ${needs.slug.top}, badge ${needs.status.top})`);
       assert.ok(await state.page.locator('[data-pf-card-wi="wi_E2E198B"] [data-pf-needs-input]').count() === 1, "the needs_input badge lost its emphasized form");
+      assert.equal(needs.statusText, "Needs input", "a non-running card keeps its visible status text");
+      assert.equal(needs.statusTitle, "Needs input", "the needs_input badge carries the full status as its title");
+      assert.equal(needs.aria, " · Needs input", "the non-running aria-label keeps the slug and the full status");
+      // Oracle (b): the computed border colour per status equals the memo table;
+      // the three quiet states share one gray and differ from the four coloured
+      // ones, and every frame stays 1px.
+      const frames = await state.page.evaluate(() => {
+        const probe = document.createElement("span");
+        document.body.appendChild(probe);
+        const resolve = (value) => { probe.style.color = value; return getComputedStyle(probe).color; };
+        const expected = {
+          running: resolve("var(--accent)"),
+          needs_input: resolve("#d97706"),
+          completed: resolve("#16a34a"),
+          failed: resolve("#dc2626"),
+          queued: resolve("var(--text-dim)"),
+          paused: resolve("var(--text-dim)"),
+          cancelled: resolve("var(--text-dim)"),
+          unknown: resolve("var(--border)"),
+        };
+        const cards = Object.fromEntries([...document.querySelectorAll("[data-pf-card-wi]")].map((el) => {
+          const style = getComputedStyle(el);
+          return [el.getAttribute("data-pf-card-wi"), { border: style.borderTopColor, width: parseFloat(style.borderTopWidth) || 0 }];
+        }));
+        probe.remove();
+        return { expected, cards };
+      });
+      const statuses = { wi_E2E198A: "running", wi_E2E198B: "needs_input", wi_E2E198C: "completed", wi_E2E198D: "failed",
+        wi_E2E198E: "queued", wi_E2E198F: "paused", wi_E2E198G: "cancelled" };
+      for (const [wi, status] of Object.entries(statuses)) {
+        assert.ok(frames.cards[wi], `${wi} card renders`);
+        assert.equal(frames.cards[wi].border, frames.expected[status], `${wi} (${status}) frame colour is the status colour (${frames.cards[wi].border})`);
+        assert.equal(frames.cards[wi].width, 1, `${wi} keeps the 1px frame width (${frames.cards[wi].width})`);
+      }
+      const quiet = frames.expected.queued;
+      assert.equal(frames.expected.paused, quiet, "paused shares the quiet gray");
+      assert.equal(frames.expected.cancelled, quiet, "cancelled shares the quiet gray");
+      const loud = ["running", "needs_input", "completed", "failed"].map((status) => frames.expected[status]);
+      assert.equal(new Set(loud).size, 4, "the four coloured states are pairwise distinct");
+      assert.ok(!loud.includes(quiet) && quiet !== frames.expected.unknown, "the quiet gray differs from the four coloured and from the block default");
     } finally { await closePage(state); }
   });
 

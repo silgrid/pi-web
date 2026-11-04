@@ -134,7 +134,12 @@ if (rest[0] === "msg") {
     save(fresh);
     out({ id: row.id, seq: row.seq, conversation_id: c.id, sender_id: s.self, text: row.text, about_wi: row.about_wi, reply_to: row.reply_to });
   }
-  if (rest[1] === "analyze") { record(); out({ message_id: rest[2], conclusion: "ANALYSIS", model: "stub" }); }
+  if (rest[1] === "analyze") {
+    // the analyzer answers the task-backed structured shape.
+    record();
+    out({ message_id: rest[2], task_id: "task_252a1b2c3d4e5f67", project: "workbench", type: "other",
+      summary: "CONTACTS-ANALYSIS-SENTINEL", suggested_actions: [], model: "stub", duration: "1s" });
+  }
   die(2, "pf: msg: unknown action " + rest[1]);
 }
 die(2, "pf: unknown command");

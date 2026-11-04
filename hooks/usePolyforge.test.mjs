@@ -243,3 +243,12 @@ test("a membership change posts once and awaits the list re-read before resolvin
   assert.ok(body.indexOf("throw new Error") < body.indexOf("await refreshMessages();"), "only a success re-reads");
   assert.match(body, /await refreshMessages\(\);\s*$/, "resolves after the immediate re-read");
 });
+
+test("the analyses are structured, page-memory only, and cleared when the dock closes", () => {
+  assert.match(source, /const \[analyses, setAnalyses\] = useState<Record<string, PolyforgeAnalysis>>\(\{\}\);/);
+  assert.match(source, /parsePolyforgeAnalysis\(body\.analysis\)/, "the hook reads the one structured wire shape");
+  assert.match(source, /throw new PolyforgeAnalyzeError\(body\.error \?\? "the analyzer is unavailable", body\.upgrade === true\)/,
+    "a refusal carries pf's text and the below-floor marker");
+  assert.match(source, /if \(!panelOpen\) setAnalyses\(\{\}\);/, "closing the dock drops every card");
+  assert.doesNotMatch(source, /conclusion/, "no retired conclusion is read");
+});

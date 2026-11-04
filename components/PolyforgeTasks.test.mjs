@@ -18,7 +18,11 @@ test("the tab reads on gestures only: one list read per opening, one detail read
   assert.match(source, /if \(!isPolyforgeTaskId\(id\)\) return;/, "a malformed id is never fetched");
   assert.match(source, /if \(listReadRef\.current\) return;\s*listReadRef\.current = true;\s*readList\(\);/,
     "exactly one list read per mounted tab, even when mount effects re-run");
-  assert.equal((source.match(/readList\(\);/g) ?? []).length, 3, "the list is read at mount, on a count change and from the refresh button's click (the third read), nowhere else");
+  // owner 有意变更 the ↻ is the shared bar's action, so its
+  // click is onClick={readList}; the three reads are unchanged.
+  assert.equal((source.match(/readList\(\);/g) ?? []).length, 2, "the list is read at mount and on a count change, nowhere else");
+  assert.match(source, /<PolyforgeRefreshButton refreshing=\{listRefreshing\} onClick=\{readList\} data-pf-tasks-refresh=""/,
+    "the refresh button's click is the third read (shared action slot)");
 });
 
 test("one re-read per status task-count change while mounted; the mount value and a missing snapshot never read", () => {
@@ -49,8 +53,10 @@ test("the block clock runs only while a running task is listed, is cleared on un
 });
 
 test("the list is a responsive grid of discrete blocks with state dot + text, duration, project and a two-line summary", () => {
-  // owner 有意变更: Tasks and Jobs share one 150px track.
-  assert.match(source, /gridTemplateColumns: "repeat\(auto-fill, minmax\(150px, 1fr\)\)", gap: 8/, "the 150px column minimum shared with the Jobs cards: two blocks side by side at the 460px dock and the 375px sheet, one at the 340px dock");
+  // owner 有意变更: the Tasks grid has a 150px track
+  // minimum. owner 有意变更 it is the Tasks grid's own minimum —
+  // the job cards are fixed 180px, no longer the same number.
+  assert.match(source, /gridTemplateColumns: "repeat\(auto-fill, minmax\(150px, 1fr\)\)", gap: 8/, "the Tasks grid keeps its own 150px column minimum (decoupled from the 180px job cards,): two blocks side by side at the 460px dock and the 375px sheet, one at the 340px dock");
   assert.doesNotMatch(source, /minmax\(112px, 1fr\)/, "the old 112px Tasks minimum is gone");
   assert.match(source, /import \{ POLYFORGE_BLOCK_STYLE \} from "@\/lib\/panel-layout";/);
   const row = source.slice(source.indexOf("const renderRow = (row: PolyforgeTaskRow) => {"), source.indexOf("const grid = ("));
@@ -93,7 +99,10 @@ test("two sections — running and all — filtered by the client-side search ov
     "the search (and the filters) apply on the client and both sections render the filtered rows");
   assert.match(source, /t\("polyforge\.tasks\.running"\)[\s\S]*grid\(sections\.running\)[\s\S]*t\("polyforge\.tasks\.all"\)[\s\S]*grid\(sections\.all\)/,
     "正在运行 renders above 全部");
-  assert.match(source, /type="search"/, "the search box is a searchbox");
+  // owner 有意变更 the search box renders through the shared
+  // search bar; its state and client-side filter are unchanged.
+  assert.match(source, /<PolyforgeSearchBar[\s\S]*value=\{search\}[\s\S]*onChange=\{setSearch\}/,
+    "the search box is the shared bar's search input");
   for (const field of ["row.project", "row.state", "row.prompt_summary", "row.id"]) assert.ok(source.includes(field), `a row shows ${field}`);
 });
 
@@ -148,4 +157,13 @@ test("the read surface has no write action and every string is translated", () =
       assert.match(enSource, new RegExp(`"${key.replace(/\./g, "\\.")}": "\\S`), `${key} is translated in en`);
     }
   }
+});
+
+test("an external task id (the analysis card's link) opens that task's existing detail read once", () => {
+  assert.match(source, /openTaskId = null,\s*onOpenTaskHandled,/);
+  const start = source.indexOf("if (!openTaskId) return;");
+  assert.ok(start > 0, "the external open exists");
+  const effect = source.slice(start, source.indexOf("}, [openTaskId]);", start));
+  assert.match(effect, /openDetail\(openTaskId\);\s*onOpenTaskHandled\?\.\(\);/, "the same one detail read a row click makes, then handed back");
+  assert.match(source, /<span data-pf-task=\{selected\}/, "the open detail names its task");
 });

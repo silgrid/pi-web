@@ -21,6 +21,7 @@ import {
 import { formatCardDuration } from "@/lib/polyforge-cards-pure";
 import { POLYFORGE_BLOCK_STYLE } from "@/lib/panel-layout";
 import { MarkdownBody } from "./MarkdownBody";
+import { POLYFORGE_SEARCH_CONTROL_CLASS, PolyforgeRefreshButton, PolyforgeSearchBar } from "./PolyforgeSearchBar";
 
 /**
  * The dock's read-only Tasks surface: every task of the local
@@ -33,9 +34,10 @@ import { MarkdownBody } from "./MarkdownBody";
  * read per selection, plus one list re-read when the status snapshot's task
  * counts change while the tab is open; searching, filtering
  * and going back read nothing. adds the third list read: the
- * ↻ button on the search row re-reads the list on each click (the only way
- * to refresh while the count key holds). No poll, no
- * storage, and no spawn or cancel control: the tab is a read surface.
+ * search bar's square ↻ re-reads the list on each click (the only way to
+ * refresh while the count key holds); moves it into the shared
+ * search-bar action slot without changing the read or busy contract. No poll,
+ * no storage, and no spawn or cancel control: the tab is a read surface.
  *
  * the list is a responsive grid of discrete blocks (state
  * dot + text, duration, project, a two-line prompt summary). A running
@@ -98,11 +100,17 @@ function formatNs(ns: number): string {
 
 export function PolyforgeTasks({
   taskCountKey,
+  openTaskId = null,
+  onOpenTaskHandled,
 }: {
   /** the status snapshot's `running:completed` task counts
    *  (null without a snapshot). A change while this surface is mounted
    *  re-reads the list exactly once; the mount value never does. */
   taskCountKey: string | null;
+  /** a task to open from outside (an analysis card's task
+   *  link) — its existing detail read runs once, then onOpenTaskHandled. */
+  openTaskId?: string | null;
+  onOpenTaskHandled?: () => void;
 }) {
   const { t, locale } = useI18n();
   const [list, setList] = useState<ListResponse | null>(null);
@@ -213,6 +221,15 @@ export function PolyforgeTasks({
       });
   };
 
+  // an external open (the analysis card's task link) is the
+  // same one detail read a row click makes, once per handed id.
+  useEffect(() => {
+    if (!openTaskId) return;
+    openDetail(openTaskId);
+    onOpenTaskHandled?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- one detail read per handed id; openDetail is a plain closure
+  }, [openTaskId]);
+
   const back = () => {
     detailSeqRef.current += 1;
     setSelected(null);
@@ -249,7 +266,7 @@ export function PolyforgeTasks({
             style={{ background: "none", border: "none", color: "var(--text-muted)", cursor: "pointer", fontSize: 11, padding: 0 }}>
             ← {t("polyforge.tasks.back")}
           </button>
-          <span style={{ fontSize: 11, color: "var(--text-dim)", fontFamily: "var(--font-mono)" }}>{selected}</span>
+          <span data-pf-task={selected} style={{ fontSize: 11, color: "var(--text-dim)", fontFamily: "var(--font-mono)" }}>{selected}</span>
         </div>
         {detailError && <div style={{ padding: "8px 12px", color: "#dc2626", fontSize: 12 }}>{detailError}</div>}
         {!detail && !detailError && notice(t("polyforge.loading"))}
@@ -346,57 +363,40 @@ export function PolyforgeTasks({
   return (
     <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
       <div style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", flexShrink: 0 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          <input
-            type="search"
-            value={search}
-            onChange={(event) => setSearch(event.target.value)}
-            placeholder={t("polyforge.tasks.searchPlaceholder")}
-            aria-label={t("polyforge.tasks.searchPlaceholder")}
-            style={{ flex: 1, minWidth: 0, boxSizing: "border-box", background: "var(--bg)", color: "var(--text)", border: "1px solid var(--border)", borderRadius: 4, padding: "4px 6px", fontSize: 12 }}
-          />
-          {/* the one manual list re-read. It spins, disables
-              and reports busy while the newest read is in flight (the count
-              key's re-read included); disabled keeps a click from stacking
-              a second read. Only the list view renders it. */}
-          <button
-            type="button"
-            data-pf-tasks-refresh=""
-            onClick={() => { readList(); }}
-            disabled={listRefreshing}
-            aria-busy={listRefreshing}
-            title={listRefreshing ? t("polyforge.refreshing") : t("polyforge.refresh")}
-            aria-label={listRefreshing ? t("polyforge.refreshing") : t("polyforge.refresh")}
-            style={{ width: 26, height: 26, flexShrink: 0, boxSizing: "border-box", display: "flex", alignItems: "center", justifyContent: "center", padding: 0, background: "var(--bg-hover)", color: "var(--text-muted)", border: "1px solid var(--border)", borderRadius: 4, cursor: listRefreshing ? "default" : "pointer" }}
-          >
-            <svg className={listRefreshing ? "animate-spin" : undefined} width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-              <path d="M21 12a9 9 0 1 1-2.64-6.36L21 8" />
-              <path d="M21 3v5h-5" />
-            </svg>
-          </button>
-        </div>
-        <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
+        <PolyforgeSearchBar
+          value={search}
+          onChange={setSearch}
+          placeholder={t("polyforge.tasks.searchPlaceholder")}
+          label={t("polyforge.tasks.searchPlaceholder")}
+          action={(
+            /*'s one manual list re-read, now the shared action
+               slot. It spins, disables and reports busy while
+               the newest read is in flight (the count key's re-read included);
+               disabled keeps a click from stacking a second read. */
+            <PolyforgeRefreshButton refreshing={listRefreshing} onClick={readList} data-pf-tasks-refresh="" />
+          )}
+        >
           <select value={projectFilter} onChange={(event) => setProjectFilter(event.target.value)}
             aria-label={t("polyforge.tasks.filterProject")} title={t("polyforge.tasks.filterProject")}
-            style={{ flex: 1, minWidth: 0, background: "var(--bg)", color: "var(--text)", border: "1px solid var(--border)", borderRadius: 4, padding: "3px 4px", fontSize: 12 }}>
+            className={POLYFORGE_SEARCH_CONTROL_CLASS}>
             <option value="">{t("polyforge.tasks.filterAllProjects")}</option>
             {projects.map((project) => <option key={project} value={project}>{project}</option>)}
           </select>
           <select value={stateFilter} onChange={(event) => setStateFilter(event.target.value as PolyforgeTaskStateFilter)}
             aria-label={t("polyforge.tasks.filterState")} title={t("polyforge.tasks.filterState")}
-            style={{ flex: 1, minWidth: 0, background: "var(--bg)", color: "var(--text)", border: "1px solid var(--border)", borderRadius: 4, padding: "3px 4px", fontSize: 12 }}>
+            className={POLYFORGE_SEARCH_CONTROL_CLASS}>
             {TASK_STATE_FILTERS.map((state) => (
               <option key={state} value={state}>{state === "all" ? t("polyforge.tasks.all") : t(`polyforge.tasks.state.${state}`)}</option>
             ))}
           </select>
           <select value={reporterFilter ?? ""} onChange={(event) => setReporterFilter(event.target.value || null)}
             aria-label={t("polyforge.tasks.filterReporter")} title={t("polyforge.tasks.filterReporter")}
-            style={{ flex: 1, minWidth: 0, background: "var(--bg)", color: "var(--text)", border: "1px solid var(--border)", borderRadius: 4, padding: "3px 4px", fontSize: 12 }}>
+            className={POLYFORGE_SEARCH_CONTROL_CLASS}>
             <option value="">{t("polyforge.tasks.filterAllReporters")}</option>
             {reporters.humans.map((reporter) => <option key={reporter} value={reporter}>{reporter}</option>)}
             {reporters.machine && <option value={TASK_REPORTER_MACHINE}>{t("polyforge.tasks.reporterMachine")}</option>}
           </select>
-        </div>
+        </PolyforgeSearchBar>
       </div>
       <div style={{ flex: 1, minHeight: 0, overflowY: "auto", display: "flex", flexDirection: "column" }}>
         {listError && <div style={{ padding: "8px 12px", color: "#dc2626", fontSize: 12 }}>{listError}</div>}

@@ -1,40 +1,18 @@
-// The dedicated claude config dir pi-web runs every claude child with
-// `<pi agent dir>/claude`, following PI_CODING_AGENT_DIR,
-// never the service user's ~/.claude. pi-web creates it with a credential-free
-// settings.json and never reads or rewrites what the user puts there.
-import { existsSync, mkdirSync, readdirSync, unlinkSync } from "fs";
-import { join } from "path";
-import { writePrivateFileAtomicSync } from "./atomic-file";
-import { defaultAgentDir } from "./http-dispatcher";
+// Where the system claude keeps its transcripts: the
+// CLAUDE_CONFIG_DIR pi-web inherited, else ~/.claude — the user's own claude
+// config, exactly the dir a `claude` run from pi-web's terminal would use.
+// pi-web creates nothing here: it only finds a session's transcript by id (and
+// its subagents' sidecars beside it,) and, on delete, removes that
+// one transcript file. The retired `<pi agent dir>/claude` of
+// is neither read, created, migrated nor deleted.
+import { existsSync, readdirSync, unlinkSync } from "fs";
+import { homedir } from "os";
+import { dirname, join } from "path";
 
-/** What a fresh settings.json holds: nothing, so no credential can be in it. */
-export const DEFAULT_CLAUDE_SETTINGS = "{}\n";
-
-export function claudeConfigDir(agentDir: string = defaultAgentDir()): string {
-  return join(agentDir, "claude");
-}
-
-export function claudeSettingsPath(agentDir?: string): string {
-  return join(claudeConfigDir(agentDir), "settings.json");
-}
-
-/**
- * Creates the dir (0700) and, only when absent, its settings.json (0600, atomic).
- * An existing file keeps every byte. Returns the dir.
- */
-export function ensureClaudeConfigDir(agentDir?: string): string {
-  const dir = claudeConfigDir(agentDir);
-  mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const settings = join(dir, "settings.json");
-  if (!existsSync(settings)) {
-    try {
-      writePrivateFileAtomicSync(settings, DEFAULT_CLAUDE_SETTINGS);
-    } catch (error) {
-      // Another request created it meanwhile: theirs stays.
-      if (!existsSync(settings)) throw error;
-    }
-  }
-  return dir;
+/** The inherited `CLAUDE_CONFIG_DIR` (trimmed) when set, else `~/.claude`. */
+export function claudeConfigDir(env: NodeJS.ProcessEnv = process.env): string {
+  const inherited = env.CLAUDE_CONFIG_DIR?.trim();
+  return inherited ? inherited : join(homedir(), ".claude");
 }
 
 const SESSION_ID_PATTERN = /^[A-Za-z0-9-]{1,128}$/;
@@ -43,9 +21,9 @@ const SESSION_ID_PATTERN = /^[A-Za-z0-9-]{1,128}$/;
  * The transcript claude writes for `sessionId`: `<dir>/projects/<any>/<id>.jsonl`.
  * Looked up by id, never by guessing claude's cwd encoding. Null when absent.
  */
-export function claudeTranscriptFile(sessionId: string, agentDir?: string): string | null {
+export function claudeTranscriptFile(sessionId: string, configDir: string = claudeConfigDir()): string | null {
   if (!SESSION_ID_PATTERN.test(sessionId)) return null;
-  const projects = join(claudeConfigDir(agentDir), "projects");
+  const projects = join(configDir, "projects");
   let dirs: string[];
   try {
     dirs = readdirSync(projects, { withFileTypes: true }).filter((entry) => entry.isDirectory()).map((entry) => entry.name);
@@ -59,9 +37,38 @@ export function claudeTranscriptFile(sessionId: string, agentDir?: string): stri
   return null;
 }
 
+const SIDECAR_PATTERN = /^agent-([A-Za-z0-9_-]{1,128})\.jsonl$/;
+
+/** One subagent's sidecar files: claude's `agent-<id>.jsonl` and its `agent-<id>.meta.json`. */
+export interface ClaudeSidecarFile {
+  agentId: string;
+  file: string;
+  metaFile: string;
+}
+
+/**
+ * The sidecars claude wrote for a session's subagents, every depth alike:
+ * `<transcript dir>/<id>/subagents/agent-<agent id>.jsonl` (+ `.meta.json`).
+ * Empty when the transcript or the directory is absent.
+ */
+export function claudeSidecarFiles(sessionId: string, configDir: string = claudeConfigDir(), transcript: string | null = claudeTranscriptFile(sessionId, configDir)): ClaudeSidecarFile[] {
+  if (!transcript || !SESSION_ID_PATTERN.test(sessionId)) return [];
+  const dir = join(dirname(transcript), sessionId, "subagents");
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return [];
+  }
+  return names.sort().flatMap((name) => {
+    const match = SIDECAR_PATTERN.exec(name);
+    return match ? [{ agentId: match[1], file: join(dir, name), metaFile: join(dir, `agent-${match[1]}.meta.json`) }] : [];
+  });
+}
+
 /** Removes that session's transcript only. True when one was removed. */
-export function removeClaudeTranscript(sessionId: string, agentDir?: string): boolean {
-  const file = claudeTranscriptFile(sessionId, agentDir);
+export function removeClaudeTranscript(sessionId: string, configDir?: string): boolean {
+  const file = claudeTranscriptFile(sessionId, configDir);
   if (!file) return false;
   try {
     unlinkSync(file);

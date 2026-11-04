@@ -12,6 +12,10 @@
 // the card titles follow the merged 工作区 / Workspace card and
 // the workflow card, and the bottom check targets the page's real last block
 // (the footer) instead of a configured key, which no longer ends the page.
+// the [daemon] keys are a zone of the one cli.toml card, headed
+// by the literal section "cli.toml [daemon]"; the separate card is gone.
+// the summarize keys are the cli.toml card's third zone,
+// "cli.toml [summarize]"; the 工作区 card keeps the mapping only.
 //
 //   node e2e/polyforge-config-viewport.mjs
 import assert from "node:assert/strict";
@@ -222,10 +226,12 @@ try {
   };
 
   await check("grouped configuration cards keep their titles", async () => {
-    for (const title of ["cli.toml", "cli.toml · [daemon]", "Workspace", "Workflow"]) {
+    for (const title of ["cli.toml", "Workspace", "Workflow"]) {
       assert.equal(await content.locator(`section[aria-label="${title}"] .polyforge-config-card-title`).first().innerText(), title, `missing group card title: ${title}`);
     }
-    for (const gone of ["Workspace mapping", "Summarize (.polyforge.yaml)", "Declared step candidates"]) {
+    const zones = await content.locator('section[aria-label="cli.toml"] .polyforge-config-zone-title').allInnerTexts();
+    assert.deepEqual(zones.map((zone) => zone.trim()), ["cli.toml", "cli.toml [daemon]", "cli.toml [summarize]"], "the cli.toml card does not head its three zones with their literal sections");
+    for (const gone of ["Workspace mapping", "Summarize (.polyforge.yaml)", "Declared step candidates", "cli.toml · [daemon]"]) {
       assert.equal(await content.locator(`section[aria-label="${gone}"]`).count(), 0, `the retired card ${gone} still renders`);
     }
   });

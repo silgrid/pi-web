@@ -23,6 +23,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
 import { startNextServer } from "./next-server.mjs";
+import { openPolyforgeDock as openDock, polyforgeDock as dock } from "./polyforge-dock.mjs";
 import { NAV_MS } from "./timeouts.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
@@ -139,8 +140,6 @@ async function check(id, fn) {
 const RE_WORK = /工单|work/i, RE_TASKS = /任务|tasks/i;
 const BARRIER = "/__e2e_request_barrier";
 let browser; let base; let stop = async () => {};
-const dock = (page) => page.locator("#polyforge-dock").or(page.getByRole("dialog", { name: /polyforge/i })).first();
-const pfButton = (page) => page.getByRole("button", { name: /^(?!.*close).*polyforge/i }).first();
 const topTab = (page, re) => dock(page).locator('[role="tablist"]').first().getByRole("tab").filter({ hasText: re }).first();
 const subTab = (page, re) => dock(page).getByRole("tab", { name: re }).or(dock(page).getByRole("button", { name: re })).last();
 const taskBlock = (page, id) => dock(page).locator(`[data-pf-task="${id}"]`).first();
@@ -168,19 +167,6 @@ async function waitFor(fn, label, ms = 15_000) {
   const deadline = Date.now() + ms; let last;
   while (Date.now() < deadline) { try { last = await fn(); if (last) return last; } catch (error) { last = error.message; } await delay(200); }
   throw new Error(`${label} (last: ${last})`);
-}
-async function openDock(page) {
-  // the toggle renders only after the mount-time status probe
-  // (`pfPresent`) and, since, is resident at ≤480px / inline
-  // wider. Never open ⋯ to reveal it: ⋯'s overlay covers that slot and
-  // intercepts the click. Wait for the toggle, close ⋯ if it is open, click.
-  const more = page.locator('[data-mobile-toolbar-more="true"]');
-  await waitFor(async () => (await pfButton(page).count()) > 0, "the Polyforge toggle renders", 20_000);
-  if ((await more.count()) > 0 && (await more.getAttribute("aria-expanded")) === "true") {
-    await more.click();
-    await page.locator('[data-mobile-toolbar-actions="true"]').waitFor({ state: "hidden", timeout: 10_000 });
-  }
-  await pfButton(page).click(); await dock(page).waitFor({ timeout: 20_000 }); return dock(page);
 }
 async function openWork(page) {
   await openDock(page);

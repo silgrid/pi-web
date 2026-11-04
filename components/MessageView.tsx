@@ -1,8 +1,10 @@
 "use client";
 
-import { Fragment, memo, useState, useRef, useEffect, useMemo, type CSSProperties } from "react";
+import { Fragment, memo, useContext, useState, useRef, useEffect, useMemo, type CSSProperties } from "react";
 import ReactMarkdown from "react-markdown";
 import { MarkdownBody } from "./MarkdownBody";
+import { SafeMarkdownBody } from "./SafeMarkdownBody";
+import { TOOL_DURATION_MIN_MS, ToolCallCard, ToolCallCardStat, formatToolDuration } from "./ToolCallCard";
 import { ImagePreview } from "./ImagePreview";
 import { ThinkingIcon } from "./ThinkingIcon";
 import { copyText } from "@/lib/clipboard";
@@ -22,6 +24,8 @@ import { skillExpansionContent, skillExpansionToCommand } from "@/lib/slash-disp
 import type { SubagentToolDetails } from "@/lib/subagent-extension";
 import { CODEMODE_TOOL_NAME, codemodeCalls, codemodeScript, codemodeScriptPreview, stripCodemodeHeader } from "@/lib/codemode-view";
 import { CodemodeCallList } from "./CodemodeToolView";
+import { ClaudeSubagentContext, ClaudeSubagentRow, type ClaudeSubagentEntryRenderer } from "./ClaudeSubagentRow";
+import { isClaudeSubagentToolName } from "@/lib/claude-subagent-view";
 import { toolFieldsOfInput, type ToolField } from "@/lib/tool-fields";
 import { parseStreamingJson } from "@earendil-works/pi-ai/utils/json-parse";
 import { mcpToolLabel, prettyMcpResultText } from "@/lib/mcp-tool-display";
@@ -95,68 +99,6 @@ function estimateUpdatedTokens(previous: TokenEstimateCacheEntry | undefined, te
 
 const MAX_THINKING_CACHE_ENTRIES = 100;
 const thinkingContentCache = new Map<string, Promise<string>>();
-
-// Messages larger than this skip markdown rendering entirely. react-markdown +
-// KaTeX + syntax highlighting on multi-hundred-KB payloads (e.g. pasted HAR or
-// log dumps) freezes the browser main thread.
-const MAX_MARKDOWN_CHARS = 100_000;
-
-function formatMessageBytes(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)} MB`;
-  if (n >= 1_000) return `${Math.round(n / 1_000)} KB`;
-  return `${n} B`;
-}
-
-/**
- * MarkdownBody with an oversized-content guard: huge messages render as a
- * click-to-reveal plain-text <pre> instead of running the markdown pipeline.
- */
-function SafeMarkdownBody({ children, className, ...props }: React.ComponentProps<typeof MarkdownBody>) {
-  const { t } = useI18n();
-  const [showRaw, setShowRaw] = useState(false);
-
-  if (children.length <= MAX_MARKDOWN_CHARS) {
-    return <MarkdownBody className={className} {...props}>{children}</MarkdownBody>;
-  }
-  if (!showRaw) {
-    return (
-      <button
-        onClick={() => setShowRaw(true)}
-        style={{
-          display: "block",
-          width: "100%",
-          margin: "4px 0",
-          padding: "7px 10px",
-          border: "1px solid var(--border)",
-          borderRadius: 6,
-          background: "var(--bg-panel)",
-          color: "var(--text-muted)",
-          cursor: "pointer",
-          fontSize: 12,
-          textAlign: "left",
-        }}
-      >
-        ⚠ {t("i18n.largeMessageReveal", { size: formatMessageBytes(children.length) })}
-      </button>
-    );
-  }
-  return (
-    <div className={className} style={{ maxHeight: 420, overflow: "auto", fontSize: "calc(12px + var(--chat-font-size-offset, 0px))", lineHeight: 1.5 }}>
-      <pre
-        style={{
-          margin: 0,
-          padding: "8px 10px",
-          whiteSpace: "pre-wrap",
-          wordBreak: "break-word",
-          fontFamily: "var(--font-mono)",
-          color: "var(--text-muted)",
-        }}
-      >
-        {children}
-      </pre>
-    </div>
-  );
-}
 
 // Cap the user "sent" bubble's height so an abnormally long message does not
 // push the conversation off screen; overflow scrolls inside the bubble.
@@ -1002,6 +944,8 @@ function AssistantMessageView({
 }
 
 function BlockView({ block, searchTarget, toolResults, isStreaming, streamingDuration, toolCallDurations, cwd, onOpenFile, onOpenSubagent, sessionId, entryId, blockIndex }: { block: AssistantContentBlock; searchTarget?: boolean; toolResults?: Map<string, ToolResultMessage>; isStreaming?: boolean; streamingDuration?: number; toolCallDurations?: Map<string, number>; cwd?: string; onOpenFile?: (filePath: string, page?: number) => void; onOpenSubagent?: (sessionId: string, label: string) => void; sessionId?: string; entryId?: string; blockIndex: number }) {
+  // A claude session's runs; empty elsewhere, so every other card is unchanged.
+  const claudeSubagents = useContext(ClaudeSubagentContext);
   if (block.type === "text") {
     return <div data-message-text data-search-target={searchTarget || undefined}><TextBlock block={block as TextContent} isStreaming={isStreaming} cwd={cwd} onOpenFile={onOpenFile} /></div>;
   }
@@ -1010,6 +954,13 @@ function BlockView({ block, searchTarget, toolResults, isStreaming, streamingDur
   }
   if (block.type === "toolCall") {
     const tc = block as ToolCallContent;
+    const run = isClaudeSubagentToolName(tc.toolName) ? claudeSubagents[tc.toolCallId] : undefined;
+    if (run) {
+      const renderEntry: ClaudeSubagentEntryRenderer = (message, entryToolResults, key) => (
+        <MessageView key={key} message={message} toolResults={entryToolResults} cwd={cwd} onOpenFile={onOpenFile} sessionId={sessionId} />
+      );
+      return <ClaudeSubagentRow run={run} toolName={tc.toolName} renderEntry={renderEntry} />;
+    }
     const result = toolResults?.get(tc.toolCallId);
     const duration = toolCallDurations?.get(tc.toolCallId);
     return <ToolCallBlock block={tc} result={result} duration={duration} onOpenSubagent={onOpenSubagent} />;
@@ -1170,19 +1121,9 @@ function recordedDurationMs(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
 }
 
-/** Below this a tool card shows no time: it would read 0.0s on every quick read or search. */
-const TOOL_DURATION_MIN_MS = 100;
-
-/** A tool's run time as the pi CLI's "Took" writes it: 2.4s, then 3m 5s, then 1h 2m 5s. */
-export function formatToolDuration(ms: number): string {
-  const seconds = ms / 1000;
-  if (seconds < 60) return `${seconds.toFixed(1)}s`;
-  const totalSeconds = Math.floor(seconds);
-  const minutes = Math.floor(totalSeconds / 60);
-  const remainder = totalSeconds % 60;
-  if (minutes < 60) return `${minutes}m ${remainder}s`;
-  return `${Math.floor(minutes / 60)}h ${minutes % 60}m ${remainder}s`;
-}
+// The card shell, the duration format and its 100 ms floor are shared with the
+// Polyforge progress cards (components/ToolCallCard.tsx,).
+export { formatToolDuration };
 
 function ToolCallBlock({ block, result, duration, onOpenSubagent }: { block: ToolCallContent; result?: ToolResultMessage; duration?: number; onOpenSubagent?: (sessionId: string, label: string) => void }) {
   const { t } = useI18n();
@@ -1238,75 +1179,40 @@ function ToolCallBlock({ block, result, duration, onOpenSubagent }: { block: Too
   const codemodeCallCount = codemode ? codemode.calls.length + codemode.omitted : 0;
 
   return (
-    <div
-      style={{
-        borderRadius: 7,
-        overflow: "hidden",
-        fontSize: 12,
-        border: isError ? "1px solid rgba(248,113,113,0.45)" : "1px solid rgba(34,197,94,0.25)",
-        background: isError ? "rgba(248,113,113,0.05)" : "rgba(34,197,94,0.04)",
-      }}
-    >
-      {/* ── Tool call header ── */}
-      <div style={{ display: "flex", alignItems: "stretch", minWidth: 0 }}>
-        <button
-          onClick={toggleExpanded}
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 7,
-            flex: 1,
-            minWidth: 0,
-            padding: "6px 10px",
-            background: "none",
-            border: "none",
-            color: "var(--text-muted)",
-            cursor: "pointer",
-            fontSize: 12,
-            textAlign: "left",
-          }}
-        >
-          <span
-            title={mcpLabel ? block.toolName : undefined}
-            style={{ color: isError ? "#f87171" : "#16a34a", fontFamily: "var(--font-mono)", fontWeight: 600, fontSize: 11, flexShrink: 0 }}
-          >
-            {mcpLabel ? (
-              <>
-                <span style={{ fontWeight: 500, opacity: 0.75 }}>{mcpLabel.server}/</span>
-                {mcpLabel.tool}
-              </>
-            ) : block.toolName}
-          </span>
-          <span style={{ color: "var(--text-dim)", fontFamily: "var(--font-mono)", fontSize: 11, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, minWidth: 0 }}>
-            {isStreamingInput
-              ? t("chat.generatingToolInput")
-              : (patchLabel ?? (codemode ? codemodeScriptPreview(codemode.code) : getToolPreview(block, resultPatchPath)))}
-          </span>
-          {codemodeCallCount > 0 && (
-            <span style={{ fontSize: 11, color: "var(--text-dim)", flexShrink: 0, fontVariantNumeric: "tabular-nums" }}>
-              {codemodeCallCount === 1 ? t("codemode.callCountOne") : t("codemode.callCount", { count: codemodeCallCount })}
-            </span>
-          )}
-          {duration !== undefined && (
-            <span style={{ fontSize: 11, color: "var(--text-dim)", flexShrink: 0, fontVariantNumeric: "tabular-nums" }}>{formatToolDuration(duration)}</span>
-          )}
-          <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="var(--text-dim)" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, transform: expanded ? "rotate(180deg)" : "none", transition: "transform 0.15s" }}>
-            <polyline points="2 3.5 5 6.5 8 3.5" />
-          </svg>
-        </button>
-        {subagent && onOpenSubagent && (
-          <button
-            type="button"
-            onClick={() => onOpenSubagent(subagent.sessionId, subagent.description || subagent.profile)}
-            title={t("subagent.openTab")}
-            aria-label={t("subagent.openTab")}
-            style={{ width: 32, display: "grid", placeItems: "center", border: "none", borderLeft: "1px solid var(--border)", background: "none", color: "var(--text-muted)", cursor: "pointer", flexShrink: 0 }}
-          >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><rect x="5" y="7" width="14" height="11" rx="2" /><path d="M9 11h.01M15 11h.01M9 15h6M12 7V4M10 4h4" /></svg>
-          </button>
+    <ToolCallCard
+      isError={isError}
+      expanded={expanded}
+      onToggle={toggleExpanded}
+      name={mcpLabel ? (
+        <>
+          <span style={{ fontWeight: 500, opacity: 0.75 }}>{mcpLabel.server}/</span>
+          {mcpLabel.tool}
+        </>
+      ) : block.toolName}
+      nameTitle={mcpLabel ? block.toolName : undefined}
+      preview={isStreamingInput
+        ? t("chat.generatingToolInput")
+        : (patchLabel ?? (codemode ? codemodeScriptPreview(codemode.code) : getToolPreview(block, resultPatchPath)))}
+      stats={<>
+        {codemodeCallCount > 0 && (
+          <ToolCallCardStat>
+            {codemodeCallCount === 1 ? t("codemode.callCountOne") : t("codemode.callCount", { count: codemodeCallCount })}
+          </ToolCallCardStat>
         )}
-      </div>
-
+        {duration !== undefined && <ToolCallCardStat>{formatToolDuration(duration)}</ToolCallCardStat>}
+      </>}
+      aside={subagent && onOpenSubagent && (
+        <button
+          type="button"
+          onClick={() => onOpenSubagent(subagent.sessionId, subagent.description || subagent.profile)}
+          title={t("subagent.openTab")}
+          aria-label={t("subagent.openTab")}
+          style={{ width: 32, display: "grid", placeItems: "center", border: "none", borderLeft: "1px solid var(--border)", background: "none", color: "var(--text-muted)", cursor: "pointer", flexShrink: 0 }}
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><rect x="5" y="7" width="14" height="11" rx="2" /><path d="M9 11h.01M15 11h.01M9 15h6M12 7V4M10 4h4" /></svg>
+        </button>
+      )}
+    >
       {/* ── Expanded: input args (only when no richer view exists); a codemode script in place of its JSON ── */}
       {expanded && (isStreamingInput || !isEditTool) && !patchFiles && (
         toolFields ? (
@@ -1375,7 +1281,7 @@ function ToolCallBlock({ block, result, duration, onOpenSubagent }: { block: Too
           />
         )
       )}
-    </div>
+    </ToolCallCard>
   );
 }
 

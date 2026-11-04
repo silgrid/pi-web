@@ -161,19 +161,20 @@ test("the form enforces pf's schema client-side so 0 and 9 are unreachable", () 
   // The guard lives in the browser-safe schema module: a value import of the
   // server read module would pull node:child_process into the client bundle.
   // the same browser-safe module also carries the step-key guard.
-  assert.match(source, /import \{ configValueError, stepValueError, stepWriteKey \} from "@\/lib\/polyforge-config-schema";/, "the guard comes from the browser-safe module");
+  // the key-set constants come from that module too (one fact for the form and the route).
+  assert.match(source, /import \{[^}]*\bconfigValueError,[^}]*\bstepValueError,[^}]*\} from "@\/lib\/polyforge-config-schema";/, "the guard comes from the browser-safe module");
   assert.doesNotMatch(source, /import \{ configValueError \} from "@\/lib\/polyforge-config";/, "never value-import the server read module");
   assert.match(source, /min=\{item\.schema\?\.min\}/);
   assert.match(source, /max=\{item\.schema\?\.max\}/);
   // And the read snapshot (values, api_key as {set}) rides expect_state.
   assert.match(source, /function expectedValues\(/);
-  assert.match(source, /file_sha256: hash \?\? null, values: expectedValues/);
+  assert.match(source, /file_sha256: config\.file\?\.sha256 \?\? null, values: expectedValues\(config\.items\)/);
 });
 
 test("the daemon column says the daemon is not running, and only the three live keys carry it", () => {
   assert.match(source, /isDaemonColumnKey/);
   assert.match(source, /polyforge\.settings\.configDaemonDown/);
-  assert.match(source, /config\.daemonReachable === false/);
+  assert.match(source, /config\?\.daemonReachable === false/);
 });
 
 test("visible reasons: capability floor, unmapped cwd and an incomplete workflow read are text", () => {
@@ -186,20 +187,41 @@ test("visible reasons: capability floor, unmapped cwd and an incomplete workflow
   assert.match(source, /polyforge\.settings\.configMachineScope/);
 });
 
-test("items render in source cards with a title and a visible one-line hint", () => {
-  assert.match(source, /configCards\(groupConfigItems\(config\.items \?\? \[\]\)\)\.map\(\(group\) =>/);
-  assert.match(source, /<p className="polyforge-config-card-title">\{t\(GROUP_TITLE\[group\.id\]\)\}<\/p>/);
-  assert.match(source, /<p className="polyforge-config-card-hint">\{t\(GROUP_HINT\[group\.id\]\)\}<\/p>/);
-  // the 工作区 card replaces the mapping and summarize cards.
-  assert.match(source, /workspace: "polyforge\.settings\.workspaceTitle",/, "the merged card's title");
-  assert.match(source, /workspace: "polyforge\.settings\.configGroupWorkspaceHint",/, "the merged card's hint");
-  assert.doesNotMatch(source, /configGroupSummarize|configGroupWorkspace"/, "no summarize card and no old mapping-card title");
-  for (const id of ["Flat", "Daemon"]) {
-    assert.match(source, new RegExp(`"polyforge\\.settings\\.configGroup${id}"`), `card title ${id}`);
-    assert.match(source, new RegExp(`"polyforge\\.settings\\.configGroup${id}Hint"`), `card hint ${id}`);
-  }
-  // The daemon card uses pf's five [daemon] keys; the daemon column stays the three live keys.
+test("/#290: one cli.toml card holds the top-level, [daemon] and [summarize] zones, each headed by its literal section; the 工作区 card keeps the mapping", () => {
+  assert.match(source, /const cards = config\?\.capable \? configCards\(groupConfigItems\(config\.items \?\? \[\]\)\) : null;/);
+  assert.match(source, /cli: \(\["flat", "daemon", "summarize"\] as const\)\.map\(\(id\) => \(\{ id, items: itemsOf\(id\) \}\)\)/, "the three zones, top-level first");
+  assert.match(source, /workspace: itemsOf\("workspace"\),/, "the 工作区 card holds the mapping rows only");
+  // Literal file sections, never translated.
+  assert.match(source, /flat: "cli\.toml",\s*\n\s*daemon: "cli\.toml \[daemon\]",\s*\n\s*summarize: "cli\.toml \[summarize\]",/);
+  assert.match(source, /<p className="polyforge-config-zone-title">\{ZONE_TITLE\[zone\.id\]\}<\/p>/);
+  assert.match(source, /<div key=\{zone\.id\} className=\{`polyforge-config-zone is-\$\{zone\.id\}`\}>/);
+  // One card: one section opens before the zone loop, the loop lives inside it.
+  const cli = source.slice(source.indexOf('className="polyforge-config-card polyforge-config-cli"'), source.indexOf("the connection-key confirmation renders"));
+  assert.ok(cli.length > 0, "the cli.toml card exists");
+  assert.equal((cli.match(/<section /g) ?? []).length, 0, "no second card inside the cli.toml card");
+  assert.match(cli, /\{cards\.cli\.map\(\(zone\) => \{/);
+  assert.match(cli, /<p className="polyforge-config-card-title">\{t\("polyforge\.settings\.configGroupFlat"\)\}<\/p>/);
+  assert.match(cli, /<p className="polyforge-config-card-hint">\{t\("polyforge\.settings\.configGroupFlatHint"\)\}<\/p>/);
+  assert.match(cli, /\{hasDaemon && <p className="polyforge-config-card-hint">\{t\("polyforge\.settings\.configGroupDaemonHint"\)\}<\/p>\}/);
+  assert.doesNotMatch(cli, /workspaceSectionPath/, "the mapping stays in the 工作区 card");
+  assert.match(cli, /\{memoryPolicyPaths\.map\(\(\[path, entries\]\) => \(/, "the read-only memory_policy blocks render inside the cli.toml card");
+  // The 工作区 card keeps its #216 title/hint.
+  assert.match(source, /aria-label=\{t\("polyforge\.settings\.workspaceTitle"\)\}/);
+  assert.match(source, /t\("polyforge\.settings\.configGroupWorkspaceHint"\)/);
+  assert.doesNotMatch(source, /configGroupSummarize|configGroupWorkspace"|configGroupDaemon"/, "no summarize card, no old mapping-card title, no separate [daemon] card");
+  // The daemon column stays the three live keys.
   assert.match(source, /function isDaemonColumnKey\(key: string\): boolean \{\s*\n\s*return key === "max_concurrent_jobs" \|\| key === "step_timeout" \|\| key === "stall_window";/);
+});
+
+test(" (owner 有意变更): cli.toml zones are de-boxed subheadings over one divider while the value column keeps one page-wide x", async () => {
+  const css = await readFile(new URL("../app/settings.css", import.meta.url), "utf8");
+  const zone = css.slice(css.indexOf(".polyforge-config-zone {"), css.indexOf("}", css.indexOf(".polyforge-config-zone {")));
+  assert.doesNotMatch(zone, /margin-left:/, "no zone indentation ( de-boxed the zones)");
+  assert.doesNotMatch(zone, /background:/, "no zone background tint (no grey box in a grey card)");
+  assert.match(zone, /border-top: 1px solid var\(--border\);/, "one thin divider heads the zone");
+  assert.doesNotMatch(css, /--polyforge-zone-inset/, "the zone inset is gone");
+  assert.match(css, /\.polyforge-config-zone \.polyforge-config-grid \{[^}]*grid-template-columns: var\(--polyforge-col-key\) var\(--polyforge-col-class\) var\(--polyforge-col-value\);/, "the zone keeps the page's key track");
+  assert.match(css, /\.polyforge-config-zone-title \{/);
 });
 
 test("each card declares only its effective columns and the page shares one column system", () => {
@@ -208,7 +230,8 @@ test("each card declares only its effective columns and the page shares one colu
   }
   // Only the daemon card declares the daemon column: no header and no cell in
   // every other card (the #88 five-cells-in-every-row rule is reversed).
-  assert.match(source, /const hasDaemon = group\.id === "daemon";/);
+  assert.match(source, /const hasDaemon = zone\.id === "daemon";/);
+  assert.match(source, /const hasDaemon = zone === "daemon";/, "a row's daemon cell is decided by its zone");
   assert.match(source, /className=\{`polyforge-config-grid/);
   assert.match(source, /hasDaemon \? " has-daemon" : ""/);
   assert.match(source, /\{hasDaemon && <span>\{t\("polyforge\.settings\.configColDaemon"\)\}<\/span>\}/);
@@ -248,7 +271,8 @@ test("the Save action sits beside its input, and model lists render as chips", (
   // summarize.models is a chip list with an add input, never String(array).
   assert.match(source, /function isModelListKey\(item: PolyforgeConfigItem\): boolean \{/);
   assert.match(source, /kind === "model-list" \|\| item\.key === "summarize\.models"/);
-  assert.match(source, /<span className="polyforge-config-chip-label">\{model\}<\/span>/);
+  // the chip label renders its token with separator <wbr>s.
+  assert.match(source, /<span className="polyforge-config-chip-label"><BreakableToken text=\{model\} \/><\/span>/);
   assert.match(source, /polyforge\.settings\.configAddModel/);
   assert.match(source, /polyforge\.settings\.configRemoveModel/);
   // The save path still hands a comma string to formValue, which splits it.
@@ -261,10 +285,10 @@ test("a workspace row shows the path and project chips, never the raw TOML heade
   assert.match(source, /shortenPath\(workspacePath\)/);
   assert.match(source, /const projects = workspaceProjects\(item\.value\);/);
   assert.match(source, /\{projects\.map\(\(project\) =>/);
-  assert.match(source, /<span key=\{project\} className="polyforge-config-chip">\{project\}<\/span>/);
+  assert.match(source, /<span key=\{project\} className="polyforge-config-chip"><BreakableToken text=\{project\} \/><\/span>/);
   assert.match(source, /aria-label=\{t\("polyforge\.settings\.configProjects"\)\}/);
   // The raw key renders only when the header did not parse (a visible degradation).
-  assert.match(source, /workspacePath !== null\s*\n\s*\? <span className="polyforge-config-workspace-path">/);
+  assert.match(source, /workspacePath !== null\s*\n\s*\? <span className="polyforge-config-workspace-path"><BreakableToken text=\{shortenPath\(workspacePath\)\} \/>/);
 });
 
 test("the grid CSS shares fixed tracks and stacks on phones", async () => {
@@ -291,14 +315,18 @@ test("at <=640px the key and class badge share a row and the values span the row
   assert.match(block, /\.polyforge-config-class \{ justify-self: end; \}/, "the badge sits at the row's right end");
   assert.match(block, /\.polyforge-config-badge \{ max-width: none; \}/, "the badge is never squeezed");
   assert.match(block, /\.polyforge-config-file,\s*\.polyforge-config-daemon,\s*\.polyforge-config-row\.no-daemon \.polyforge-config-file \{ grid-column: 1 \/ -1; \}/, "values span the row below");
-  assert.doesNotMatch(block, /grid-template-columns: minmax\(0, 1fr\);\s*gap: 4px;/, "no single stacked column any more");
+  assert.doesNotMatch(block, /\.polyforge-config-row,\s*\.polyforge-config-row\.no-daemon \{\s*grid-template-columns: minmax\(0, 1fr\);/, "the config rows never stack to one column");
+  // (owner 有意变更) P4: the label+control rows
+  // stack label over a full-width control.
+  assert.match(block, /\.polyforge-config-cards \.config-detail-grid \{\s*grid-template-columns: minmax\(0, 1fr\);/, "the Jobs preferences stack");
+  assert.match(block, /\.polyforge-workflow-editor > \.polyforge-config-write > input \{ flex: 1 1 100%; \}/, "the workflow attr control spans the row");
 });
 
 test("the card, column and placeholder strings exist in all three locales", async () => {
   for (const locale of ["en", "zh-CN", "zh-TW"]) {
     const text = await readFile(new URL(`../lib/i18n/messages/${locale}.ts`, import.meta.url), "utf8");
     for (const key of [
-      "configGroupFlat", "configGroupFlatHint", "configGroupDaemon", "configGroupDaemonHint",
+      "configGroupFlat", "configGroupFlatHint", "configGroupDaemonHint",
       "configGroupWorkspaceHint", "workspaceTitle", "workspaceSourceFile", "memoryPolicyTitle", "memoryPolicyAppendNote",
       "configColKey", "configColClass", "configColFile", "configColDaemon", "configUnset", "configProjects",
       "configStatusTitle", "configPackageHint", "configLegend", "configModels", "configAddModel", "configRemoveModel",
@@ -326,33 +354,45 @@ test("the read-only declared-candidates card is gone, region and strings include
   }
 });
 
-test("one 工作区 card carries the mapping, summarize and read-only memory_policy rows, each tagged with its file", () => {
+test("summarize rows and the read-only memory_policy, grouped per workspace path, live in the cli.toml card; the 工作区 card presents neither", () => {
   assert.match(source, /function configCards</);
-  assert.match(source, /const summarize = groups\.find\(\(group\) => group\.id === "summarize"\)\?\.items \?\? \[\];/);
-  assert.match(source, /items: \[\.\.\.group\.items, \.\.\.summarize\]/, "the mapping rows, then the summarize rows");
-  assert.match(source, /return item\.section \? "cli\.toml" : "\.polyforge\.yaml";/, "the tag names the row's own file");
-  assert.match(source, /\{isWorkspace\s*\n\s*\? <span className="polyforge-config-file-tag" title=\{t\("polyforge\.settings\.workspaceSourceFile"\)\}>\{workspaceRowFile\(item\)\}<\/span>/);
-  // memory_policy rows: from the config read, read-only, no write control, tagged.
-  const memory = source.slice(source.indexOf("const renderMemoryRow ="), source.indexOf("// the legend and the column header"));
-  assert.match(source, /const policy = isWorkspace \? config\.memoryPolicy \?\? null : null;/);
+  // summarize: the cli.toml card's [summarize] zone, its rows common, written as cli.toml keys.
+  assert.match(source, /const common = zone\.items\.filter\(\(item\) => \(CLI_COMMON_KEYS\.includes\(item\.key\) \|\| SUMMARIZE_KEYS\.includes\(item\.key\)\) && !item\.section\);/);
+  assert.match(source, /const writable = WRITABLE\.has\(item\.key\) && !item\.section;/, "summarize no longer depends on a mapped cwd");
+  assert.doesNotMatch(source, /workspaceFile\?\.sha256|startsWith\("summarize\."\) !== workspace/, "no summarize write is keyed to the workspace yaml");
+  // memory_policy: from the config read, grouped per path, read-only, no write control.
+  assert.match(source, /Object\.entries\(config\.memoryPolicy\)\.sort\(/);
+  assert.match(source, /t\("polyforge\.settings\.memoryPolicyPath", \{ path: shortenPath\(path\) \}\)/);
+  const memory = source.slice(source.indexOf("const renderMemoryRow ="), source.indexOf("const classesOf ="));
+  assert.ok(memory.length > 0);
   assert.match(memory, /className="polyforge-config-row is-readonly"/);
-  assert.match(memory, /<span className="polyforge-config-file-tag" title=\{t\("polyforge\.settings\.workspaceSourceFile"\)\}>\.polyforge\.yaml<\/span>/);
   assert.doesNotMatch(memory, /<input|<textarea|<ConfigButton|onClick/, "memory_policy is read-only");
   assert.match(source, /t\("polyforge\.settings\.memoryPolicyTitle"\)/);
-  assert.match(source, /policy\?\.appendToDefault && <p className="config-scope-switch-reason">\{t\("polyforge\.settings\.memoryPolicyAppendNote"\)\}<\/p>/);
-  // Each file keeps its own write path: summarize rows still post summarize.* to the yaml writer.
-  assert.match(source, /const workspace = item\.key\.startsWith\("summarize\."\);\s*\n\s*const hash = workspace \? config\.workspaceFile\?\.sha256 : config\.file\?\.sha256;/);
+  assert.match(source, /<p className="config-scope-switch-reason">\{t\("polyforge\.settings\.memoryPolicyAppendNote"\)\}<\/p>/);
+  // Below the summarize floor: the visible upgrade hint, inside the cli.toml card.
+  const cli = source.slice(source.indexOf('className="polyforge-config-card polyforge-config-cli"'), source.indexOf("the connection-key confirmation renders"));
+  // the hint is localized (all three locales) and names the floor and the found version.
+  assert.match(cli, /\{config\.summarizeReason && \(\s*<p className="config-scope-switch-reason">\s*\{t\("polyforge\.settings\.summarizeFloorHint", \{\s*required: POLYFORGE_CONFIG_SUMMARIZE_MINIMUM_PF_VERSION,\s*found: config\.pfVersion \?\? t\("polyforge\.settings\.versionUnparseable"\),/);
+  assert.match(cli, /cli\.toml \[memory_policy\]/, "the policy block label is the literal file section");
+  assert.match(source, /t\("polyforge\.settings\.summarizeWriteRefused", \{/, "the 400 floor refusal is localized under its row");
+  // The 工作区 card: the mapping rows only.
+  const workspace = source.slice(source.indexOf("{cards && cards.workspace.length > 0 && (() => {"), source.indexOf("void reload()"));
+  assert.doesNotMatch(workspace, /memoryPolicy|summarize|policy/, "the 工作区 card presents neither family");
 });
 
-test("every card's legend and grid header sit above its fold, so collapsing hides rows only", () => {
-  const card = source.slice(source.indexOf("// the legend and the column header"), source.indexOf("void reload()"));
-  const fold = card.indexOf('className="polyforge-disclosure-body polyforge-config-fold"');
-  assert.ok(fold > 0);
-  assert.ok(card.indexOf("{legend}") > 0 && card.indexOf("{legend}") < fold, "the legend renders before the fold body");
-  assert.ok(card.indexOf("{gridHeader}") > 0 && card.indexOf("{gridHeader}") < fold, "the header renders before the fold body");
-  assert.equal((card.match(/\{legend\}/g) ?? []).length, 1, "one legend per card, never inside the fold");
-  assert.equal((card.match(/\{gridHeader\}/g) ?? []).length, 1, "one header per card, never inside the fold");
-  assert.match(card, /\{\(common\.length > 0 \|\| foldCount > 0\) && \(/, "the header shows even when every row folds");
+test("/#255: every card's legend and every zone's grid header sit above its fold, so collapsing hides rows only", () => {
+  const cli = source.slice(source.indexOf('className="polyforge-config-card polyforge-config-cli"'), source.indexOf("the connection-key confirmation renders"));
+  const workspace = source.slice(source.indexOf("// The legend and the column header sit above the fold"), source.indexOf("void reload()"));
+  for (const [name, card] of [["cli.toml", cli], ["工作区", workspace]]) {
+    const fold = card.indexOf('className="polyforge-disclosure-body polyforge-config-fold"');
+    assert.ok(fold > 0, `${name} has a fold`);
+    const legend = card.indexOf("{legendOf(");
+    assert.ok(legend > 0 && legend < fold, `${name}: the legend renders before the fold body`);
+    assert.equal((card.match(/\{legendOf\(/g) ?? []).length, 1, `${name}: one legend per card, never inside the fold`);
+    const header = card.indexOf("{gridHeader(");
+    assert.ok(header > 0 && header < fold, `${name}: the header renders before the fold body`);
+    assert.equal((card.match(/\{gridHeader\(/g) ?? []).length, 1, `${name}: one header per zone/card, never inside the fold`);
+  }
 });
 
 test("exactly two browser-stored numeric controls, built from the shared blocks, with no server write", () => {
@@ -419,36 +459,32 @@ test("detection collapses to one visible summary line over its six detail rows",
   }
 });
 
-test("each card shows its common writable rows and folds the rest under a counted disclosure", async () => {
-  const cards = source.slice(source.indexOf("configCards(groupConfigItems(config.items ?? [])).map((group) =>"), source.indexOf("void reload()"));
-  // The common set is the seven writable keys, decided by key, never by mapping.
-  for (const key of ["max_concurrent_jobs", "step_timeout", "stall_window", "summarize.models", "summarize.language", "summarize.interval_sec", "api_key"]) {
-    assert.match(source.slice(source.indexOf("const WRITABLE = new Set(["), source.indexOf("]);", source.indexOf("const WRITABLE"))), new RegExp(`"${key.replace(/\./g, "\\.")}"`), `${key} is common`);
-  }
-  // one rule for every card, the 工作区 card included (its
-  // summarize keys are its common rows; the mapping and memory rows fold).
-  assert.match(cards, /const common = group\.items\.filter\(\(item\) => WRITABLE\.has\(item\.key\) && !item\.section\);/);
-  assert.doesNotMatch(cards, /const common = [^\n]*mapped/, "the common set never depends on the mapping");
-  assert.match(cards, /const folded = group\.items\.filter\(\(item\) => !common\.includes\(item\)\);/, "every other item, unknown keys included, folds");
-  // One row renderer for both lists, so the #126 row markup is unchanged.
-  assert.match(cards, /const renderRow = \(item: PolyforgeConfigItem\) => \{/);
-  assert.match(cards, /\{common\.map\(renderRow\)\}/);
-  assert.match(cards, /\{folded\.map\(renderRow\)\}/);
-  // The fold: counted, stored per card region, default closed.
-  assert.match(cards, /const foldCount = folded\.length \+ memoryRows\.length;/, "the count covers every folded row");
-  assert.match(cards, /t\("polyforge\.settings\.configReadOnlyCount", \{ count: foldCount \}\)/);
-  assert.match(cards, /t\("polyforge\.settings\.configRowCount", \{ count: foldCount \}\)/, "the workspace card states its row count");
-  assert.match(cards, /const fold = regionToggle\(region, lockMarker\(folded\.map\(\(item\) => item\.key\)\)\);/);
-  assert.match(cards, /open=\{fold\.open\}/);
-  assert.match(cards, /hidden=\{!fold\.open\}/);
-  assert.match(source, /const GROUP_REGION: Record<ConfigCardId, PolyforgeDisclosureRegion> = \{\s*\n\s*flat: "cliToml",\s*\n\s*daemon: "daemon",\s*\n\s*workspace: "workspace",\s*\n\};/);
-  // An unmapped cwd keeps summarize.* in the common position, read-only.
-  assert.match(cards, /const writable = WRITABLE\.has\(item\.key\) && !item\.section && \(!item\.key\.startsWith\("summarize\."\) \|\| config\.mapped\);/);
+test("each cli.toml zone shows its common keys and folds its advanced keys under one counted control", async () => {
+  const cli = source.slice(source.indexOf('className="polyforge-config-card polyforge-config-cli"'), source.indexOf("the connection-key confirmation renders"));
+  // Common = the schema module's five keys, decided by key, never by mapping.
+  assert.match(cli, /const common = zone\.items\.filter\(\(item\) => \(CLI_COMMON_KEYS\.includes\(item\.key\) \|\| SUMMARIZE_KEYS\.includes\(item\.key\)\) && !item\.section\);/);
+  assert.match(cli, /const advanced = zone\.items\.filter\(\(item\) => !common\.includes\(item\)\);/, "every other zone item, unknown keys included, folds");
+  assert.match(cli, /\{common\.map\(\(item\) => renderRow\(item, zone\.id\)\)\}/);
+  assert.match(cli, /\{advanced\.map\(\(item\) => renderRow\(item, zone\.id\)\)\}/);
+  assert.match(cli, /t\("polyforge\.settings\.configAdvancedCount", \{ count: advanced\.length \}\)/, "one counted control per zone");
+  assert.match(cli, /const fold = regionToggle\(region, lockMarker\(advanced\.map\(\(item\) => item\.key\)\)\);/);
+  assert.match(cli, /open=\{fold\.open\}/);
+  assert.match(cli, /hidden=\{!fold\.open\}/);
+  // The #212 regions are reused: no new stored field.
+  assert.match(source, /const ZONE_REGION: Record<ConfigZoneId, PolyforgeDisclosureRegion> = \{\s*\n\s*flat: "cliToml",\s*\n\s*daemon: "daemon",\s*\n\s*summarize: "cliToml",\s*\n\};/);
+  assert.match(source, /const WRITABLE = new Set\(\[\.\.\.CLI_WRITABLE_KEYS, \.\.\.SUMMARIZE_KEYS\]\);/, "the writable set is the route's own allowlist constants");
+  // The 工作区 card (the mapping rows only) folds them under its counted control.
+  const workspace = source.slice(source.indexOf("{cards && cards.workspace.length > 0 && (() => {"), source.indexOf("void reload()"));
+  assert.match(workspace, /t\("polyforge\.settings\.configRowCount", \{ count: items\.length \}\)/);
+  assert.match(workspace, /const fold = regionToggle\("workspace", lockMarker\(items\.map\(\(item\) => item\.key\)\)\);/);
+  // The mapping never writes.
+  assert.match(source, /const writable = WRITABLE\.has\(item\.key\) && !item\.section;/);
   for (const locale of ["en", "zh-CN", "zh-TW"]) {
     const text = await readFile(new URL(`../lib/i18n/messages/${locale}.ts`, import.meta.url), "utf8");
-    for (const key of ["configReadOnlyCount", "configRowCount"]) {
+    for (const key of ["configAdvancedCount", "configRowCount"]) {
       assert.match(text, new RegExp(`"polyforge\\.settings\\.${key}": "[^"]*\\{count\\}`), `${locale}'s ${key} interpolates {count}`);
     }
+    assert.doesNotMatch(text, /"polyforge\.settings\.configReadOnlyCount": /, `${locale} drops the retired read-only count`);
   }
 });
 
@@ -466,7 +502,8 @@ test("the confirmed page order and the default-collapsed read-outs", async () =>
   const markers = [
     "polyforge-config-card polyforge-config-status",
     "<div className=\"polyforge-config-panel\">",
-    "configCards(groupConfigItems(config.items ?? [])).map((group) =>",
+    "polyforge-config-card polyforge-config-cli",
+    "{cards && cards.workspace.length > 0 && (() => {",
     "void reload()",
     "<WorkflowCard",
     "polyforge-config-card polyforge-config-package",
@@ -498,19 +535,20 @@ test("the confirmed page order and the default-collapsed read-outs", async () =>
 });
 
 test("per-key results render under their own row; the footer keeps page-level status only", async () => {
-  const saveFn = source.slice(source.indexOf("const save = useCallback("), source.indexOf("const reload = useCallback("));
+  const saveFn = source.slice(source.indexOf("const commit = useCallback("), source.indexOf("const reload = useCallback("));
   const rollbackFn = source.slice(source.indexOf("const rollback = useCallback("), source.indexOf("const installCommand ="));
   // The schema guard still runs before any write, and its error lands under the row.
   assert.match(saveFn, /const invalid = configValueError\(item\.key, value, item\.schema\);\s*\n\s*if \(invalid\) \{\s*\n\s*setRowFeedback\(\{ \[item\.key\]: \{ message: invalid, tone: "error" \} \}\);\s*\n\s*return;/);
   assert.match(saveFn, /setRowFeedback\(\{ \[item\.key\]: \{ message: data\.message \?\? t\("polyforge\.settings\.configSaved"\), tone: "default" \} \}\);/);
   assert.match(saveFn, /await runHistory\(\);/, "a save still refreshes history");
-  assert.match(rollbackFn, /setRowFeedback\(\{ \[entry\.id\]: /, "a rollback result is keyed by its entry");
+  assert.match(rollbackFn, /feedbackId: string = entry\.id/, "a history rollback's result is keyed by its entry");
+  assert.match(rollbackFn, /setRowFeedback\(\{ \[feedbackId\]: /, "a notice rollback's result lands under its row");
   for (const fn of [saveFn, rollbackFn]) {
     assert.doesNotMatch(fn, /setActionError|setActionMessage/, "row results never reach the footer");
   }
   // Rendered inside the row / entry; an error is an alert.
   assert.match(source, /role=\{feedback\.tone === "error" \? "alert" : undefined\}/);
-  assert.match(source, /\{renderFeedback\(item\.key\)\}\s*\n\s*<\/div>/, "under its config row");
+  assert.match(source, /\{renderFeedback\(item\.key\)\}\s*\n\s*\{renderNotice\(item\.key\)\}\s*\n\s*<\/div>/, "under its config row");
   assert.match(source, /\{renderFeedback\(entry\.id\)\}\s*\n\s*<\/div>/, "under its history entry");
   // Copy feedback stays in the install block.
   assert.match(source, /setInstallMessage\(t\("polyforge\.settings\.installCopied"\)\)/);
@@ -558,28 +596,42 @@ test("the workflow card reads its own route afresh per click with the #204 refre
   assert.doesNotMatch(workflowCard, /setInterval|setTimeout/, "no timer: a read is a mount or a click");
 });
 
-test("rows come from the pure model, carry the live badge, the next-dispatch note and Inherited", () => {
-  assert.match(workflowCard, /const rows = buildWorkflowRows\(workflows, read\?\.workspace \?\? null, project\);/);
-  assert.match(workflowCard, /: defaultProject\(projects\);/, "the first mapped project is the default");
+test("rows come from the pure model; one summary line per row and one card-level note and badge", () => {
+  // the rows are the owning workspace's.
+  assert.match(workflowCard, /const rows = buildWorkflowRows\(workflows, owner\?\.declared \?\? null, project\);/);
+  assert.match(workflowCard, /: defaultProject\(\[\.\.\.ownProjects, \.\.\.projects\]\);/, "the settings cwd's first project is the default, else the union's first");
   assert.match(workflowCard, /<li key=\{row\.id\} className="polyforge-workflow-row">/);
   assert.match(workflowCard, /<span className="polyforge-workflow-id">\{row\.id\}<\/span>/);
-  assert.match(workflowCard, /reloadClassLabel\("live"\)/);
-  assert.match(workflowCard, /t\("polyforge\.settings\.classLiveNote"\)/);
   assert.match(workflowCard, /t\("polyforge\.settings\.workflowInherit"\)/);
   assert.match(workflowCard, /t\("polyforge\.settings\.workflowDeclared"\)/);
-  assert.match(workflowCard, /t\("polyforge\.settings\.workflowSourceLabel"\)\}: \{view\.from\}/, "the effective chain names its level");
+  assert.match(workflowCard, /t\("polyforge\.settings\.workflowSourceLabel"\)\}: <BreakableToken text=\{view\.from\} \/>/, "the effective chain names its level");
+  // the next-dispatch note and the live badge are the card's,
+  // stated exactly once, never inside a row; the bundle label key is retired.
+  assert.equal((workflowCard.match(/t\("polyforge\.settings\.classLiveNote"\)/g) ?? []).length, 1, "the next-dispatch note is stated once");
+  assert.equal((workflowCard.match(/reloadClassLabel\("live"\)/g) ?? []).length, 1, "exactly one live badge");
+  assert.doesNotMatch(workflowCard, /workflowBundleLabel/, "the retired bundle label is still referenced");
   // No element inside a row other than the row itself carries "row" in its class (the row is the row).
-  const rowBody = workflowCard.slice(workflowCard.indexOf('className="polyforge-workflow-row"') + 10, workflowCard.indexOf("</li>"));
+  const rowStart = workflowCard.indexOf('className="polyforge-workflow-row"');
+  const rowBody = workflowCard.slice(rowStart + 10, workflowCard.indexOf("</li>", rowStart));
+  assert.ok(rowBody.length > 0, "the row body is found");
   assert.doesNotMatch(rowBody.replace("polyforge-config-row-feedback", ""), /className="[^"]*row[^"]*"/);
+  assert.doesNotMatch(rowBody, /classLiveNote|reloadClassLabel\("live"\)/, "a row repeats the card-level note or badge");
+  // One summary line holding the id, chain, truncatable source and right-aligned bundle suffix.
+  assert.match(rowBody, /className=\{row\.diverges \? "polyforge-workflow-summary is-divergent" : "polyforge-workflow-summary"\}/);
+  assert.match(rowBody, /<span className="polyforge-workflow-effective">/);
+  assert.match(rowBody, /className="polyforge-workflow-from" title=\{/, "the truncated source keeps its full text in a title");
+  assert.match(rowBody, /className="polyforge-workflow-bundle-suffix">/);
+  assert.match(rowBody, /ref\.candidates/, "bundle candidates move to a tooltip");
 });
 
 test("pf submit --models is a note only and writes go through the one config route with the yaml CAS", () => {
-  assert.match(workflowCard, /<p className="config-scope-switch-reason">\{t\("polyforge\.settings\.workflowSubmitNote"\)\}<\/p>/);
+  assert.match(workflowCard, /<p className="polyforge-workflow-submit-note">\{t\("polyforge\.settings\.workflowSubmitNote"\)\}<\/p>/);
   for (const label of workflowCard.matchAll(/aria-label=\{([^}]*)\}/g)) {
     assert.doesNotMatch(label[1], /submit|--models/, "no control edits pf submit --models");
   }
   assert.match(workflowCard, /fetch\("\/api\/polyforge\/config", \{/);
-  assert.match(workflowCard, /expect_state: \{ file_sha256: read\?\.workspace\?\.yaml\.sha256 \?\? null, values: \{\} \}/);
+  assert.match(workflowCard, /expect_state: \{ file_sha256: owner\.declared\?\.yaml\.sha256 \?\? null, values: \{\} \}/, "the owning workspace's yaml CAS");
+  assert.match(workflowCard, /cwd: owner\.workspace,/, "the owning workspace's --cwd, never the settings cwd");
   assert.match(workflowCard, /stepWriteKey\(project \?\? "", row\.id\)/);
   assert.match(workflowCard, /stepWriteKey\(project \?\? "", row\.id, attr\.name\)/);
   assert.match(workflowCard, /void write\(row\.id, key, "unset"\)/, "clear = unset (falls back one level)");
@@ -587,7 +639,7 @@ test("pf submit --models is a note only and writes go through the one config rou
 });
 
 test("below the capability floor the read facts stay and every write control is disabled with visible text", () => {
-  assert.match(workflowCard, /const writeCapable = workflows\?\.write_capable === true && read\?\.workspace !== null && project !== null;/);
+  assert.match(workflowCard, /const writeCapable = workflows\?\.write_capable === true && owner\?\.declared != null && project !== null;/);
   assert.match(workflowCard, /const disabled = !writeCapable \|\| writing !== null;/);
   assert.match(workflowCard, /\{workflows && !workflows\.write_capable && \(\s*\n\s*<p className="config-scope-switch-reason">\s*\n\s*\{t\("polyforge\.settings\.workflowCapabilityHint"\)\}/);
   const editor = workflowCard.slice(workflowCard.indexOf("const renderEditor ="), workflowCard.indexOf("return (\n    <section"));
@@ -605,7 +657,7 @@ test("the card folds its write controls under the stored workflow region, locked
 });
 
 test("the workflow strings exist in all three locales and the CSS defines the card", async () => {
-  const keys = ["workflowTitle", "workflowHint", "workflowProject", "workflowBundleLabel", "workflowInherit", "workflowDeclared",
+  const keys = ["workflowTitle", "workflowHint", "workflowProject", "workflowInherit", "workflowDeclared",
     "workflowEffective", "workflowSourceLabel", "workflowSubmitNote", "workflowCapabilityHint", "workflowBundleError",
     "workflowChainAdd", "workflowChainClear", "workflowAttrBatch", "workflowDefaultRow", "workflowTaskRow", "workflowEditToggle", "classLiveNote"];
   for (const locale of ["en", "zh-CN", "zh-TW"]) {
@@ -615,7 +667,156 @@ test("the workflow strings exist in all three locales and the CSS defines the ca
     assert.match(text, /"polyforge\.settings\.workflowSubmitNote": "`pf submit --models`/);
   }
   const css = await readFile(new URL("../app/settings.css", import.meta.url), "utf8");
-  for (const cls of ["polyforge-workflow-refresh", "polyforge-workflow-row", "polyforge-workflow-id", "polyforge-workflow-note", "polyforge-workflow-editor"]) {
+  for (const cls of ["polyforge-workflow-refresh", "polyforge-workflow-row", "polyforge-workflow-id", "polyforge-workflow-live", "polyforge-workflow-summary", "polyforge-workflow-bundle-suffix", "polyforge-workflow-editor"]) {
     assert.match(css, new RegExp(`\\.${cls}[ ,{.]`), `${cls} is styled`);
+  }
+  assert.doesNotMatch(css, /\.polyforge-workflow-note[ ,{.]/, "the retired row note class is gone");
+});
+
+// a long non-divergent chain wraps by segment, never overflowing.
+test("the step row's summary wraps by segment (lead, effective chain, suffix) and its chains shrink", async () => {
+  const rowStart = workflowCard.indexOf('className="polyforge-workflow-row"');
+  const rowBody = workflowCard.slice(rowStart, workflowCard.indexOf("</li>", rowStart));
+  const lead = rowBody.slice(rowBody.indexOf('<span className="polyforge-workflow-lead">'), rowBody.indexOf('<span className="polyforge-workflow-effective">'));
+  assert.ok(lead.length > 0, "the lead segment wraps id, kind and declared chain before the effective segment");
+  for (const part of ["polyforge-workflow-id", "polyforge-workflow-kind", "workflowDeclared", "renderChips(row.declaredModels", "polyforge-workflow-inherit"]) {
+    assert.ok(lead.includes(part), `${part} sits in the lead segment`);
+  }
+  assert.ok(rowBody.indexOf("polyforge-workflow-bundle-suffix") > rowBody.indexOf("polyforge-workflow-effective"), "the bundle suffix stays the last item");
+  const css = await readFile(new URL("../app/settings.css", import.meta.url), "utf8");
+  const rule = (selector) => {
+    const at = css.indexOf(`\n${selector} {`);
+    assert.ok(at >= 0, `${selector} has a rule`);
+    return css.slice(at, css.indexOf("}", at));
+  };
+  assert.match(rule(".polyforge-workflow-summary"), /flex-wrap: wrap;/, "the summary wraps at every width");
+  assert.doesNotMatch(rule(".polyforge-workflow-summary"), /nowrap/);
+  assert.match(css, /\.polyforge-workflow-lead,\n\.polyforge-workflow-summary \.polyforge-workflow-effective,\n\.polyforge-workflow-summary \.polyforge-config-chips \{ flex: 0 1 auto; min-width: 0; max-width: 100%; \}/, "the segments and their chips shrink and wrap inside");
+  assert.match(rule(".polyforge-workflow-lead"), /flex-wrap: wrap;/);
+  const suffix = rule(".polyforge-workflow-bundle-suffix");
+  for (const decl of ["display: inline;", "margin-left: auto;", "white-space: pre;"]) assert.ok(suffix.includes(decl), `the suffix keeps ${decl}`);
+  assert.match(css, /\.polyforge-workflow-summary\.is-divergent \{ flex-wrap: wrap; \}/, "the divergent rule stays");
+  assert.match(css, /@media \(max-width: 640px\) \{\n  \/\* a phone row may wrap inside its summary container\. \*\/\n  \.polyforge-workflow-summary \{ flex-wrap: wrap; \}/, "the <=640 rule stays");
+});
+
+test("the machine-scope hint has its own class and title; .config-scope-switch-reason and its other users are unchanged", async () => {
+  assert.match(source, /<p className="config-machine-scope-hint" title=\{t\("polyforge\.settings\.configMachineScope"\)\}>\{t\("polyforge\.settings\.configMachineScope"\)\}<\/p>/);
+  assert.doesNotMatch(source, /className="config-scope-switch-reason">\{t\("polyforge\.settings\.configMachineScope"\)\}/);
+  // adds one call site: the summarize floor hint in the cli.toml card.
+  // the workflow submit note leaves for its own class, so 7 remain.
+  assert.ok((source.match(/className="config-scope-switch-reason"/g) ?? []).length === 7, "the shared class keeps its other call sites (owner-intended)");
+  const css = await readFile(new URL("../app/settings.css", import.meta.url), "utf8");
+  assert.match(css, /\n\.config-scope-switch-reason \{\n  max-width: 320px;\n  color: var\(--text-dim\);\n  font-size: 11px;\n  line-height: 1\.4;\n\}/, "the shared rule is untouched");
+  assert.match(css, /\n\.config-machine-scope-hint \{\n  min-width: 0;\n  color: var\(--text-dim\);\n  font-size: 11px;\n  line-height: 1\.4;\n  white-space: nowrap;\n  overflow: hidden;\n  text-overflow: ellipsis;\n\}/, "desktop: one ellipsised line");
+  const phone = css.slice(css.indexOf("  .config-machine-scope-hint {"));
+  assert.ok(css.lastIndexOf("@media (max-width: 640px) {", css.indexOf("  .config-machine-scope-hint {")) > css.indexOf("\n.config-machine-scope-hint {"), "the phone rule sits in a <=640px block");
+  const body = phone.slice(0, phone.indexOf("}"));
+  for (const decl of ["white-space: normal;", "overflow: visible;", "text-overflow: clip;", "text-wrap: balance;", "overflow-wrap: break-word;"]) assert.ok(body.includes(decl), `phones: ${decl}`);
+});
+
+// the workflow submit note is a full sentence, so it must not
+// inherit the short-reason class's 320px cap (that forced two lines at >=768px).
+test("the workflow submit note has its own uncapped class; .config-scope-switch-reason is untouched", async () => {
+  assert.match(workflowCard, /<p className="polyforge-workflow-submit-note">\{t\("polyforge\.settings\.workflowSubmitNote"\)\}<\/p>/);
+  assert.doesNotMatch(workflowCard, /className="config-scope-switch-reason">\{t\("polyforge\.settings\.workflowSubmitNote"\)\}/);
+  const css = await readFile(new URL("../app/settings.css", import.meta.url), "utf8");
+  const rule = (selector) => {
+    const at = css.indexOf(`\n${selector} {`);
+    assert.ok(at >= 0, `${selector} has a rule`);
+    return css.slice(at, css.indexOf("}", at));
+  };
+  const note = rule(".polyforge-workflow-submit-note");
+  assert.match(note, /font-size: 11px;/, "the note keeps the dim 11px type");
+  assert.match(note, /white-space: normal;/, "the note wraps normally");
+  assert.doesNotMatch(note, /max-width|nowrap|ellipsis|overflow: hidden/, "the note carries no cap and no truncation");
+  assert.match(rule(".config-scope-switch-reason"), /max-width: 320px;/, "the shared rule is untouched");
+});
+
+// connection-key protection.
+test("a connection-key save waits for a confirmation outside every fold; confirm writes once, cancel writes nothing", async () => {
+  const saveFn = source.slice(source.indexOf("const save = useCallback("), source.indexOf("const confirmSave = useCallback("));
+  // Validation first, then the connection keys stop at the confirmation (no POST in save itself).
+  assert.ok(saveFn.indexOf("configValueError(item.key, value, item.schema)") < saveFn.indexOf("CONNECTION_KEYS.includes(item.key)"), "the draft is validated before the confirmation opens");
+  assert.match(saveFn, /if \(CONNECTION_KEYS\.includes\(item\.key\)\) \{\s*\n\s*setRowFeedback\(\{\}\);\s*\n\s*setConfirming\(\{ item, value \}\);\s*\n\s*return;/);
+  assert.doesNotMatch(saveFn, /fetch\(/, "save itself never posts");
+  assert.match(saveFn, /await commit\(item, value\);/, "every other key saves from its own row");
+  const confirmFn = source.slice(source.indexOf("const confirmSave = useCallback("), source.indexOf("const reload = useCallback("));
+  assert.equal((confirmFn.match(/commit\(/g) ?? []).length, 1, "confirm issues exactly one write");
+  // Cancel clears the pending confirmation only; the draft stays.
+  assert.match(source, /<ConfigButton size="small" onClick=\{\(\) => setConfirming\(null\)\}>\s*\n\s*\{t\("polyforge\.settings\.configConfirmCancel"\)\}/);
+  // Rendered page-level (after the cli.toml card, before the 工作区 card), never inside a fold body.
+  const confirm = source.slice(source.indexOf("the connection-key confirmation renders"), source.indexOf("{cards && cards.workspace.length > 0"));
+  assert.match(confirm, /\{confirming && \(\s*\n\s*<div role="alertdialog" aria-labelledby=\{`\$\{regionId\}-confirm`\} className="polyforge-config-confirm">/);
+  assert.doesNotMatch(confirm, /polyforge-disclosure-body|hidden=/, "no fold can hide the confirmation");
+  assert.match(confirm, /t\("polyforge\.settings\.configConfirmConnection", \{ key: confirming\.item\.key \}\)/);
+  // A pending confirmation keeps its zone open like a draft.
+  assert.match(source, /confirming\?\.item\.key === id/);
+  // A save never reloads, shuts down or re-ensures the daemon: the reload route is only the Reload button's.
+  const commitFn = source.slice(source.indexOf("const commit = useCallback("), source.indexOf("const save = useCallback("));
+  assert.doesNotMatch(commitFn, /reload|shutdown|ensure/i);
+  assert.equal((source.match(/\/api\/polyforge\/config\/reload/g) ?? []).length, 1, "one reload call site: the explicit control");
+  for (const locale of ["en", "zh-CN", "zh-TW"]) {
+    const text = await readFile(new URL(`../lib/i18n/messages/${locale}.ts`, import.meta.url), "utf8");
+    for (const key of ["configConfirmSave", "configConfirmCancel", "configConnectionNotice"]) {
+      assert.match(text, new RegExp(`"polyforge\\.settings\\.${key}": "\\S`), `${locale} must carry ${key}`);
+    }
+    assert.match(text, /"polyforge\.settings\.configConfirmConnection": "[^"]*\{key\}/, `${locale}'s confirmation names the key`);
+  }
+  const en = await readFile(new URL("../lib/i18n/messages/en.ts", import.meta.url), "utf8");
+  const consequence = en.match(/"polyforge\.settings\.configConfirmConnection": "([^"]*)"/)?.[1] ?? "";
+  assert.match(consequence, /next pf call/, "states that the panel's next pf call uses the new value");
+  assert.match(consequence, /until it restarts/, "states that the daemon keeps the old value until a restart");
+});
+
+test("a saved connection key shows an inline notice with a one-click rollback through the history route (never for api_key)", () => {
+  const commitFn = source.slice(source.indexOf("const commit = useCallback("), source.indexOf("const save = useCallback("));
+  assert.match(commitFn, /if \(CONNECTION_KEYS\.includes\(item\.key\) && entry\) setNotices\(\(current\) => \(\{ \.\.\.current, \[item\.key\]: entry \}\)\);/, "the write's history entry is kept per key");
+  const notice = source.slice(source.indexOf("const renderNotice = (key: string) => {"), source.indexOf("// A region holding an unsaved draft"));
+  assert.match(notice, /<div className="polyforge-config-row-notice" role="status">/);
+  assert.match(notice, /t\("polyforge\.settings\.configConnectionNotice"\)/);
+  assert.match(notice, /\{entry\.rollbackable && entry\.key !== "api_key" && \(/, "api_key gets the notice but no rollback");
+  assert.match(notice, /onClick=\{\(\) => void rollback\(entry, entry\.key\)\}/, "the same CAS rollback as the history, its result under the row");
+  const rollbackFn = source.slice(source.indexOf("const rollback = useCallback("), source.indexOf("const installCommand ="));
+  assert.match(rollbackFn, /fetch\("\/api\/polyforge\/config\/history", \{/);
+  assert.match(rollbackFn, /delete next\[entry\.key\]/, "a rolled-back row drops its notice and its draft");
+});
+
+// the workflow card's project union.
+test("the workflow card unions every mapped workspace's projects, labels their yaml, degrades a failed workspace to one line", async () => {
+  assert.match(workflowCard, /const union = workflowUnion\(read\);/);
+  assert.match(workflowCard, /const projects = union\.projects\.map\(\(entry\) => entry\.project\);/);
+  assert.match(workflowCard, /const owner = projectOwner\(union, project\);/);
+  assert.match(workflowCard, /workflowUnion\(body\)\.sources\.some\(\(entry\) => entry\.workflows\?\.daemon_reachable === true\)/, "one readable workspace is a good read");
+  // One line per failed workspace, carrying its reason; its projects never enter the union.
+  assert.match(workflowCard, /\{union\.failures\.map\(\(entry\) => \(\s*\n\s*<p key=\{entry\.workspace\} className="config-scope-switch-reason is-error">\s*\n\s*\{t\("polyforge\.settings\.workflowWorkspaceFailed"\)\}: \{entry\.yamlPath\} — \{entry\.reason\}/);
+  // Each readable workspace's yaml path labels the projects it contributes.
+  assert.match(workflowCard, /<span className="polyforge-workflow-yaml"><BreakableToken text=\{entry\.yamlPath\} \/><\/span>/);
+  assert.match(workflowCard, /t\("polyforge\.settings\.workflowProjectSource"\)/);
+  // The one fresh read per click is the route's; the card never fans out per project.
+  assert.equal((workflowCard.match(/fetch\(`\/api\/polyforge\/workflows/g) ?? []).length, 1);
+  for (const locale of ["en", "zh-CN", "zh-TW"]) {
+    const text = await readFile(new URL(`../lib/i18n/messages/${locale}.ts`, import.meta.url), "utf8");
+    for (const key of ["workflowProjectSource", "workflowWorkspaceFailed"]) {
+      assert.match(text, new RegExp(`"polyforge\\.settings\\.${key}": "\\S`), `${locale} must carry ${key}`);
+    }
+  }
+});
+
+test("the summarize floor hint, the write refusal and the card hints are in all three locales, localized and naming the versions", async () => {
+  for (const locale of ["en", "zh-CN", "zh-TW"]) {
+    const text = await readFile(new URL(`../lib/i18n/messages/${locale}.ts`, import.meta.url), "utf8");
+    for (const key of ["summarizeFloorHint", "summarizeWriteRefused"]) {
+      const line = text.split("\n").find((entry) => entry.includes(`"polyforge.settings.${key}"`));
+      assert.ok(line, `${locale} lacks ${key}`);
+      assert.ok(line.includes("{required}") && line.includes("{found}"), `${locale} ${key} names both versions`);
+      if (locale !== "en") assert.match(line.split(": ").slice(1).join(": "), /[㐀-鿿]/, `${locale} ${key} is not English-only`);
+    }
+    const unparseable = text.split("\n").find((entry) => entry.includes('"polyforge.settings.versionUnparseable"'));
+    assert.ok(unparseable, `${locale} lacks versionUnparseable`);
+    // The card hints no longer place summarize/memory_policy in the workspace yaml.
+    const workspaceHint = text.split("\n").find((entry) => entry.includes('"polyforge.settings.configGroupWorkspaceHint"'));
+    assert.doesNotMatch(workspaceHint, /summarize|polyforge\.yaml/, `${locale} 工作区 hint is mapping-only`);
+    const flatHint = text.split("\n").find((entry) => entry.includes('"polyforge.settings.configGroupFlatHint"'));
+    assert.match(flatHint, /summarize/, `${locale} cli.toml hint names summarize`);
   }
 });

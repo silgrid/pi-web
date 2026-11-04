@@ -71,7 +71,12 @@ const SERVER_SENTINEL = "http://10.9.9.56:8420";
 const ENV_SENTINEL = "E2E_ENV_NAME_SENTINEL_56";
 const BODY_SENTINEL = "E2E-BODY-SENTINEL-56";
 const SECRET_SENTINEL = "AKIAE2ESECRETSENTINEL56";
-const ANALYSIS_SENTINEL = "E2E-ANALYSIS-SENTINEL-56";
+// rewrites PM6 to the task-backed structured analysis card.
+const ANALYSIS_SUMMARY = "ANALYSIS-SUMMARY-SENTINEL-252 the peer asks for a review";
+const ANALYSIS_CONCLUSION = "RETIRED-CONCLUSION-SENTINEL-252";
+const ANALYSIS_MODEL = "stub-task-model";
+const ANALYSIS_DURATION = "1m2.3s";
+const ANALYSIS_DRAFT = "ANALYSIS-DRAFT-SENTINEL-252";
 const LONG_PEER = "u_e2e_long_peer";
 const LONG_NAME = "Bartholomew Featherstonehaugh Longname";
 writeFileSync(join(cliDir, "cli.toml"), `server = "${SERVER_SENTINEL}"\napi_key = "${KEY_SENTINEL}"\nuser_id = "${USER_SENTINEL}"\n`);
@@ -107,6 +112,14 @@ const BUBBLES = conversation("conv_bubbles", "u_e2e_bubbles_peer", "Bea Run", [
 ]);
 const DOT = conversation("conv_dot", "u_e2e_dot_peer", "Dot Rowan", [msg(1, "peer", "DOT-UNREAD-ONE")]);
 const LONG = conversation("conv_long", LONG_PEER, LONG_NAME, [msg(1, "peer", "LONG-ONE")]);
+// PM19: inline @project#number links, the duplicated anchor
+// line, the historical anchor line and an own bubble.
+const WORK_ITEM = conversation("conv_work_item", "u_e2e_work_peer", "Wanda Work", [
+  msg(1, "peer", "LINK-DUP @acme#272 tail", { about_wi: "acme#272" }),
+  msg(2, "peer", "LINK-LEGACY", { about_wi: "task-42" }),
+  msg(3, "self", "OWN-LINK @acme#272"),
+  msg(4, "peer", "PEER-REPLY-ME"),
+]);
 // PM11: an empty display name (legitimate data) and the old-aihub answer that
 // carries no member_names at all — both render 未知用户 with a ? avatar.
 const NAMELESS = conversation("conv_nameless", "u_e2e_nameless_peer", "", [
@@ -115,11 +128,14 @@ const NAMELESS = conversation("conv_nameless", "u_e2e_nameless_peer", "", [
 ]);
 const ABSENT = conversation("conv_absent", "u_e2e_absent_peer", null, [msg(1, "peer", "ABSENT-ONE")]);
 const baseState = () => ({
-  version: "v2.20.12", mode: "ok", self: USER_SENTINEL, selfName: SELF_NAME, running: 2, blocked: false, sendError: "",
+  version: "v2.20.18", mode: "ok", self: USER_SENTINEL, selfName: SELF_NAME, running: 2, blocked: false, sendError: "",
   conversations: [DOT, PAGED, ANCHOR, BUBBLES, LONG],
   // The configured contact set `pf msg contacts` answers;
   // empty unless a check seeds one.
   contacts: [],
+  // The cli.toml [workspace."…"] project mapping `pf projects get` is read
+  // for (only a check that binds @project#number seeds one).
+  mappedProjects: [],
   // acked seeds name each conversation's newest sequence (task-42 owner ruling
   // task-42-pm1-stub-acked-fixture): conv_paged's messages carry seqs 1001–1120,
   // so its cursor is 1120 — the earlier 120 left every message permanently
@@ -209,15 +225,23 @@ if (rest[0] === "ops" && rest[1] === "status") {
   out({ machine_id: "m-e2e", workspaces: ["/srv/e2e-workspace"], workflows_dir: "/srv/e2e-workspace/wf",
     env_names: ["${ENV_SENTINEL}"], jobs, queue: { pending: 0, running: s.running, max_concurrent: 4 } });
 }
-if (rest[0] === "config" && rest[1] === "list") { record(); out({ items: [
+if (rest[0] === "config" && rest[1] === "list") { record(); const items = [
   { key: "server", value: "${SERVER_SENTINEL}", source: "file" }, { key: "api_key", set: true, source: "file" },
-  { key: "user_id", value: "${USER_SENTINEL}", source: "file" }] }); }
+  { key: "user_id", value: "${USER_SENTINEL}", source: "file" }];
+  // the panel's known projects are its groups, so a binding
+  // check seeds the same cli.toml workspace mapping the groups read uses.
+  if (s.mappedProjects && s.mappedProjects.length) items.push({ key: '[workspace."/srv/e2e-workspace"]', value: s.mappedProjects.join(","), source: "file" });
+  out({ items }); }
 if (rest[0] === "watch") { record(); out(JSON.parse(fs.readFileSync(path.join(dir, "state-watch.json"), "utf8"))); }
+if (rest[0] === "projects" && rest[1] === "get") { record(); out({ project: rest[2], members: [] }); }
 if (rest[0] === "msg") {
   if (rest[1] === "analyze") {
     record();
     if (s.mode === "analyzeFail") fail("DAEMON-500", "analyzer is not assembled on this machine");
-    out({ message_id: rest[2], conclusion: "${ANALYSIS_SENTINEL} the peer asks for a review", model: "stub" });
+    out({ message_id: rest[2], task_id: "task_252a1b2c3d4e5f67", project: "workbench", type: "requirement",
+      summary: "${ANALYSIS_SUMMARY}", suggested_actions: ["file_ticket", "reply"],
+      model: "${ANALYSIS_MODEL}", duration: "${ANALYSIS_DURATION}",
+      reply_draft: "${ANALYSIS_DRAFT}", conclusion: "${ANALYSIS_CONCLUSION}" });
   }
   if (rest[1] === "ack") {
     // Barrier (task-42 owner ruling): a dying page's in-flight ack can land
@@ -314,7 +338,7 @@ const T = {
   PM3: "PM3: a visible conversation acks exactly the newest displayed sequence once and clears unread, and a newer unseen sequence is never the acked one",
   PM4: "PM4: a hidden conversation and a locally blocked job suppress automatic ack, and an explicit conversation click acks the newest displayed sequence",
   PM5: "PM5: a send spawns exactly one pf msg send (with its anchor), a reply passes --reply-to and quotes the loaded original, a first contact is sent from its silent contact row, and a refused send answers a 4xx with the documented text",
-  PM6: "PM6: a work-item anchor opens the existing Jobs detail through the watch read, a deep reference exposes only its work-item part, the analyzer appears only on received messages and its conclusion is transient, and incoming messages never enter chat or the composer",
+  PM6: "PM6: a work-item anchor opens the existing Jobs detail through the watch read, the Analyze entry appears only on received messages and renders a task-backed structured card whose result is transient, and incoming messages never enter chat or the composer",
   PM7: "PM7: no messages route response or server log carries the operator key, the self id or self display name, the server address or a message body, and a CORE-422-refused send leaves no trace",
   PM8: "PM8: below the pf 2.20.12 Messages floor the tab shows an upgrade-needed state and spawns no message verb, and at the floor the panel works with names",
   PM9: "PM9: the two-user panel's text, titles and aria-labels carry neither the peer id nor the self id",
@@ -328,6 +352,8 @@ const T = {
   PM16: "PM16: desktop keeps two columns at the default and the minimum dock width and mobile keeps the same two columns with a back control",
   PM17: "PM17: the list offers the existing peers and silent contacts by display name, a peer row sends to its id and a first contact is its silent contact row",
   PM18: "PM18: the conversation route keeps peer as the send address and adds peer_name, and a send still addresses the peer id",
+  // the anchor field is gone and @project#number is the binding.
+  PM19: "PM19: @project#number in the text binds about_wi (known project, quote lines excluded, first wins), every bubble token links to the watch read, own bubbles quote, and no anchor field remains",
 };
 const failures = new Map(Object.values(T).map((title) => [title, []]));
 async function check(title, label, fn) {
@@ -377,6 +403,17 @@ const unreadDots = (root) => root.locator('[aria-label*="unread" i], [aria-label
 async function openDock(page) { await pfButton(page).click(); await dock(page).waitFor(); return dock(page); }
 async function messagesTab(page) { const t = tab(page, /^(messages|消息)/i); await t.waitFor({ timeout: 15_000 }); await t.click(); return t; }
 
+// the composer binds about_wi from the panel's mapped-project
+// groups, which only the list read made while Messages is shown carries (the
+// mount read skips them: `?groups=0`). A token send that lands between the two
+// reads carries no --about-wi (full-1 PM5: actual undefined). A token-binding
+// scenario waits for its seeded project's group before typing, under the
+// page-open ceiling and with the assertion unchanged.
+async function waitForProjectGroup(panel, project) {
+  const label = new RegExp(`^${project.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[，,]`);
+  await panel.getByRole("button", { name: label }).first().waitFor({ timeout: NAV_MS });
+}
+
 // ---- panel locators (spec strings; shared keys locale-tolerant) ----
 const selectEmpty = (panel) => panel.getByText(/选择一个会话|Select a conversation/).first();
 const sectionDirect = (panel) => panel.getByText("单聊", { exact: true }).first();
@@ -386,7 +423,9 @@ const unknownText = (panel) => panel.getByText("未知用户", { exact: true });
 const composeEntry = (panel) => panel.getByRole("button", { name: /新消息|New message/ }).first();
 const historyRegion = (panel) => panel.getByLabel(/会话记录|Conversation history/).first();
 const messageTextField = (panel) => panel.getByLabel("消息", { exact: true }).first();
-const anchorField = (panel) => panel.getByLabel("工作项锚点", { exact: true }).first();
+// removes the anchor field: this probe must find nothing.
+const anchorLabels = (panel) => panel.getByLabel(/工作项锚点|Work item anchor|工作項錨點/);
+const quoteButtons = (panel) => panel.getByRole("button", { name: /^引用$|^Quote$/i });
 const recipientField = (panel) => panel.getByLabel("收件人", { exact: true }).first();
 const sendButton = (panel) => panel.getByRole("button", { name: /^发送$|^Send$/i }).first();
 const analyzeButtons = (panel) => panel.getByRole("button", { name: /^分析$|^Analyze$/i });
@@ -714,15 +753,14 @@ try {
     await unknownText(panel).first().waitFor({ timeout: 15_000 });
     await (await requireVisible(unknownText(panel), "the silent contact row for the first contact")).click();
     const text = messageTextField(panel).or(panel.getByLabel(/^message|message text/i)).first();
-    const anchor = anchorField(panel).or(panel.getByLabel(/work item|anchor/i)).first();
     await text.fill("FIRST-MESSAGE");
-    if (await anchor.count()) await anchor.fill("task-42");
     await sendButton(panel).click();
     for (let i = 0; i < 20 && !sends().length; i++) await delay(500);
     assert.equal(sends().length, 1, `a list-view send must spawn exactly one pf msg send, got ${JSON.stringify(sends())}`);
     assert.equal(argAfter(sends()[0], "--to"), FIRST_PEER);
     assert.equal(argAfter(sends()[0], "--text"), "FIRST-MESSAGE");
-    assert.equal(argAfter(sends()[0], "--about-wi"), "task-42");
+    assert.equal(argAfter(sends()[0], "--about-wi"), undefined, "a text without a @project#number token carries no --about-wi");
+    assert.equal(await anchorLabels(panel).count(), 0, "the composer carries no work-item anchor field");
     assert.equal(readState().sends.length, 1, "the stub ledger must record exactly one send");
     // The created conversation has no display name yet: the list and the
     // header show 未知用户, never the typed user id.
@@ -735,20 +773,20 @@ try {
     assert.ok(!appearsIn(shown.labels, FIRST_PEER), "no title or aria-label may carry the typed user id");
   }));
 
-  seed({ conversations: [conversation("conv_anchor", PEER, PEER_NAME, ANCHOR.messages)], acked: { conv_anchor: 4 } });
+  seed({ conversations: [conversation("conv_anchor", PEER, PEER_NAME, ANCHOR.messages)], acked: { conv_anchor: 4 }, mappedProjects: ["workbench"] });
   await check(T.PM5, "PM5 one send, reply id, documented refusal", () => withPage(async (page) => {
     await openDock(page); await messagesTab(page); await openConversation(page, ANCHOR);
     const panel = dock(page);
+    // The @token binds only after the panel has its mapped projects.
+    await waitForProjectGroup(panel, "workbench");
     const text = messageTextField(panel);
-    const anchor = anchorField(panel);
-    await text.fill("SENT-ONE");
-    await anchor.fill("task-42");
+    await text.fill("SENT-ONE @acme#272");
     await sendButton(panel).click();
     for (let i = 0; i < 20 && !sends().length; i++) await delay(500);
     assert.equal(sends().length, 1, `a send must spawn exactly one pf msg send, got ${JSON.stringify(sends())}`);
     assert.equal(argAfter(sends()[0], "--to"), PEER, "the open conversation's send must address the route's peer id");
-    assert.equal(argAfter(sends()[0], "--text"), "SENT-ONE");
-    assert.equal(argAfter(sends()[0], "--about-wi"), "task-42");
+    assert.equal(argAfter(sends()[0], "--text"), "SENT-ONE @acme#272", "the @ token stays in the sent text");
+    assert.equal(argAfter(sends()[0], "--about-wi"), "task#272", "the text token feeds the unchanged about_wi wire");
     assert.equal(readState().sends.length, 1, "the stub ledger must record exactly one send");
     // Wait for the send to settle (the composer clears) before starting the
     // reply; the ledger records the spawn, not the route's completion.
@@ -776,7 +814,7 @@ try {
   }));
 
   seed({ conversations: [conversation("conv_anchor", PEER, PEER_NAME, ANCHOR.messages)], acked: { conv_anchor: 4 } });
-  await check(T.PM6, "PM6 anchor, analyzer, chat discipline", () => withPage(async (page) => {
+  await check(T.PM6, "PM6", () => withPage(async (page) => {
     const beforeSession = readFileSync(sessionFile, "utf8");
     await openDock(page); await messagesTab(page); await openConversation(page, ANCHOR);
     const panel = dock(page);
@@ -784,18 +822,26 @@ try {
     assert.equal(await analyzeButtons(panel).count(), 3, "the analyzer control must appear only on the three received messages");
     assert.equal(await panel.getByText("OWN-MESSAGE", { exact: false }).count() > 0, true);
     await analyzeButtons(panel).first().click();
-    await panel.getByText(ANALYSIS_SENTINEL, { exact: false }).first().waitFor({ timeout: 10_000 });
+    await panel.getByText(ANALYSIS_SUMMARY, { exact: false }).first().waitFor({ timeout: 10_000 });
+    // The structured card replaces the old one-line gray conclusion.
+    assert.ok(await panel.getByText("需求", { exact: true }).count() > 0, "the card must render the localized type badge");
+    assert.ok(await panel.getByText(ANALYSIS_MODEL, { exact: false }).count() > 0, "the card must render the model");
+    assert.ok((await panel.textContent() || "").includes(ANALYSIS_DURATION), "the card must render the duration");
+    assert.equal(await panel.getByText(ANALYSIS_CONCLUSION, { exact: false }).count(), 0, "no surface may read or render the retired conclusion");
+    assert.ok(await panel.getByRole("button", { name: /建票|File ticket/i }).count() > 0, "the card must carry the ticket action");
+    assert.ok(await panel.getByRole("button", { name: /回复|Reply/i }).count() > 0, "the card must carry the reply action");
     for (const store of ["localStorage", "sessionStorage"]) {
       const dump = await page.evaluate((s) => JSON.stringify(globalThis[s]), store);
-      assert.ok(!dump.includes(ANALYSIS_SENTINEL), `the transient conclusion must not be written to ${store}`);
+      assert.ok(!dump.includes(ANALYSIS_SUMMARY), `the transient analysis must not be written to ${store}`);
+      assert.ok(!dump.includes(ANALYSIS_CONCLUSION), `the retired conclusion must not be written to ${store}`);
     }
     const written = readdirSync(agentDir, { recursive: true }).filter((f) => typeof f === "string")
-      .map((f) => join(agentDir, f)).filter((p) => { try { return readFileSync(p, "utf8").includes(ANALYSIS_SENTINEL); } catch { return false; } });
-    assert.deepEqual(written, [], "the conclusion must not be written to disk");
-    // Transient: closing and reopening the dock drops the conclusion.
+      .map((f) => join(agentDir, f)).filter((p) => { try { const text = readFileSync(p, "utf8"); return text.includes(ANALYSIS_SUMMARY) || text.includes(ANALYSIS_CONCLUSION); } catch { return false; } });
+    assert.deepEqual(written, [], "the analysis must not be written to disk");
+    // Transient: closing and reopening the dock drops the card.
     await page.getByRole("button", { name: /close polyforge|关闭 polyforge/i }).first().click();
     await openDock(page); await messagesTab(page); await openConversation(page, ANCHOR);
-    assert.equal(await panel.getByText(ANALYSIS_SENTINEL, { exact: false }).count(), 0, "the conclusion must not persist across a reopen");
+    assert.equal(await panel.getByText(ANALYSIS_SUMMARY, { exact: false }).count(), 0, "the card must not persist across a reopen");
 
     // Incoming messages never enter the chat session or the composer.
     assert.equal(readFileSync(sessionFile, "utf8"), beforeSession, "an incoming message must not be written into the chat session");
@@ -1235,6 +1281,10 @@ try {
     assert.equal(await listSeparator(panel).count(), 0, "the mobile sheet renders no list resize separator");
     const divider = await panel.evaluate((root) => {
       const header = [...root.querySelectorAll("*")].find((node) => (node.textContent || "").trim() === "单聊");
+      // the sheet's 单聊 heading sits in the column's 40px
+      // header row, which carries the divider above the scroll region.
+      const row = header?.closest("[data-pf-messages-column-header]");
+      if (row) return parseFloat(getComputedStyle(row).borderLeftWidth) || 0;
       for (let node = header; node && node !== root; node = node.parentElement) {
         const text = node.textContent || "";
         if (text.includes("单聊") && text.includes("群聊") && text.includes("尚无群聊")) return parseFloat(getComputedStyle(node).borderLeftWidth) || 0;
@@ -1298,6 +1348,105 @@ try {
     assert.equal(argAfter(sends()[1], "--text"), "FIRST-CONTACT");
     await panel.getByText("FIRST-CONTACT", { exact: false }).first().waitFor({ timeout: 15_000 });
     await requireVisible(unknownText(panel), "the 未知用户 placeholder for the new unnamed peer");
+  }));
+
+  // the composer's anchor field is gone; the message text is
+  // the binding, bubbles link every valid token, and own messages quote.
+  seed({ conversations: [WORK_ITEM], acked: { conv_work_item: 4 }, mappedProjects: ["workbench"] });
+  await check(T.PM19, "PM19 inline @project#number binding, links and own-message quote", () => withPage(async (page) => {
+    await openDock(page); await messagesTab(page); await openConversation(page, WORK_ITEM);
+    const panel = dock(page);
+    const text = messageTextField(panel);
+    const field = () => text;
+    // The binding cases below read the mapped projects; wait for the group
+    // before the first send so @acme#272 always has its project known.
+    await waitForProjectGroup(panel, "workbench");
+
+    // The field is gone; the placeholder names the token form.
+    assert.equal(await anchorLabels(panel).count(), 0, "the composer must carry no work-item anchor field");
+    assert.equal(await text.getAttribute("placeholder"), "输入消息；写 @项目#号（如 @acme#272）可关联工单",
+      "the textarea carries the zh-CN @project#number placeholder");
+
+    // Own bubble: 引用 only. Peer bubbles: the unchanged 回复.
+    assert.equal(await quoteButtons(panel).count(), 1, "the one own message carries 引用");
+    assert.equal(await replyButtons(panel).count(), 3, "the three peer messages keep 回复");
+    assert.equal(await quoteButtons(panel).first().getAttribute("aria-label"), null, "the quote action is its visible text, not a hidden label");
+
+    // The duplicated anchor line is hidden; the historical one stays.
+    assert.equal(await panel.getByRole("button", { name: "task#272", exact: true }).count(), 2,
+      "the duplicated inline token and the own bubble token are the two links");
+    assert.equal(await panel.getByText("task#272", { exact: true }).count(), 0,
+      "a bubble whose about_wi duplicates an inline token shows no separate anchor line");
+    assert.ok(await panel.getByText("task-42", { exact: true }).count() > 0,
+      "a historical about_wi without an inline token keeps its anchor line");
+    assert.equal(await panel.getByRole("button", { name: "task-42", exact: true }).count(), 1,
+      "the historical anchor line stays clickable");
+
+    // 【引用】: exact block, append, never overwrite, replyTo untouched.
+    await quoteButtons(panel).first().click();
+    assert.equal(await field().inputValue(), "> OWN-LINK @acme#272\n\n",
+      "an empty draft becomes the plain-text quote block");
+    await quoteButtons(panel).first().click();
+    assert.equal(await field().inputValue(), "> OWN-LINK @acme#272\n\n> OWN-LINK @acme#272\n\n",
+      "a repeated click appends the block again");
+    await field().fill("DRAFT-A");
+    await quoteButtons(panel).first().click();
+    assert.equal(await field().inputValue(), "DRAFT-A\n\n> OWN-LINK @acme#272\n\n",
+      "a non-empty draft keeps its text, a blank line, then the block");
+    assert.equal(await field().evaluate((el) => document.activeElement === el
+      && el.selectionStart === el.value.length && el.selectionEnd === el.value.length), true,
+      "the textarea is focused with the caret at the end");
+    // A pending peer reply survives the own quote, and the later send carries it.
+    await replyButtons(panel).first().click();
+    await quoteButtons(panel).first().click();
+    await field().fill("AFTER-QUOTE");
+    await sendButton(panel).click();
+    for (let i = 0; i < 20 && !sends().length; i++) await delay(500);
+    assert.equal(sends().length, 1, "the own quote never sends by itself");
+    assert.equal(argAfter(sends()[0], "--reply-to"), "msg_1_peer", "a pending peer reply survives an own quote");
+    // With no pending reply, an own quote adds no reply target at all.
+    for (let i = 0; i < 40 && ((await field().inputValue()) !== "" || await sendButton(panel).isDisabled()); i++) await delay(250);
+    await quoteButtons(panel).first().click();
+    const ownOnly = await field().inputValue();
+    await field().fill(`OWN-ONLY ${ownOnly.trim()}`);
+    await sendButton(panel).click();
+    for (let i = 0; i < 40 && sends().length < 2; i++) await delay(250);
+    assert.equal(sends().length, 2);
+    assert.equal(argAfter(sends()[1], "--reply-to"), undefined, "an own quote never makes the later send reply to the own message");
+    for (let i = 0; i < 40 && ((await field().inputValue()) !== "" || await sendButton(panel).isDisabled()); i++) await delay(250);
+
+    // One send per binding case; the text rides verbatim and only a known,
+    // word-bounded token on a plain line supplies --about-wi.
+    const sendText = async (value) => {
+      const before = sends().length;
+      await field().fill(value);
+      await sendButton(panel).click();
+      for (let i = 0; i < 40 && sends().length <= before; i++) await delay(250);
+      assert.equal(sends().length, before + 1, `one send expected for ${JSON.stringify(value)}`);
+      for (let i = 0; i < 40 && ((await field().inputValue()) !== "" || await sendButton(panel).isDisabled()); i++) await delay(250);
+      return sends()[before];
+    };
+    const known = await sendText("BIND-ONE @acme#272 now");
+    assert.equal(argAfter(known, "--text"), "BIND-ONE @acme#272 now", "the @ token stays in the sent text");
+    assert.equal(argAfter(known, "--about-wi"), "task#272", "a known project token binds about_wi");
+    assert.equal(argAfter(await sendText("BIND-UNKNOWN @nope#12"), "--about-wi"), undefined,
+      "an unmapped project is plain text with no --about-wi");
+    assert.equal(argAfter(await sendText("BIND-BAD @acme#272abc"), "--about-wi"), undefined,
+      "a word character after the number makes no token");
+    assert.equal(argAfter(await sendText("BIND-QUOTE\n> @acme#272\nplain"), "--about-wi"), undefined,
+      "a token only on a > quote line never binds");
+    assert.equal(argAfter(await sendText("BIND-TWO @acme#272 then @acme#999"), "--about-wi"), "acme#272",
+      "the first token wins");
+    assert.equal(argAfter(await sendText("> @acme#999\nBIND-REAL @acme#272"), "--about-wi"), "acme#272",
+      "the quote line is skipped for the first plain-line token");
+
+    // A bubble token click runs the existing watch read for its ref.
+    await panel.getByRole("button", { name: "task#272", exact: true }).first().click();
+    const watchDeadline = Date.now() + 15_000;
+    while (Date.now() < watchDeadline && !calls().some((a) => a[0] === "watch" && a[1] === "task#272")) await delay(250);
+    assert.ok(calls().some((a) => a[0] === "watch" && a[1] === "task#272"),
+      "the inline link must run the existing watch read for");
+    await panel.locator('[data-pf-detail-title]').first().waitFor({ timeout: 15_000 });
   }));
 
   seed();

@@ -5,8 +5,9 @@
 - Font names refer to fonts on the **browser's device**, not the server; no enumeration, upload or remote download. `lib/font-preferences.ts` treats commas as separators, accepts optional enclosing quotes, quotes non-generic names as data, and always appends the default stack. Never interpolate font input into a stylesheet or accept it as executable CSS. Keep raw input whitespace while typing so multi-word names remain editable.
 - Each font has a separate base weight (100–600 in steps of 100, default Regular/400; it stops at 600 because headings and labels use 600 and bold text, highlighted bold and the terminal's bold use 700, so a heavier base would outweigh them), stored as `pi-ui-font-weight` / `pi-mono-font-weight` and applied through `--font-ui-weight` / `--font-mono-weight`. Missing/invalid stored weights use 400; saving 400 removes the override. Each reset clears that font's name **and** weight in one update, not the other font or chat size/width. The UI weight is inherited by ordinary interface/chat text; code/pre, highlighted code (including its inline theme styles), source-view line numbers and diffs use the mono weight. Headings, Markdown bold/inline code inside emphasis, and other explicitly weighted labels keep their original weights; do not blanket-override them with `!important`.
 - General's sidebar layout option (`settings.sidebarLayout`) chooses where the desktop sidebar shows the file browser: below the sessions (`stacked`, the default) or in a Sessions | Files tab (`tabs`), as two radio options in the send key's look (`settings-send-mode-option`). `lib/files-placement.ts` keeps it per browser (`pi-web:files-placement`; storage that is absent, blocked or corrupt reads as the default) and `useFilesPlacement()` subscribes through `useSyncExternalStore` (the server snapshot is the default, so hydration agrees), so Settings and `SessionSidebar` follow the same store. Phones always use tabs, whatever is stored.
-- General ends with a read-only **claude sessions** section (`ClaudeConfigDirSection`,): the claude config dir from `GET /api/claude` and each claude preset's wording, including whether it loads the session cwd's `CLAUDE.md`. Nothing there is editable and no credential is shown; see [claude-sessions.md](claude-sessions.md).
+- General no longer has a claude section: the read-only claude config-dir section of was retired in (claude sessions run the system claude with the user's own config); see [claude-sessions.md](claude-sessions.md).
 - General's Chat section ends with the switch for pi's own `showCacheMissNotices` (#1265), saved in the global settings.json through `/api/cache-miss-notices`, not in the browser: the notices come from the server, and the pi CLI reads the same key. Its note says a project's `.pi/settings.json` can override it. After a save the open chat remounts (`onSessionReloaded`) to show or drop them; see sessions.md, Cache and cost notices.
+- General's **Agent language** item (「Agent 使用语言」, zh-TW 「Agent 使用語言」; `AgentLanguageSettings` in `components/SettingsPanel.tsx`,) sits right after the UI language section, as its own radio group in the same `settings-language-option` look: English (the default) or 中文. It is not linked to the UI language: that one stays per browser (`pi-locale`), this one is stored on the server in `<pi agent dir>/pi-web-settings.json` (`{ "version": 1, "agentLanguage": "en" | "zh-CN" }`, `lib/agent-language-config.ts`; other keys kept, mode 0600, a file that is not a JSON object is refused rather than overwritten), so every device and browser reads the same value. `GET /api/agent-language` reads it — absent, malformed or unknown reads as English and never blocks a session — and `PUT /api/agent-language` `{ language }` is its only writer, behind the proxy's `/api/*` authentication (`PI_WEB_PASSWORD` when set) and the route's own trusted-request (403) and JSON (415) checks. The item appears once the GET settled; a failed load shows English with the visible `settings.agentLanguageLoadFailed` line. Picking a value saves it, and the control shows it only after the PUT succeeded; a failed save keeps the old value and shows the visible `settings.agentLanguageSaveError` line (`role="alert"`). The value applies to sessions created afterwards (pi, claude and their pi subagents); a session keeps the language it was created with, and sessions created before are English. What a 中文 session receives: [tools.md](tools.md) (pi) and [claude-sessions.md](claude-sessions.md) (claude).
 - ChatInput remeasures an existing draft when the interface font or weight changes. TerminalPanel subscribes in its existing lifetime effect, updates xterm's family and normal weight (its bold stays xterm's default 700, above every base weight) and refits, never restarting the terminal or its SSE stream for a font change.
 
 ## Plugins and skills
@@ -33,9 +34,10 @@ shared blocks; its machine-level detection comes from
 [polyforge-panel.md](polyforge-panel.md)).
 
 **Order and disclosure.** Top to bottom: the page title, the
-machine-status card, the configuration surface (machine-scope note, the three
-source cards — cli.toml, `[daemon]`, and the merged 工作区 / Workspace card
-Reload with its read/error/reason text), the workflow card
+machine-status card, the configuration surface (machine-scope note, the two
+source cards — the one cli.toml card with its top-level and `[daemon]` zones
+ and the merged 工作区 / Workspace card Reload
+with its read/error/reason text), the workflow card
  ([polyforge-panel.md](polyforge-panel.md#workflow-card)),
 the package-switch card, the Jobs card stream card, then the read-outs — recent
 panel writes, the install/upgrade command — and the footer last (the read-only
@@ -50,25 +52,59 @@ removed or conditionally hidden; parts are folded:
   replaces the old standalone paragraph), a version below the minimum appends
   the 「版本过低」 text, an unreachable daemon reads as such. `detectError` and
   Re-detect stay outside the fold; the detection cadence is unchanged.
-- **Configuration cards** show only the seven common writable keys by default
-  (`max_concurrent_jobs`, `step_timeout`, `stall_window`, `api_key`,
-  `summarize.models`, `summarize.language`, `summarize.interval_sec` — the
-  `WRITABLE` set, decided by key, never by whether the cwd is mapped), in pf's
-  order. Every other item of a card — known read-only keys and unknown/future
-  keys alike — sits in that card's counted 「只读项 (n)」 disclosure
-  (`configReadOnlyCount`), rendered through the same row markup and the same
-  page-level columns. The 工作区 card carries three sources,
-  each row with a visible source-file tag (`cli.toml` / `.polyforge.yaml`):
-  its common rows are the three `summarize.*` keys (written to the workspace
-  yaml); the `[workspace."<path>"]` mapping rows (cli.toml) and the read-only
-  `memory_policy` rows (the default entry, then each mapped project's own
-  lists, under 「记忆策略（只读）」 with the append note) fold behind its row
-  count (`configRowCount`). Each row keeps its own write path. In every card
-  the legend and the column header sit above the fold, so collapsing a card
-  hides rows only. With an unmapped cwd the
-  three `summarize.*` rows stay in the common position, read-only, with the
-  visible reason. Expanding yields exactly one row per item with its write
-  control unchanged.
+- **The cli.toml card** is one card holding two file zones,
+  each headed by the literal file section it writes — `cli.toml` for the
+  top-level keys, `cli.toml [daemon]` for the `[daemon]` table (never
+  translated) — over one thin divider rather than a tinted box in a box
+  ( de-boxed the zones; both keep the page's key track). Every
+  non-secret cli.toml key is editable; the key sets are one fact in
+  `lib/polyforge-config-schema.ts` (`CLI_COMMON_KEYS`,
+  `CLI_ADVANCED_TOP_LEVEL_KEYS`, `CLI_ADVANCED_DAEMON_KEYS`,
+  `CONNECTION_KEYS`, `CLI_WRITABLE_KEYS`) that the form and the write
+  route's allowlist both consume. Visible without expanding: the five common
+  keys `max_concurrent_jobs`, `step_timeout`, `stall_window`, `claude_bin`,
+  `api_key` (decided by key, in pf's order). Each zone folds the rest behind
+  one counted 「高级 (n)」 toggle (`configAdvancedCount`): `server`,
+  `daemon_socket`, `user_id` (3) in the top-level zone and `harness_root`,
+  `operator_agent_dir` (2) in `[daemon]`; any key pf adds later joins its
+  zone's fold, read-only. The two folds reuse the #212 `cliToml` and `daemon`
+  disclosure regions (no new stored field; a stored state keeps applying).
+  The daemon-value column and its header exist only in the `[daemon]` zone
+  (the #126 ruling). `api_key` stays write-only (a password input that clears
+  after save, never a value); the `[workspace."<path>"]` mapping stays
+  read-only in the 工作区 card. The form refuses only pf's schema kinds and an
+  empty string/path key (「a value is required」 under the row, before any
+  request); every other value goes to pf, whose outcome or diff shows under
+  the row.
+- **Connection keys.** `server`, `api_key`, `daemon_socket`,
+  `user_id`: Save validates the draft, then opens a page-level confirmation
+  (`role="alertdialog"`, rendered after the cli.toml card and outside every
+  fold, `configConfirmConnection`) stating that the panel's next pf call uses
+  the new value while the running daemon keeps the old one until it restarts.
+  Confirm issues exactly one write; Cancel writes nothing and keeps the draft;
+  a pending confirmation keeps its zone open like a draft. A saved connection
+  row then shows an inline notice (`configConnectionNotice`) with a one-click
+  Roll back that reuses `POST /api/polyforge/config/history` (a fresh read and
+  the same CAS write, recorded as a new entry); `api_key` gets the notice but
+  no rollback (its history is set/unset only). Every other key saves from its
+  own row. No save reloads, shuts down or re-ensures the daemon: Reload stays
+  its own explicit control. There is no unset control.
+- **The cli.toml `[summarize]` zone and `[memory_policy]` blocks**
+ (superseding #216/#255's workspace-yaml summarize): the
+  three `summarize.*` keys are the cli.toml card's `cli.toml [summarize]`
+  zone, all common rows, their value, source, class and schema only from
+  `pf --json config list`, written as flat cli.toml keys (no `--cwd`, the
+  cli.toml CAS) and editable with an unmapped cwd. The read-only
+  `cli.toml [memory_policy]` blocks follow inside the same card, one group
+  per workspace path (`default` first, the projects sorted), no write
+  control. Below pf 2.20.21 (or an unknown version) both are absent and one
+  localized upgrade hint stands in their place.
+- **The 工作区 card** (mapping-only since) holds
+  the `[workspace."<path>"]` mapping rows (tagged `cli.toml`, read-only),
+  folded behind its row count (`configRowCount`). In every card the legend
+  and each zone's column header sit above the fold, so collapsing hides rows
+  only. Expanding yields exactly one row per item with its write control
+  unchanged.
 - **Read-only rows** share one muted treatment wherever they are: the value,
   the workspace path, chips and the unset placeholder all take
   `--text-muted` under `.polyforge-config-row.is-readonly`, with no write
@@ -81,12 +117,14 @@ removed or conditionally hidden; parts are folded:
   install title line, so it is reachable without expanding.
 - **Inline feedback.** A save, its client-side validation error, or a
   rollback renders its result under its own row/entry (keyed by `item.key` /
-  `entry.id`), an error with `role="alert"`; copy feedback renders in the
+  `entry.id`; a connection row's notice rollback under that row), an error
+  with `role="alert"`; copy feedback renders in the
   install block. The footer keeps page-level status only: detection, the
   package switch and Reload. The write request shapes are unchanged.
-- **Locks.** A region holding an unsaved draft or a row error (today only the
-  history block can, by a failed rollback: the folds hold no writable key)
-  renders open whatever is stored, its toggle shows a visible marker
+- **Locks.** A region holding an unsaved draft, a pending connection-key
+  confirmation or a row error (a cli.toml zone's advanced keys are writable
+  since; the history block by a failed rollback) renders open
+  whatever is stored, its toggle shows a visible marker
   (`configDraftMarker` / `configErrorMarker`) and a toggle attempt writes
   nothing. The marker is runtime state, never stored.
 - **Storage.** Each region's open/closed state lives in this browser's
@@ -122,27 +160,48 @@ it without a reload.
 The configuration panel below the detection card is its own surface: the
 machine-scope note is always visible, and the keys of `pf --json config list`
 render in source cards, each with a title and a visible one-line
-hint, in a fixed order — cli.toml flat keys, `[daemon]`, then the 工作区 card
-(the workspace mapping, the summarize keys and the read-only
-memory policy together; `configCards()` folds the helpers' summarize group into
-it). The grouping is presentation only and
+hint, in a fixed order — the cli.toml card (its top-level zone,
+then its `[daemon]` zone; then its `[summarize]` zone and the
+read-only per-path `[memory_policy]` blocks), then the 工作区 card
+(; since the cli.toml workspace mapping only —
+`configCards()` puts the helpers' summarize group in the cli.toml card). The grouping is presentation only and
 lives in the import-free `components/polyforge-config-helpers.ts`: pf marks no
-table membership, so the daemon card uses a copy of pf's five `[daemon]` key
-names (a key pf adds later shows in the cli.toml card until the list is
+table membership, so the `[daemon]` zone uses a copy of pf's five `[daemon]` key
+names (a key pf adds later shows in the top-level zone until the list is
 extended — cosmetic), a `section` item is a workspace mapping, a `summarize.`
-key is summarize, and any other key stays in the cli.toml card, never dropped.
+key is summarize, and any other key stays in the top-level zone, never dropped.
 The detection block and the package switch are cards too, and the detection
 rows use the same key-column width as the configuration cards.
 
-Every card declares only its effective columns:
-key | applies | file value for cli.toml and the 工作区 card (a mapping row's
-value is its projects), key | applies | file value | daemon value for
-`[daemon]`. The key and applies tracks are page-level fixed widths
-(`--polyforge-col-key`, `--polyforge-col-class` on `.settings-polyforge`) and
+Every card and zone declares only its effective columns:
+key | applies | file value for the top-level cli.toml zone and the 工作区 card
+(a mapping row's value is its projects), key | applies | file value | daemon
+value for the `[daemon]` zone. The key and applies tracks are page-level fixed widths
+(`--polyforge-col-key`, `--polyforge-col-class` on `.settings-polyforge`; all
+zones share them,) and
 the rows are CSS subgrids, so the value column starts at the same x in every
-card whether or not that card has a daemon column; no card renders an empty
+card and zone whether or not it has a daemon column; no card renders an empty
 column, and a row is `is-readonly` (muted value, no write control) without
-collapsing a cell. A key outside the three live daemon keys has no daemon cell
+collapsing a cell.
+
+**No mid-word breaks.** Every data-driven Latin token — key,
+workspace path, read-only value, chip, history key/change, workflow source and
+the install command — is rendered with `<wbr>` after one of `- _ / . : , ; |`
+(`BreakableToken` in `components/PolyforgeConfig.tsx`), and the token styles
+use `overflow-wrap: break-word` with `word-break: normal` (never `break-all`
+or `overflow-wrap: anywhere`). A line therefore breaks only after one of those
+separators or beside CJK with the whole text visible (no ellipsis, no nowrap
+horizontal scroll); the sole exemption is one segment between separators that
+is itself wider than its box. The install command stays monospace and wraps at
+spaces first, a URL after `/` or `.`; its text and copy button are unchanged.
+`e2e/polyforge-config-layout.mjs` pins this with a per-character
+`Range.getClientRects()` scan at 1280/768/375 × en/zh-CN with every region open,
+plus `scrollWidth ≤ clientWidth` for every card and zone.
+The page also has one spacing/row scale (card gap, card padding, row height,
+row divider), source tags inline with their key when width allows, history rows
+aligned `key | old → new | 回滚`, and the workflow card's step blocks as
+outlined blocks with a weightier title line and a subordinate editor inset —
+hierarchy and spacing only, no content removed ( density pass). A key outside the three live daemon keys has no daemon cell
 (its file value takes that width); a live daemon key whose daemon value is
 unset shows the unset placeholder in that one cell. The Save button lives
 inside the row's value cell, directly beside its input — never in a far-right actions column. A
@@ -157,20 +216,25 @@ comma-joined long string is displayed, while `formValue()` still splits the
 comma string it builds before the write. The three daemon-column keys show the
 file value beside the daemon's loaded value with a visible stale reason (and,
 when `pf --json ops status` fails, the column says the daemon is not running),
-and the workspace summarize values come from the cwd-resolved workspace (their
-rows stay visible but read-only, with the visible reason, when the cwd is
-unmapped). Under 640px each row is two columns: the key on
+and the summarize values are machine-level cli.toml values from
+`pf --json config list` (editable whether or not the cwd is
+mapped). Under 640px each row is two columns: the key on
 the left with its class badge flush right on the same line (the badge is never
 squeezed; a long key wraps instead), then the file value and the daemon value
 each across the whole row below; the header hides and nothing overflows
-horizontally. Wider layouts keep the shared columns. Below the pf capability floor,
+horizontally. Also at ≤640px the Jobs-card preferences and the workflow attr
+row put their label above a full-width control. Wider layouts
+keep the shared columns. Below the pf capability floor,
 or an old list shape, the write controls are unavailable with visible reason
 text while detection keeps working. The step candidates are no longer a
 read-out here: the workflow card shows them per project with
 their effective chains. The
 write controls are schema-derived (numeric/duration bounds from pf, enforced
 again client-side before the write so 0/9 cannot be submitted; free-text
-language, ordered models, an api_key password field that clears after save).
+language, ordered models, an api_key password field that clears after save,
+and plain text for a key pf gives no schema — `server`, `daemon_socket`,
+`user_id`, `claude_bin`, `harness_root`, `operator_agent_dir` — refused only
+when empty).
 That client-side guard lives in `lib/polyforge-config-schema.ts`, a pure,
 import-free module: it is the only value the panel imports from the config
 layer, so the server read module (`lib/polyforge-config.ts`, which pulls
@@ -193,7 +257,8 @@ claim.
   panel, no error surface — plus the copyable install.sh install/upgrade
   command (`polyforge.settings.installCommand`, a fixed i18n string with
   placeholders only, identical in every locale; a copy button puts it on the
-  clipboard, nothing ever executes it). The command is reachable in every
+  clipboard, nothing ever executes it). It wraps at spaces and, inside a URL,
+  after `/` or `.`. The command is reachable in every
   state: folded while pf is detected healthy, open without a disclosure
   otherwise.
 - **Rows** (folded behind the summary line,). Version (verbatim, with the non-blocking 「版本过低」 hint below

@@ -31,7 +31,11 @@ const FAILED_READ: PolyforgeProgressSnapshot = { available: false, lines: [], om
  *   at once (zero requests while hidden); becoming visible reads at once.
  * - At most one request in flight, each bounded by PROGRESS_REQUEST_TIMEOUT_MS.
  * - A failed or degraded read keeps the last good snapshot
- *   (nextProgressSnapshot); a usable read replaces it wholesale. Null until
+ *   (nextProgressSnapshot); a usable read replaces it wholesale, except the
+ *   route's event-log answer after the daemon drops a finished job
+ * (lifecycle lines only): the open detail keeps the
+ *   narration and tool lines it held and gains the event lines it lacked
+ *   (the final `terminal` / `job_stopped`). Null until
  *   the first read settles; a first read that fails outright (HTTP error,
  *   network error, timeout, malformed body) is the unavailable state (N5).
  */

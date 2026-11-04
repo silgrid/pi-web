@@ -410,8 +410,8 @@ export interface SessionInfo {
   /** The agent the session runs on; absent means pi. "claude" rows come from
    *  pi-web's claude index, never from a pi session file. */
   harness?: "pi" | "claude";
-  /** A claude session's fixed model alias and tool preset (claude rows only). */
-  claude?: { modelAlias: string; preset: string };
+  /** A claude session's current full model name and effort (claude rows only;). */
+  claude?: { model: string; effort?: string };
   /** Archived in pi-web's claude index (claude rows only; pi rows keep the browser's archive set). */
   archived?: boolean;
 }

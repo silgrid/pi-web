@@ -409,6 +409,27 @@ test("a tool card shows the run time pi recorded, else the timestamps' differenc
   assert.equal(formatToolDuration(3_725_000), "1h 2m 5s");
 });
 
+test("the transcript tool card renders through the shared shell — same tone, one aria-expanded header", () => {
+  const block = { type: "toolCall", toolCallId: "call-shell-1", toolName: "bash", input: { command: "echo SHELL" } };
+  const message = { role: "assistant", provider: "anthropic", model: "claude-test", content: [block] };
+  const result = (isError) => ({ role: "toolResult", toolCallId: block.toolCallId, toolName: "bash", content: [{ type: "text", text: "OUT" }], isError });
+  clearExpandedToolCalls();
+  const ok = renderMessage(message, { toolResults: new Map([[block.toolCallId, result(false)]]) });
+  assert.match(ok, /<div style="border-radius:7px;overflow:hidden;font-size:12px;border:1px solid rgba\(34,197,94,0.25\);background:rgba\(34,197,94,0.04\)">/);
+  assert.match(ok, /<button type="button" aria-expanded="false"[^>]*>(?:(?!<\/button>)[\s\S])*echo SHELL/, "the header button names its state and previews the command");
+  assert.doesNotMatch(ok, />OUT</, "collapsed: no result body");
+  const failed = renderMessage(message, { toolResults: new Map([[block.toolCallId, result(true)]]) });
+  assert.match(failed, /border:1px solid rgba\(248,113,113,0.45\);background:rgba\(248,113,113,0.05\)/);
+  setToolCallExpanded(block.toolCallId, true);
+  try {
+    const open = renderMessage(message, { toolResults: new Map([[block.toolCallId, result(false)]]) });
+    assert.match(open, /aria-expanded="true"/);
+    assert.match(open, />OUT</, "expanded: the transcript's own rich body inside the shell");
+  } finally {
+    clearExpandedToolCalls();
+  }
+});
+
 const COMPLETE_SKILL_EXPANSION = `<skill name="review" location="/skills/review/SKILL.md">
 References are relative to /skills/review.
 
@@ -1102,4 +1123,71 @@ test("one column names a deleted file's section by its old path", () => {
 
   assert.ok(html.includes(">a/gone.ts<"));
   assert.ok(!html.includes("/dev/null"));
+});
+
+// a claude session's Agent call renders as its subagent run's row.
+const { ClaudeSubagentContext } = await jiti.import("./ClaudeSubagentRow.tsx");
+const subagentView = await jiti.import("@/lib/claude-subagent-view");
+
+function renderWithRuns(message, runs) {
+  return renderToStaticMarkup(
+    React.createElement(I18nProvider, null,
+      React.createElement(ClaudeSubagentContext.Provider, { value: runs },
+        React.createElement(MessageView, { message }))),
+  );
+}
+const agentCall = (id, name = "Agent") => ({ role: "assistant", provider: "claude", model: "claude-haiku-5-5", content: [{ type: "toolCall", toolCallId: id, toolName: name, input: { description: "Read note", prompt: "Read the note", subagent_type: "general-purpose" } }] });
+const readStep = (id) => ({ id: `s-${id}`, message: { role: "assistant", provider: "claude", model: "m", content: [{ type: "toolCall", toolCallId: `toolu_${id}`, toolName: "Read", input: { file_path: `/p/${id}.txt` } }] } });
+const textStep = (id, text) => ({ id, message: { role: "assistant", provider: "claude", model: "m", content: [{ type: "text", text }] } });
+const subRun = (id, over = {}) => ({ toolCallId: id, agentType: "general-purpose", description: "Read note", prompt: "Read the note in full", background: true, status: "running", entries: [], ...over });
+
+test("a running Agent row shows the badge, description, progress and live status, and opens on its prompt, timeline and no Result", () => {
+  const html = renderWithRuns(agentCall("toolu_r1"), { toolu_r1: subRun("toolu_r1", { progress: "Reading note.txt", entries: [readStep("a"), textStep("t1", "TOKEN_TEXT")] }) });
+  assert.match(html, />general-purpose</);
+  assert.match(html, />Read note</);
+  assert.match(html, />Reading note\.txt</);
+  assert.match(html, />Running</);
+  assert.match(html, /aria-expanded="true"/, "a running row opens by default");
+  assert.match(html, />Read the note in full</, "the prompt shows above the timeline");
+  assert.match(html, />Read</, "the subagent's Read renders with the chat's tool card");
+  assert.match(html, /TOKEN_TEXT/);
+  assert.doesNotMatch(html, />Result</, "no Result while running");
+  assert.doesNotMatch(html, /rgba\(34,197,94,0\.25\)[^]*>Agent</, "no ordinary Agent tool card");
+});
+
+test("a finished row stays collapsed with its statistics and mounts no body; expanded it shows the Result once", () => {
+  const usage = { totalTokens: 10379, toolUses: 1, durationMs: 1906 };
+  const run = subRun("toolu_r2", { status: "completed", usage, result: "TOKEN_TEXT", progress: "Reading note.txt", entries: [readStep("b"), textStep("t2", "TOKEN_TEXT")] });
+  const collapsed = renderWithRuns(agentCall("toolu_r2"), { toolu_r2: run });
+  assert.match(collapsed, /aria-expanded="false"/);
+  assert.match(collapsed, />1 tool · 1s · 10,379 tokens</);
+  assert.doesNotMatch(collapsed, /Read the note in full|TOKEN_TEXT|Reading note/, "collapsed mounts no prompt, timeline or progress");
+  subagentView.setClaudeSubagentManualExpansion("toolu_r2", true);
+  const open = renderWithRuns(agentCall("toolu_r2"), { toolu_r2: run });
+  assert.match(open, />Result</);
+  assert.equal(open.split("TOKEN_TEXT").length - 1, 1, "the final reply shows once, as the Result");
+  const none = renderWithRuns(agentCall("toolu_r2"), { toolu_r2: { ...run, result: undefined, entries: [] } });
+  assert.match(none, />No result</);
+});
+
+test("the timeline pages at 25 steps with a show-more control, and a nested Agent call renders the same row", () => {
+  const steps = Array.from({ length: 27 }, (_, index) => textStep(`n${index}`, `step-${index}-text`));
+  const html = renderWithRuns(agentCall("toolu_r3"), { toolu_r3: subRun("toolu_r3", { entries: steps }) });
+  assert.match(html, /step-24-text/);
+  assert.doesNotMatch(html, /step-25-text/);
+  assert.match(html, />Show 2 more</);
+  const nested = renderWithRuns(agentCall("toolu_outer", "Task"), {
+    toolu_outer: subRun("toolu_outer", { entries: [{ id: "o1", message: agentCall("toolu_inner") }] }),
+    toolu_inner: subRun("toolu_inner", { agentType: "Explore", description: "Inner look", entries: [textStep("i1", "deep-text")] }),
+  });
+  assert.match(nested, />Explore</);
+  assert.match(nested, />Inner look</);
+  assert.match(nested, /deep-text/);
+  assert.equal(nested.split("data-claude-subagent=").length - 1, 2, "the same row at both depths");
+});
+
+test("without a run (a pi session, or no subagent data) an Agent call stays the ordinary tool card", () => {
+  const html = renderWithRuns(agentCall("toolu_none"), {});
+  assert.match(html, /border:1px solid rgba\(34,197,94,0\.25\)/);
+  assert.doesNotMatch(html, /data-claude-subagent/);
 });

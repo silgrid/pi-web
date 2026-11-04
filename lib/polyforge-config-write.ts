@@ -1,10 +1,20 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { hasConfigListShape, POLYFORGE_CONFIG_PANEL_MINIMUM_PF_VERSION } from "./polyforge-config";
+import {
+  hasConfigListShape,
+  POLYFORGE_CONFIG_PANEL_MINIMUM_PF_VERSION,
+  POLYFORGE_CONFIG_SUMMARIZE_MINIMUM_PF_VERSION,
+} from "./polyforge-config";
 import { isPolyforgeVersionBelowMinimum } from "./polyforge-detect";
 import { polyforgePfBin } from "./polyforge-pf-bin";
 import { probePolyforgeVersion } from "./polyforge-status";
-import { parseStepWriteKey, stepValueError } from "./polyforge-config-schema";
+import {
+  CLI_WRITABLE_KEYS,
+  NON_EMPTY_STRING_KEYS,
+  parseStepWriteKey,
+  stepValueError,
+  SUMMARIZE_KEYS,
+} from "./polyforge-config-schema";
 import { POLYFORGE_WORKFLOW_CARD_MINIMUM_PF_VERSION } from "./polyforge-workflows";
 import {
   appendPolyforgeConfigHistory,
@@ -18,15 +28,11 @@ import {
  * No value from this module is ever logged or echoed in an error.
  */
 
-export const WRITABLE_KEYS = new Set([
-  "max_concurrent_jobs",
-  "step_timeout",
-  "stall_window",
-  "summarize.models",
-  "summarize.language",
-  "summarize.interval_sec",
-  "api_key",
-]);
+/** The fixed allowlist: every cli.toml key the panel edits (:
+ *  the nine non-secret keys plus write-only api_key) and the cli.toml
+ *  [summarize] keys the same constants the client form
+ *  renders from. memory_policy is read-only in the panel and never listed. */
+export const WRITABLE_KEYS = new Set([...CLI_WRITABLE_KEYS, ...SUMMARIZE_KEYS]);
 
 /** The panel's allowlist: the fixed keys above plus the workspace step keys
  *  `steps.<project>.<step-id>.models` / `.attrs.<name>`. */
@@ -34,9 +40,10 @@ export function isPanelWritableKey(key: string): boolean {
   return WRITABLE_KEYS.has(key) || parseStepWriteKey(key) !== null;
 }
 
-/** A key written to the workspace `.polyforge.yaml` (needs a cwd). */
+/** A key written to the workspace `.polyforge.yaml` (needs a cwd): the
+ *  step keys only — summarize.* is a flat cli.toml key. */
 function isWorkspaceKey(key: string): boolean {
-  return key.startsWith("summarize.") || parseStepWriteKey(key) !== null;
+  return parseStepWriteKey(key) !== null;
 }
 
 const WRITE_TIMEOUT_MS = 30000;
@@ -143,6 +150,10 @@ function assertShape(key: string, value: unknown): void {
     if (typeof value !== "string" || value.trim() === "") throw new ConfigWriteError(`${key} must be a duration string`);
     return;
   }
+  if (NON_EMPTY_STRING_KEYS.includes(key)) {
+    if (typeof value !== "string" || value.trim() === "") throw new ConfigWriteError(`${key} must be a non-empty string`);
+    return;
+  }
 }
 
 function valueArg(key: string, value: unknown): string {
@@ -197,6 +208,16 @@ async function assertWritableCapability(): Promise<void> {
   }
 }
 
+/** A summarize write needs the pf that reads and writes [summarize] in
+ *  cli.toml; an older pf would write the retired yaml key.
+ *  A null/unparseable version is below the floor: 400, nothing spawned. */
+async function assertSummarizeWriteCapability(): Promise<void> {
+  const presence = await probePolyforgeVersion(true);
+  if (isPolyforgeVersionBelowMinimum(presence.version, POLYFORGE_CONFIG_SUMMARIZE_MINIMUM_PF_VERSION, true)) {
+    throw new ConfigWriteError(`the summarize settings need pf ${POLYFORGE_CONFIG_SUMMARIZE_MINIMUM_PF_VERSION} or newer (found ${presence.version ?? "an unparseable version"})`, 400);
+  }
+}
+
 /** A step-key write also needs the workflow card's floor and the running
  *  daemon's own fact (`write_capable` of `pf --json workflows`: it accepts
  *  step attrs). pf refuses the same way (CORE-501) before touching the file;
@@ -231,7 +252,7 @@ interface CurrentValue {
 /** The value a key has in the file right now, read through pf. The write path
  *  records `old` from here (never from the previous history entry), and takes
  *  the CAS hash of the file the key actually lives in (cli.toml for the cli
- *  keys, the workspace yaml for summarize.*). */
+ *  and summarize keys, the workspace yaml for the step keys). */
 async function readCurrentValue(key: string, cwd: string): Promise<CurrentValue> {
   const stepKey = parseStepWriteKey(key);
   if (stepKey) {
@@ -254,28 +275,6 @@ async function readCurrentValue(key: string, cwd: string): Promise<CurrentValue>
       value: declared ? (stepKey.attr ? target.value : target.models) ?? null : null,
       set: declared,
       workspace: typeof doc.workspace === "string" ? doc.workspace : cwd,
-    };
-  }
-  if (key.startsWith("summarize.")) {
-    const run = await runPf(["--json", "config", "workspace", "--cwd", cwd]);
-    if (run.code !== 0) {
-      const failure = parsePfError(run.stderr);
-      throw new ConfigWriteError(failure.message, failure.status, failure.diff);
-    }
-    const doc = JSON.parse(run.stdout) as Record<string, unknown>;
-    const workspace = typeof doc.workspace === "string" ? doc.workspace : cwd;
-    const yaml = isRecord(doc.yaml) ? doc.yaml : {};
-    const name = key.slice("summarize.".length);
-    const entry = isRecord(doc.summarize) && isRecord(doc.summarize[name]) ? doc.summarize[name] : {};
-    const source = typeof entry.source === "string" ? entry.source : "default";
-    const fromFile = source === "file";
-    return {
-      class: typeof entry.class === "string" ? entry.class : "",
-      hash: typeof yaml.sha256 === "string" ? yaml.sha256 : null,
-      exists: yaml.exists !== false,
-      value: fromFile ? entry.value ?? null : null,
-      set: fromFile,
-      workspace,
     };
   }
   const list = await readConfigList();
@@ -321,6 +320,7 @@ async function executeWrite(body: ConfigWriteRequest): Promise<ConfigWriteResult
   if (scope === "workspace" && !cwd) throw new ConfigWriteError("a workspace write needs cwd");
   if (action === "set") assertShape(key, body.value);
   if (parseStepWriteKey(key)) await assertStepWriteCapability(cwd);
+  if (key.startsWith("summarize.")) await assertSummarizeWriteCapability();
 
   // A fresh read gives the file value before the write (the history's `old`)
   // and the file the key lives in (the CAS hash).

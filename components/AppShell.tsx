@@ -12,6 +12,8 @@ import type { ChatScrollPosition } from "@/lib/chat-scroll-position";
 import { FileViewer } from "./FileViewer";
 import { BackgroundTasksPanel } from "./BackgroundTasksPanel";
 import { PolyforgePanel, shortenCandidate } from "./PolyforgePanel";
+import type { PolyforgePromptTarget } from "./PolyforgeMessages";
+import { parsePolyforgePrompt, type PolyforgePrompt } from "@/lib/polyforge-messages-pure";
 import { TabBar, type Tab } from "./TabBar";
 import { openFileTab, saveFileViewerState, saveParkedFileViewerState, switchFileWorkspace, type ParkedFileWorkspace } from "./file-tab-state";
 import { SettingsPanel, SettingsSectionIcon } from "./SettingsPanel";
@@ -53,6 +55,7 @@ import { reorderById, syncTabOrder, applyTabOrder } from "@/lib/tab-order";
 import { projectDisplayNameForPath } from "@/lib/project-groups";
 import { listCustomDirectories } from "@/lib/custom-directories";
 import { copyText } from "@/lib/clipboard";
+import { sendAgentCommand } from "@/lib/agent-client";
 import { getFileName } from "@/lib/file-paths";
 import { buildAtMentionText, buildFileAtMentionsText, buildFileLineMentionText } from "@/lib/file-fuzzy";
 import {
@@ -66,7 +69,7 @@ import type { DebugClientSession } from "@/lib/debug-types";
 import { getInitialNavigation, linkedSessionId, withTabOpen } from "@/lib/initial-navigation";
 import { clearTabOpenSession, getTabOpen, setTabOpenNewSession, setTabOpenSession } from "@/lib/tab-session";
 import { mergeCatalogRow } from "./session-catalog-helpers";
-import { rekeyDraft } from "@/lib/draft-store";
+import { appendDraftText, rekeyDraft } from "@/lib/draft-store";
 import {
   clearLastOpen,
   getLastOpenSession,
@@ -300,7 +303,6 @@ export function AppShell() {
   const {
     state: bgTasksState,
     logs: bgTaskLogs,
-    runningCount: bgRunningCount,
     refresh: refreshBgTasks,
     applyEvent: applyBgTasksEvent,
     fetchLogs: fetchBgTaskLogs,
@@ -349,34 +351,6 @@ export function AppShell() {
     openAnchor: openPfAnchor,
   } = usePolyforge(pfPanelOpen);
 
-  const pfMessagesSurface = {
-    pfPresent,
-    capable: pfMessagesCapable,
-    reason: pfMessagesReason,
-    conversations: pfConversations,
-    contacts: pfContacts,
-    groups: pfGroups,
-    membershipAdmin: pfMembershipAdmin,
-    users: pfUsers,
-    onChangeMembership: changePfMembership,
-    error: pfMessagesError,
-    selectedConversation: pfSelectedConversation,
-    onSelectConversation: selectPfConversation,
-    selectedContact: pfSelectedContact,
-    onSelectContact: selectPfContact,
-    messages: pfMessages,
-    initialPageLoaded: pfMessagesInitialPageLoaded,
-    blocked: pfMessagesBlocked,
-    loadingOlder: pfMessagesLoadingOlder,
-    onLoadOlder: loadPfOlderMessages,
-    onAcknowledge: acknowledgePfMessagesExplicitly,
-    onSend: sendPfMessage,
-    onAnalyze: analyzePfMessage,
-    analyses: pfAnalyses,
-    onOpenAnchor: openPfAnchor,
-    unreadTotal: pfUnreadTotal,
-  };
-
   // pi#121: the polyforge chat id of every session that carries the
   // display-only ` · <id>` suffix — the pane tabs on desktop, the current
   // session on mobile. Lazy and presence-gated: a pf-less install issues
@@ -400,12 +374,19 @@ export function AppShell() {
   // here would flip that functional update into a close-then-reopen. Mobile
   // keeps its backdrop tap (unchanged); the listener exists only while the
   // desktop dock is open.
+  // not while a Messages 「@」 run is in flight — its answer
+  // may land under its message, which closing the dock would lose.
+  const pfPromptBusyRef = useRef(false);
+  const setPfPromptBusy = useCallback((busy: boolean) => {
+    pfPromptBusyRef.current = busy;
+  }, []);
   useEffect(() => {
     if (!pfPanelOpen || isMobile || pfDockPinned) return;
     const dismissOnOutsidePress = (event: PointerEvent) => {
       const target = event.target;
       if (!(target instanceof Element)) return;
       if (target.closest("[data-pf-dock], [data-pf-toggle]")) return;
+      if (pfPromptBusyRef.current) return;
       setPfPanelOpen(false);
     };
     document.addEventListener("pointerdown", dismissOnOutsidePress);
@@ -708,6 +689,83 @@ export function AppShell() {
     }
     return chatInputRef.current;
   }, [splitPaneEnabled, isMobile, focusedPaneId]);
+  // the Messages 「@」 action binds its fill target here, at
+  // click time, through the same derivation as resolveChatInputHandle (the
+  // focused split pane, else the classic/mobile composer); null when there is
+  // no composer. The binding is the composer's draft key (its session) and,
+  // in split view, its pane. When the answer arrives the bound pane must
+  // still be open (else false: shown under the message, never redirected);
+  // the composer slot that still shows that draft key gets the text, else
+  // the session's stored draft does. Text only — nothing is ever sent.
+  const paneTabsRef = useRef(paneTabs);
+  paneTabsRef.current = paneTabs;
+  const bindPromptTarget = useCallback((): PolyforgePromptTarget | null => {
+    const handle = resolveChatInputHandle();
+    const draftKey = handle?.draftKey();
+    if (!handle || !draftKey) return null;
+    const paneId = splitPaneEnabled && !isMobile && focusedPaneId ? focusedPaneId : null;
+    const name = paneId
+      ? paneTabsRef.current.find((tab) => tab.sessionId === paneId)?.label ?? ""
+      : selectedSession
+        ? selectedSession.name || selectedSession.firstMessage || selectedSession.id.slice(0, 12)
+        : translate("tabs.new");
+    return {
+      name,
+      fill: (prompt: string) => {
+        if (paneId && !paneTabsRef.current.some((tab) => tab.sessionId === paneId)) return false;
+        const current = paneId ? paneChatInputRefsRef.current.get(paneId)?.current : chatInputRef.current;
+        if (current && current.draftKey() === draftKey) current.appendText(prompt);
+        else appendDraftText(draftKey, prompt);
+        return true;
+      },
+    };
+  }, [resolveChatInputHandle, splitPaneEnabled, isMobile, focusedPaneId, selectedSession, translate]);
+  // The 「@」 request: one POST to the prompt route, the one sanitizer, and
+  // pf's refusal text with the below-floor marker. The answer exists only in
+  // the panel's component memory; nothing is stored here.
+  const requestPfPrompt = useCallback(async (messageId: string): Promise<PolyforgePrompt> => {
+    const response = await fetch("/api/polyforge/messages/prompt", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ message_id: messageId }),
+    });
+    const body = await response.json().catch(() => ({})) as { prompt?: unknown; error?: string; upgrade?: boolean };
+    const prompt = response.ok && !body.error ? parsePolyforgePrompt(body.prompt) : null;
+    if (!prompt) {
+      throw Object.assign(new Error(body.error ?? "the prompt is unavailable"), { upgrade: body.upgrade === true });
+    }
+    return prompt;
+  }, []);
+  const pfMessagesSurface = {
+    pfPresent,
+    capable: pfMessagesCapable,
+    reason: pfMessagesReason,
+    conversations: pfConversations,
+    contacts: pfContacts,
+    groups: pfGroups,
+    membershipAdmin: pfMembershipAdmin,
+    users: pfUsers,
+    onChangeMembership: changePfMembership,
+    error: pfMessagesError,
+    selectedConversation: pfSelectedConversation,
+    onSelectConversation: selectPfConversation,
+    selectedContact: pfSelectedContact,
+    onSelectContact: selectPfContact,
+    messages: pfMessages,
+    initialPageLoaded: pfMessagesInitialPageLoaded,
+    blocked: pfMessagesBlocked,
+    loadingOlder: pfMessagesLoadingOlder,
+    onLoadOlder: loadPfOlderMessages,
+    onAcknowledge: acknowledgePfMessagesExplicitly,
+    onSend: sendPfMessage,
+    onAnalyze: analyzePfMessage,
+    analyses: pfAnalyses,
+    onOpenAnchor: openPfAnchor,
+    unreadTotal: pfUnreadTotal,
+    bindPromptTarget,
+    onPrompt: requestPfPrompt,
+    onPromptBusyChange: setPfPromptBusy,
+  };
   const [pendingQuotePrompt, setPendingQuotePrompt] = useState<{ sessionId: string; text: string } | null>(null);
   const topBarRef = useRef<HTMLDivElement>(null);
   const mobileToolbarRef = useRef<HTMLDivElement>(null);
@@ -1666,6 +1724,20 @@ export function AppShell() {
     router.replace(`?session=${encodeURIComponent(newSessionId)}`, { scroll: false });
   }, [invalidateWorkspaceRestore, router, hydrateSelectedSession]);
 
+  const handleAskInNewChat = useCallback(async (
+    prompt: string,
+    sourceSessionId: string,
+    sourceEntryId: string,
+  ) => {
+    const result = await sendAgentCommand<{ newSessionId?: string }>(sourceSessionId, {
+      type: "fork_branch",
+      entryId: sourceEntryId,
+    });
+    if (!result?.newSessionId) throw new Error(translate("chat.quoteForkFailed"));
+    setPendingQuotePrompt({ sessionId: result.newSessionId, text: prompt });
+    handleSessionForked(result.newSessionId);
+  }, [handleSessionForked, translate]);
+
   // The sidebar calls this when the initial session is not in its list.
   const handleInitialRestoreDone = useCallback(() => {
     setInitialSessionRestored(true);
@@ -2344,66 +2416,6 @@ export function AppShell() {
       <div style={{ display: "flex", alignItems: "stretch", height: "100%" }}>
         {includePolyforge && renderPolyforgeButton(mobile)}
         {showChatActions && (<>
-        {!selectedIsClaude && <button
-          type="button"
-          onClick={() => {
-            setBgPanelOpen((open) => {
-              const next = !open;
-              if (next) setPfPanelOpen(false);
-              return next;
-            });
-          }}
-          title={translate("bgTasks.open")}
-          aria-label={translate("bgTasks.open")}
-          aria-pressed={bgPanelOpen}
-          style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            position: "relative",
-            width: mobile ? TOP_BAR_ICON_BUTTON_SIZE : undefined,
-            minWidth: mobile ? undefined : 34,
-            height: "100%",
-            padding: mobile ? 0 : "0 10px",
-            background: bgPanelOpen ? "var(--bg-selected)" : "none",
-            border: "none",
-            borderRight: "1px solid var(--border)",
-            color: bgRunningCount > 0 ? "var(--text)" : "var(--text-muted)",
-            cursor: "pointer",
-            fontSize: 11,
-            flexShrink: 0,
-            whiteSpace: "nowrap",
-            transition: "color 0.1s, background 0.1s",
-          }}
-        >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-            <path d="M4 5h16" /><path d="M4 12h10" /><path d="M4 19h6" />
-          </svg>
-          {bgRunningCount > 0 && (
-            <span
-              aria-label={String(bgRunningCount)}
-              style={{
-                position: "absolute",
-                top: 6,
-                right: mobile ? 6 : 10,
-                minWidth: 14,
-                height: 14,
-                padding: "0 3px",
-                borderRadius: 7,
-                background: "var(--accent)",
-                color: "var(--bg-panel)",
-                fontSize: 9,
-                fontWeight: 700,
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                lineHeight: 1,
-              }}
-            >
-              {bgRunningCount > 9 ? "9+" : bgRunningCount}
-            </span>
-          )}
-        </button>}
         {selectedIsClaude ? (
           // HTML export is pi's: unavailable, said in visible text (hidden on a phone's icon row).
           !mobile && (
@@ -3645,7 +3657,10 @@ export function AppShell() {
               onOpenFile={handleOpenLinkedFile}
               onFilesUploaded={handleExplorerRefresh}
               onOpenSubagent={handleOpenSubagentTab}
+              onAskInNewChat={handleAskInNewChat}
               quoteSelectionEnabled={quoteSelectionEnabled}
+              initialPrompt={pendingQuotePrompt?.sessionId === selectedSession?.id ? pendingQuotePrompt?.text : undefined}
+              onInitialPromptConsumed={() => setPendingQuotePrompt(null)}
               soundEnabled={soundEnabled}
               onSoundToggle={onSoundToggle}
               playDoneSound={playDoneSound}

@@ -33,6 +33,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
 import { startNextServer } from "./next-server.mjs";
+import { openPolyforgeDock as openDock, polyforgeDock as dock, polyforgeToggle as pfButton } from "./polyforge-dock.mjs";
 import { ACTION_MS, NAV_MS } from "./timeouts.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
@@ -243,32 +244,10 @@ async function openPage({ viewport = { width: 1280, height: 800 }, storage = {} 
   return page;
 }
 const withPage = async (opts, fn) => { const page = await openPage(opts); try { return await fn(page); } finally { await page.context().close(); } };
-const dock = (page) => page.locator("#polyforge-dock").or(page.getByRole("dialog", { name: /polyforge/i })).first();
-const pfButton = (page) => page.getByRole("button", { name: /^(?!.*close).*polyforge/i }).first();
 const topTabs = (page) => dock(page).locator('[role="tablist"]').first().getByRole("tab");
 const topTab = (page, re) => topTabs(page).filter({ hasText: re }).first();
 const subTab = (page, re) => dock(page).getByRole("tab", { name: re }).or(dock(page).getByRole("button", { name: re })).last();
 const card = (page, wi) => dock(page).locator(`[data-pf-card-wi="${wi}"]`);
-async function openDock(page) {
-  // the toggle only renders once the mount-time status probe
-  // resolves (`pfPresent`), so wait for that bounded condition instead of
-  // letting the 8 s click bound absorb a slow probe under host load.
-  // made the Polyforge button resident right of the toolbar's
-  // More toggle at ≤480px (never folded into the More sheet): opening More
-  // before the status probe resolved left the sheet covering the toggle once
-  // it rendered ( verification).
-  // since the toggle is resident at ≤480px and
-  // inline wider, so never open ⋯ to reveal it — ⋯'s overlay covers that
-  // slot (left: TOP_BAR_ICON_BUTTON_SIZE, z-index 20) and intercepts the
-  // click. Close ⋯ if it is open, then click the toggle.
-  const more = page.locator('[data-mobile-toolbar-more="true"]');
-  await waitFor(async () => (await pfButton(page).count()) > 0, "the Polyforge toggle renders", 20_000);
-  if ((await more.count()) > 0 && (await more.getAttribute("aria-expanded")) === "true") {
-    await more.click();
-    await page.locator('[data-mobile-toolbar-actions="true"]').waitFor({ state: "hidden", timeout: 10_000 });
-  }
-  await pfButton(page).click(); await dock(page).waitFor({ timeout: 20_000 }); return dock(page);
-}
 async function openWork(page, sub) {
   await openDock(page);
   await waitFor(async () => (await topTab(page, RE_WORK).count()) > 0, "a 工单 (Work) top-level tab exists", 20_000);
@@ -490,7 +469,18 @@ try {
     const b = card(page, B.wi); await b.waitFor({ timeout: 30_000 });
     const text = await a.innerText();
     assert.ok(text.includes(A.slug) && text.includes("E2E-GOAL-START") && !text.includes("GOALTAIL") && /…/.test(text), `the card keeps slug + truncated goal: ${text.slice(0, 160)}`);
-    assert.match(text, /running|运行/i, "the status label is shown");
+    // owner 有意变更 a running card's visible status is the
+    // duration alone; the status word lives in the status element's title and
+    // the card's aria-label.
+    const running = await a.evaluate((el) => {
+      const leaf = [...el.querySelectorAll("[title]")].map((node) => ({ text: (node.textContent ?? "").trim(), title: node.getAttribute("title") ?? "" }))
+        .find((entry) => entry.text && (entry.title === entry.text || entry.title.endsWith(` ${entry.text}`)));
+      return { text: leaf?.text ?? "", title: leaf?.title ?? "", aria: el.getAttribute("aria-label") ?? "" };
+    });
+    assert.match(running.text, /^\d+m$/, `the running card's visible status is the duration alone (${JSON.stringify(running.text)})`);
+    assert.doesNotMatch(running.text, /running|运行中/i, "no status word in the running card's visible status");
+    assert.match(running.title, /^(running|运行中) \d+m$/i, `the status element's title keeps the full status (${running.title})`);
+    assert.match(running.aria, new RegExp(`^${A.slug} · (running|运行中) \\d+m$`, "i"), `the card aria-label keeps the full status (${running.aria})`);
     // owner 有意变更 (reverses the 32px narration):
     // the card shows no narration; it stays in the job detail.
     assert.ok(!text.includes("A-PROGRESS"), "the card shows no narration");
@@ -561,6 +551,10 @@ try {
     const text = await dock(page).innerText();
     assert.ok(text.includes("正在运行") && text.includes("全部"), "the running/all headings are kept");
     assert.ok(await dock(page).getByRole("searchbox").or(dock(page).getByPlaceholder(/搜索|search/i)).first().count() > 0, "the search box is kept");
+    // owner 有意变更 the Tasks search bar renders through the
+    // one shared component (marker + square action slot).
+    assert.equal(await dock(page).locator("[data-pf-searchbar]").count(), 1, "the Tasks search bar carries the shared data-pf-searchbar marker");
+    assert.equal(await dock(page).locator("[data-pf-searchbar] [data-pf-searchbar-action]").count(), 1, "the Tasks ↻ renders in the shared action slot");
     const boxes = await blockList(page, [M1, M2, M3]); const surface = await dock(page).boundingBox();
     assert.ok(boxes.every(Boolean) && surface, "three task blocks and the dock measure");
     for (const box of boxes) assert.ok(box.width <= surface.width - 12, `a block is discrete, not a full-row entry (${box.width}/${surface.width})`);
@@ -762,9 +756,10 @@ try {
     for (let i = 1; i < ticks.length; i++) assert.ok(ticks[i] - ticks[i - 1] >= 600, `no new faster polling loop (gaps ${ticks.slice(1).map((t, i) => t - ticks[i])})`);
   }));
   // owner 有意变更: at the 460px dock the job cards
-  // still share one row — now a fixed 150px each in the single horizontally
+  // still share one row — now a fixed width each in the single horizontally
   // scrolling row, whose free space (not a stretched card) stays at the right
-  // while more cards scroll.
+  // while more cards scroll. owner 有意变更 that fixed width is
+  // 180px (two still fit the 460px dock; three scroll).
   await check("S19", () => withPage({ storage: { "pi-web:polyforge-dock-width": "460" } }, async (page) => {
     seed(); await openWork(page);
     const a = card(page, A.wi); const b = card(page, B.wi);
@@ -773,7 +768,7 @@ try {
     assert.ok(boxA && boxB && dockBox, "the two job cards and the dock measure");
     assert.ok(sameRow(boxA, boxB), `at 460px the job cards sit side by side (${boxA.y}/${boxB.y})`);
     assert.ok(gapX(boxA, boxB) >= 6, `a visible gap between the job cards (${gapX(boxA, boxB)})`);
-    assert.ok(Math.abs(boxA.width - 150) <= 0.5 && Math.abs(boxB.width - 150) <= 0.5, `a job card is a fixed 150px wide (${boxA.width}/${boxB.width})`);
+    assert.ok(Math.abs(boxA.width - 180) <= 0.5 && Math.abs(boxB.width - 180) <= 0.5, `a job card is a fixed 180px wide (${boxA.width}/${boxB.width}) (owner 有意变更)`);
     assert.ok(boxA.width < dockBox.width * 0.6, `a job card is narrower than the main area (${boxA.width}/${dockBox.width})`);
     assert.ok(!overlap(boxA, boxB), "the job cards do not overlap");
     const row = await a.evaluate((el) => {
@@ -783,7 +778,7 @@ try {
     });
     assert.equal(row.overflowX, "auto", `the job card row scrolls horizontally (${row.overflowX})`);
     assert.equal(row.scrollbarWidth, "thin", `the row's scrollbar stays visible but thin (${row.scrollbarWidth})`);
-    assert.ok(row.scrollWidth <= row.clientWidth, `at 460px two 150px job cards still fit with free space at the right (${row.scrollWidth}/${row.clientWidth})`);
+    assert.ok(row.scrollWidth <= row.clientWidth, `at 460px two 180px job cards still fit with free space at the right (${row.scrollWidth}/${row.clientWidth}) (owner 有意变更)`);
     await subTab(page, RE_TASKS).click(); await taskBlock(page, T2).waitFor({ timeout: 30_000 });
     const m2 = await block(page, M2); const m3 = await block(page, M3);
     assert.ok(m2 && m3, "task blocks render");
@@ -794,28 +789,32 @@ try {
   // owner 有意变更: the Tasks blocks keep the shared
   // 150px track minimum (was Jobs 160px / Tasks 112px) — two across at the 375px
   // sheet (beside its 40px rail), one per row at the 340px dock.
-  // owner 有意变更 the job cards are ONE row of fixed 150px cards
+  // owner 有意变更 the job cards are ONE row of fixed-width cards
   // at both widths — the 340px dock scrolls the row instead of stacking the
-  // cards one per row like the task blocks (the 375px sheet still fits both).
+  // cards one per row like the task blocks. owner 有意变更 the
+  // fixed width is 180px, so the 375px sheet (beside its 40px rail) scrolls the
+  // two cards too while the single row and the Tasks grid stay pinned.
   await check("S20", async () => {
     const measure = (opts, label, tasksAcross, overflows) => withPage(opts, async (page) => {
       seed(); await openWork(page);
       const a = await card(page, A.wi).boundingBox(); const b = await card(page, B.wi).boundingBox();
       assert.ok(a && b && sameRow(a, b) && gapX(a, b) >= 4, `${label}: the job cards stay in one row (${a?.y}/${b?.y})`);
-      assert.ok(a && b && Math.abs(a.width - 150) <= 0.5 && Math.abs(b.width - 150) <= 0.5, `${label}: each job card is a fixed 150px wide (${a?.width}/${b?.width})`);
+      assert.ok(a && b && Math.abs(a.width - 180) <= 0.5 && Math.abs(b.width - 180) <= 0.5, `${label}: each job card is a fixed 180px wide (${a?.width}/${b?.width}) (owner 有意变更)`);
       assert.ok(!overlap(a, b), `${label}: the job cards do not overlap`);
       const row = await card(page, A.wi).evaluate((el) => {
         const container = el.parentElement;
         return { clientWidth: container.clientWidth, scrollWidth: container.scrollWidth };
       });
       if (overflows) assert.ok(row.scrollWidth > row.clientWidth, `${label}: the job card row scrolls instead of wrapping (${row.scrollWidth}/${row.clientWidth})`);
-      else assert.ok(row.scrollWidth <= row.clientWidth, `${label}: the two 150px job cards fit with free space at the right (${row.scrollWidth}/${row.clientWidth})`);
+      else assert.ok(row.scrollWidth <= row.clientWidth, `${label}: the two 180px job cards fit with free space at the right (${row.scrollWidth}/${row.clientWidth})`);
       await subTab(page, RE_TASKS).click(); await taskBlock(page, T2).waitFor({ timeout: 30_000 });
       const m2 = await block(page, M2); const m3 = await block(page, M3);
       if (tasksAcross) assert.ok(m2 && m3 && sameRow(m2, m3) && gapX(m2, m3) >= 4, `${label}: two task blocks stay side by side (${m2?.y}/${m3?.y})`);
       else assert.ok(m2 && m3 && !sameRow(m2, m3) && Math.abs(m2.x - m3.x) < 1 && !overlap(m2, m3), `${label}: the task blocks stack one per row (${m2?.x},${m2?.y}/${m3?.x},${m3?.y})`);
     });
-    await measure({ viewport: { width: 375, height: 800 } }, "375px", true, false);
+    // owner 有意变更 at 180px the 375px sheet's two cards no
+    // longer fit beside the 40px rail, so both widths now scroll one row.
+    await measure({ viewport: { width: 375, height: 800 } }, "375px", true, true);
     await measure({ storage: { "pi-web:polyforge-dock-width": "340" } }, "340px", false, true);
   });
 
@@ -827,10 +826,13 @@ try {
       assert.match(await b.innerText(), marker, `the needs_input card names the state: ${(await b.innerText()).slice(0, 200)}`);
       assert.ok(!marker.test(await card(page, A.wi).innerText()), "the running card does not carry the marker");
       const marks = await labelStyles(page, B.wi, "等待输入|需要人输入|needs input");
-      const running = await labelStyles(page, A.wi, "运行中|running");
+      // owner 有意变更 a running card's visible status is the
+      // duration alone (`23m`), never a status word.
+      const running = await labelStyles(page, A.wi, "^\\d+m$");
+      assert.ok(running.length > 0, "the running card's visible duration element exists");
       assert.ok(marks.length > 0, "a needs-input marker element exists");
       const emphasized = marks.filter((mark) => Number(mark.weight) >= 600 || mark.background !== "rgba(0, 0, 0, 0)"
-        || (running.length > 0 && mark.color !== running[0].color));
+        || mark.color !== running[0].color);
       assert.ok(emphasized.length > 0, `the marker is visually emphasized, not another dim status text: ${JSON.stringify(marks)}`);
     });
     for (const [opts, label] of [[{ viewport: { width: 375, height: 800 } }, "375px"], [{ storage: { "pi-web:polyforge-dock-width": "340" } }, "340px"]]) {
@@ -856,7 +858,13 @@ try {
     for (const route of routes) assert.ok(["/api/polyforge/status", "/api/polyforge/cards", "/api/polyforge/messages", "/api/polyforge/detect",
       "/api/polyforge/config", "/api/polyforge/watch", "/api/polyforge/tasks"].includes(route), `no new polling route (${route})`);
     const verbs = new Set(["ops", "config", "msg", "recall", "memory", "task", "watch"]);
-    assert.equal(calls().filter((argv) => !verbs.has(argv[0])).length, 0, "no new pf verb was spawned to detect the state");
+    // `pf --version` is the presence probe, not a state read: its 60s module cache
+    // (lib/polyforge-status.ts PRESENCE_TTL_MS) re-spawns it once per route bundle
+    // whenever this window crosses an expiry, which a loaded host makes likely
+    // ( full bar: [["--version"]×3]). It is not a verb that detects the state.
+    const stateCalls = calls().filter((argv) => argv[0] !== "--version");
+    assert.equal(stateCalls.filter((argv) => !verbs.has(argv[0])).length, 0,
+      `no new pf verb was spawned to detect the state ${JSON.stringify(stateCalls.filter((argv) => !verbs.has(argv[0])))}`);
   }));
 
   await check("S23", () => withPage({ storage: { "pi-web:polyforge-dock-width": "460" } }, async (page) => {
@@ -953,7 +961,9 @@ try {
     const after = await a.boundingBox();
     assert.ok(before && after && Math.abs(after.height - before.height) <= 2, `long narration does not grow the card (${before?.height} -> ${after?.height})`);
     const text = await a.innerText();
-    const withoutAge = (value) => value.replace(/运行中\s+\d+m/, "运行中 <n>m");
+    // owner 有意变更 the running card's text is the duration
+    // alone, so only the `<n>m` value may tick between the two reads.
+    const withoutAge = (value) => value.replace(/\b\d+m\b/, "<n>m");
     assert.equal(withoutAge(text), withoutAge(beforeText), "a long narration does not change the card's text");
     assert.ok(!text.includes("A-PROGRESS"), "no narration reaches the card");
     assert.ok(!text.includes("pi:e2e/model-a") && !/步龄|空闲|step age|idle age/i.test(text), "no model or step/idle age on the card");

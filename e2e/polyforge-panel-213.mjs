@@ -18,8 +18,9 @@
 //   node e2e/polyforge-panel-213.mjs
 //
 // e2e/all: isolated — a precaution: names this suite, and it
-// shares work-tab-163's openDock() click path, whose 8 s click timed out in
-// the parallel bar. S213-12's own red runs (#236) were a
+// shares work-tab-163's dock click path (openPolyforgeDock() in
+// e2e/polyforge-dock.mjs), whose 8 s click timed out in the parallel bar.
+// S213-12's own red runs (#236) were a
 // context-read race, fixed by mocking the live status read, not by isolation.
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -29,6 +30,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
 import { startNextServer } from "./next-server.mjs";
+import { openPolyforgeDock as openDock, polyforgeDock as dock, polyforgeToggle as pfButton, waitForPolyforgeToggle } from "./polyforge-dock.mjs";
 import { ACTION_MS, NAV_MS } from "./timeouts.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
@@ -139,13 +141,17 @@ async function openPage({ viewport = { width: 1280, height: 800 }, storage = {} 
   // the newer of the two reads wins; unmocked it reports the real wrapper's
   // usage of this fixture (1469%), so it answers the same state as the
   // mount's read. Leave POST (and every other /api/agent path) to the server.
+  // The first mock mirrors GET /api/sessions/<id>/state as the suite has
+  // always answered it; the second mirrors GET /api/agent/<id>'s read face,
+  // which answers a state only beside a live wrapper, so with `running: true`
+  // (; `running: false` never carries a state there).
   await page.route("**/api/sessions/*/state", (route) => json(route, {
     running: false,
     state: { contextUsage: CONTEXT_USAGE },
   }));
   await page.route((url) => url.pathname === `/api/agent/${SESSION}`, (route) => (
     route.request().method() === "GET"
-      ? json(route, { running: false, state: { contextUsage: CONTEXT_USAGE } })
+      ? json(route, { running: true, state: { contextUsage: CONTEXT_USAGE } })
       : route.fallback()
   ));
   await page.route("**/api/sessions/*/chat-id", (route) => json(route, { chatId: "chat_e2e213_0123456789abcdef" }));
@@ -154,8 +160,6 @@ async function openPage({ viewport = { width: 1280, height: 800 }, storage = {} 
   return page;
 }
 const withPage = async (opts, fn) => { const page = await openPage(opts); try { return await fn(page); } finally { await page.context().close(); } };
-const dock = (page) => page.locator("#polyforge-dock").or(page.getByRole("dialog", { name: /polyforge/i })).first();
-const pfButton = (page) => page.getByRole("button", { name: /^(?!.*close).*polyforge/i }).first();
 const topTabs = (page) => dock(page).locator('[role="tablist"]').first().getByRole("tab");
 const topTab = (page, re) => topTabs(page).filter({ hasText: re }).first();
 const workTablist = (page) => dock(page).locator('[data-pf-tabstrip="work"]');
@@ -163,19 +167,6 @@ const workTab = (page, re) => workTablist(page).getByRole("tab", { name: re }).f
 const card = (page, wi) => dock(page).locator(`[data-pf-card-wi="${wi}"]`);
 const cardsOn = (page) => dock(page).locator("[data-pf-card-wi]");
 const taskBlocks = (page) => dock(page).locator("[data-pf-task]");
-async function openDock(page) {
-  // the toggle renders only after the mount-time status probe
-  // (`pfPresent`) and, since, is resident at ≤480px / inline
-  // wider. Never open ⋯ to reveal it: ⋯'s overlay covers that slot and
-  // intercepts the click. Wait for the toggle, close ⋯ if it is open, click.
-  const more = page.locator('[data-mobile-toolbar-more="true"]');
-  await waitFor(async () => (await pfButton(page).count()) > 0, "the Polyforge toggle renders", 20_000);
-  if ((await more.count()) > 0 && (await more.getAttribute("aria-expanded")) === "true") {
-    await more.click();
-    await page.locator('[data-mobile-toolbar-actions="true"]').waitFor({ state: "hidden", timeout: 10_000 });
-  }
-  await pfButton(page).click(); await dock(page).waitFor({ timeout: 20_000 }); return dock(page);
-}
 async function openWork(page, sub) {
   await openDock(page);
   await topTab(page, /工单|work/i).waitFor({ timeout: 20_000 });
@@ -217,7 +208,8 @@ async function columnCount(locator) {
   return new Set(xs).size;
 }
 // (owner's intentional change, not a regression): the Jobs stream
-// is ONE row of fixed 150px cards that scrolls horizontally, so it has no
+// is ONE row of fixed 180px cards that scrolls horizontally (owner 有意变更
+//; it was 150px), so it has no
 // column count of its own any more — the Tasks blocks keep their grid. The
 // helpers below measure the card row and, on the Tasks side, the grid as before.
 async function workLayout(page) {
@@ -290,17 +282,20 @@ try {
     const tasksGrid = await gridInfo(task.grid);
     assert.match(tasksGrid.inline, /minmax\(150px,\s*1fr\)/, `the Tasks grid uses a 150px minimum (${tasksGrid.inline})`);
     // (owner's intentional change, not a regression): the job
-    // cards are one row of fixed 150px cards, so #213's equal-width ruling now
-    // means "job card width = the Tasks grid's 150px column minimum" instead of
-    // "both grids render the same tracks". The old two-column expectation is
-    // replaced by the one-row / horizontally scrollable shape, not relaxed.
+    // cards are one row of fixed-width cards. owner 有意变更 the
+    // job card is now a fixed 180px and the Tasks grid keeps its own 150px
+    // column minimum — the two are decoupled, so the old "job card width = the
+    // Tasks grid minimum" equal-width pin becomes "job card = 180px, Tasks
+    // minimum still 150px". The one-row / horizontally scrollable shape and
+    // every Tasks minimum stay pinned, not relaxed.
     const jobWidths = jobs.boxes.map((box) => box.width);
-    assert.ok(jobWidths.every((width) => Math.abs(width - 150) <= 0.5), `every job card is 150px wide (${JSON.stringify(jobWidths)})`);
+    assert.ok(jobWidths.every((width) => Math.abs(width - 180) <= 0.5), `every job card is 180px wide (${JSON.stringify(jobWidths)}) (owner 有意变更)`);
     const taskMin = Number(/minmax\((\d+)px,\s*1fr\)/.exec(tasksGrid.inline)?.[1]);
+    assert.equal(taskMin, 150, `the Tasks grid keeps its own 150px column minimum (${taskMin}) (owner 有意变更)`);
     assert.ok(tasksGrid.tracks.length > 0 && tasksGrid.tracks.every((track) => track >= taskMin - 0.5),
       `every Tasks track keeps the declared ${taskMin}px minimum (${JSON.stringify(tasksGrid.tracks)})`);
-    assert.ok(Math.abs(Math.min(...jobWidths) - taskMin) <= 0.5,
-      `the job card width equals the Tasks grid's declared column minimum (${Math.min(...jobWidths)}/${taskMin}px)`);
+    assert.ok(Math.abs(Math.min(...jobWidths) - 180) <= 0.5 && Math.abs(Math.min(...jobWidths) - taskMin) > 1,
+      `the job card width is the decoupled 180px, not the Tasks grid minimum (${Math.min(...jobWidths)}/${taskMin}px)`);
     assert.equal(new Set(jobs.boxes.map((box) => Math.round(box.y))).size, 1,
       `the job cards share one row (${JSON.stringify(jobs.boxes.map((box) => box.y))})`);
     assert.equal(jobs.row.overflowX, "auto", `the card row scrolls horizontally (${jobs.row.overflowX})`);
@@ -311,12 +306,12 @@ try {
 
   const measureColumns = (opts, label, taskColumns) => withPage(opts, async (page) => {
     const jobs = await workLayout(page);
-    // the job cards stay one 150px-wide row at every width and
+    // the job cards stay one fixed-width row at every width and
     // the row scrolls instead of wrapping or squeezing (old: "Job cards use N
-    // column(s)").
+    // column(s)"). owner 有意变更 that fixed width is 180px.
     assert.equal(new Set(jobs.boxes.map((box) => Math.round(box.y))).size, 1, `${label}: the job cards share one row`);
-    assert.ok(jobs.boxes.every((box) => Math.abs(box.width - 150) <= 0.5),
-      `${label}: every job card is 150px wide (${JSON.stringify(jobs.boxes.map((box) => box.width))})`);
+    assert.ok(jobs.boxes.every((box) => Math.abs(box.width - 180) <= 0.5),
+      `${label}: every job card is 180px wide (${JSON.stringify(jobs.boxes.map((box) => box.width))}) (owner 有意变更)`);
     assert.ok(jobs.row.scrollWidth > jobs.row.clientWidth,
       `${label}: the card row is horizontally scrollable (${jobs.row.scrollWidth}/${jobs.row.clientWidth})`);
     const task = await taskLayout(page);
@@ -488,6 +483,9 @@ try {
         const stats = page.locator('button[data-mobile-toolbar-stats="true"]').first();
         await stats.waitFor({ state: "visible", timeout: 20_000 });
         assert.equal(await more.count(), 1, `${width}px: the ⋯ button renders`);
+        // (#234 N2): the toggle renders only after the mount-time
+        // pfPresent probe, so wait for it (bounded) before counting it.
+        await waitForPolyforgeToggle(page);
         const pf = pfButton(page);
         assert.equal(await pf.count(), 1, `${width}px: the Polyforge button renders`);
         assert.ok(await pf.isVisible(), `${width}px: Polyforge is visible without opening ⋯`);

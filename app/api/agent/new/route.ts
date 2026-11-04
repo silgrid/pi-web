@@ -7,17 +7,20 @@ import { isRegistrableRoot } from "@/lib/root-registration-policy";
 import { invalidateSessionListCache } from "@/lib/session-reader";
 import { startRpcSession } from "@/lib/rpc-manager";
 import { cwdMissingBody } from "@/lib/missing-cwd";
+import { readStoredAgentLanguage } from "@/lib/agent-language-config";
 import { EMPTY_CLAUDE_USAGE, removeClaudeSessionRecord, upsertClaudeSessionRecord } from "@/lib/claude-index";
 import { findClaudeBinary, startClaudeSession } from "@/lib/claude-session";
+import { validateClaudeImages } from "@/lib/image-attachments";
 import {
   CLAUDE_PROVIDER,
-  DEFAULT_CLAUDE_TOOL_PRESET,
+  CLAUDE_EFFORT_DEFAULT,
+  claudeFirstMessage,
+  isClaudeEffort,
   isClaudeHarness,
-  isClaudeModelAlias,
-  isClaudeToolPreset,
+  isClaudeModel,
   isSessionHarness,
-  type ClaudeModelAlias,
-  type ClaudeToolPreset,
+  type ClaudeEffort,
+  type ClaudeModel,
 } from "@/lib/claude-shared";
 
 const THINKING_LEVELS = new Set<ThinkingLevel>(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
@@ -37,14 +40,15 @@ function rejected(commandType: string | undefined, body: Record<string, unknown>
 }
 
 /**
- * A new claude session, after the cwd guard: claude must be on PATH,
- * then the index entry, the config dir and the first child (`--session-id <new id>`).
+ * A new claude session (#250), after the cwd guard: claude must be on PATH,
+ * then the index entry (full model name, effort, no preset) and the first child
+ * (`--session-id <new id>`, `--effort` for a non-default level,).
  * The child is spawned before the reply; a prompt goes to its stdin.
  */
 async function createClaudeSession(
   cwd: string,
-  modelAlias: ClaudeModelAlias,
-  preset: ClaudeToolPreset,
+  model: ClaudeModel,
+  effort: ClaudeEffort,
   command: Record<string, unknown>,
   commandType: string | undefined,
 ) {
@@ -55,11 +59,15 @@ async function createClaudeSession(
   const record = {
     id: randomUUID(),
     cwd,
-    modelAlias,
-    preset,
+    model,
+    effort,
+    // The server setting at creation; later launches read this record.
+    agentLanguage: readStoredAgentLanguage(),
     created: now,
     modified: now,
-    firstMessage: commandType === "prompt" && typeof command.message === "string" ? command.message : "",
+    firstMessage: commandType === "prompt"
+      ? claudeFirstMessage(typeof command.message === "string" ? command.message : "", Array.isArray(command.images) ? command.images.length : 0)
+      : "",
     usage: { ...EMPTY_CLAUDE_USAGE },
   };
   await upsertClaudeSessionRecord(record);
@@ -76,7 +84,7 @@ async function createClaudeSession(
     success: true,
     sessionId: record.id,
     data,
-    model: { provider: CLAUDE_PROVIDER, modelId: modelAlias },
+    model: { provider: CLAUDE_PROVIDER, modelId: model },
     thinkingLevel: "off",
     harness: "claude",
   });
@@ -84,7 +92,9 @@ async function createClaudeSession(
 
 // POST /api/agent/new  body: { cwd: string; type: string; message?: string; harness?: "pi" | "claude"; ... }
 // Spawns a brand-new pi session, or with harness "claude" a claude session
-// (modelAlias + claudePreset, fixed for its life; type "prompt" or "ensure_session"). Most calls immediately send the first command;
+// (`model`: one of the four full names; optional `effort`: a claude level or "default",
+//; type "prompt" or "ensure_session";
+// a #219 `claudePreset` is dropped unread). Most calls immediately send the first command;
 // type:"ensure_session" only creates the runtime so clients can query commands.
 // Returns pi's real session id plus the model/thinking state selected at startup.
 export async function POST(req: Request) {
@@ -92,22 +102,33 @@ export async function POST(req: Request) {
   let promptAccepted = false;
   try {
     const body = await req.json() as { cwd?: string; [key: string]: unknown };
-    const { cwd, harness, modelAlias, claudePreset, ...command } = body;
+    const { cwd, harness, ...command } = body;
+    // The retired #219 fields: a supplied preset or alias is dropped, never read.
+    delete command.claudePreset;
+    delete command.modelAlias;
     commandType = typeof command.type === "string" ? command.type : undefined;
     if (harness !== undefined && !isSessionHarness(harness)) {
       return rejected(commandType, { error: `Unknown harness: ${String(harness)}` }, 400);
     }
     const claude = isClaudeHarness(harness);
+    // A claude session's model is a full name; pi's command keeps its own fields.
+    const claudeModel = claude ? command.model : undefined;
+    const claudeEffort = claude ? (command.effort ?? CLAUDE_EFFORT_DEFAULT) : undefined;
     if (claude) {
-      if (!isClaudeModelAlias(modelAlias)) {
-        return rejected(commandType, { error: `A claude session needs a model alias: ${String(modelAlias)}` }, 400);
+      delete command.model;
+      delete command.effort;
+      if (!isClaudeModel(claudeModel)) {
+        return rejected(commandType, { error: `A claude session needs a model: ${String(claudeModel)}` }, 400);
       }
-      if (claudePreset !== undefined && !isClaudeToolPreset(claudePreset)) {
-        return rejected(commandType, { error: `Unknown claude tool preset: ${String(claudePreset)}` }, 400);
+      if (!isClaudeEffort(claudeEffort)) {
+        return rejected(commandType, { error: `Unknown claude effort: ${String(claudeEffort)}` }, 400);
       }
       if (commandType !== "prompt" && commandType !== "ensure_session") {
         return rejected(commandType, { error: `${String(commandType)} is not available for claude sessions` }, 400);
       }
+      // Images are checked before a record is created or a child starts.
+      const imageError = commandType === "prompt" ? validateClaudeImages(command.images) : null;
+      if (imageError) return rejected(commandType, { error: imageError }, 400);
     }
 
     if (!cwd || typeof cwd !== "string") {
@@ -150,8 +171,8 @@ export async function POST(req: Request) {
     if (claude) {
       return await createClaudeSession(
         registrable.path,
-        modelAlias as ClaudeModelAlias,
-        (claudePreset as ClaudeToolPreset | undefined) ?? DEFAULT_CLAUDE_TOOL_PRESET,
+        claudeModel as ClaudeModel,
+        claudeEffort as ClaudeEffort,
         command,
         commandType,
       );

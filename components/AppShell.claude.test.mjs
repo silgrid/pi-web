@@ -19,7 +19,13 @@ test("export is disabled for a claude session with visible text, not a tooltip",
 });
 
 test("background tasks, title generation and the subagent switcher are hidden for a claude session", () => {
-  assert.match(appShell, /\{!selectedIsClaude && <button\s+type="button"\s+onClick=\{\(\) => \{\s+setBgPanelOpen/);
+  // (owner 有意变更): the top bar's bg-tasks
+  // toggle and its running-count badge are gone for every session, so no
+  // pi-session button can leak into a claude session either; the dock opens
+  // from the terminal notification's jump only.
+  assert.doesNotMatch(appShell, /translate\("bgTasks\.open"\)/, "the top bar still renders the bg-tasks toggle");
+  assert.doesNotMatch(appShell, /\{!selectedIsClaude && <button\s+type="button"\s+onClick=\{\(\) => \{\s+setBgPanelOpen/,
+    "the pi-session bg-tasks toggle is back in the top bar");
   assert.match(appShell, /\{!selectedIsClaude && \(\(\) => \{\s+\/\/ 上下文压缩后/);
   assert.match(appShell, /!selectedIsClaude && hasSubagentSessions && agentsBadge \? \(/);
 });

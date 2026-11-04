@@ -3,7 +3,15 @@ import { resolveSessionPath } from "@/lib/session-reader";
 import { getRpcSession, isSessionReloadedFromDiskError, setRpcSessionTools, startRpcSession } from "@/lib/rpc-manager";
 import { cwdMissingBody, missingCwdFromBody } from "@/lib/missing-cwd";
 import { getClaudeSessionRecord } from "@/lib/claude-index";
-import { CLAUDE_SESSION_COMMANDS, getClaudeSession, startClaudeSession } from "@/lib/claude-session";
+import {
+  CLAUDE_SESSION_COMMANDS,
+  claudeCommandEffort,
+  claudeCommandModel,
+  getClaudeSession,
+  setIdleClaudeSetting,
+  startClaudeSession,
+} from "@/lib/claude-session";
+import { validateClaudeImages } from "@/lib/image-attachments";
 
 // POST /api/agent/[id] - Send a command to an existing session
 export async function POST(
@@ -27,13 +35,31 @@ export async function POST(
     const toolNames = requestedToolNames as string[] | undefined;
 
     // A claude session: its own child, started (`--resume`) for a command
-    // when none is alive. pi-only commands are refused, never routed to a pi wrapper.
+    // when none is alive. Beside prompt/abort/state, it takes a model switch, an effort
+    // change and claude's own compaction; every other pi-only command is
+    // refused, never routed to a pi wrapper, and starts nothing.
     const claudeRecord = getClaudeSessionRecord(id);
     if (claudeRecord) {
       if (!commandType || !CLAUDE_SESSION_COMMANDS.has(commandType)) {
         return NextResponse.json({ error: `${String(commandType)} is not available for claude sessions` }, { status: 400 });
       }
-      const claudeSession = getClaudeSession(id) ?? startClaudeSession(claudeRecord);
+      // Images are checked before a child starts or anything reaches its stdin.
+      const imageError = commandType === "prompt" ? validateClaudeImages(body.images) : null;
+      if (imageError) {
+        return NextResponse.json({ error: imageError, code: "prompt_rejected", accepted: false }, { status: 400 });
+      }
+      if (commandType === "set_model" && !claudeCommandModel(body)) {
+        return NextResponse.json({ error: `Not a claude model: ${String(body.model ?? body.modelId)}` }, { status: 400 });
+      }
+      if (commandType === "set_effort" && !claudeCommandEffort(body)) {
+        return NextResponse.json({ error: `Not a claude effort: ${String(body.effort)}` }, { status: 400 });
+      }
+      const live = getClaudeSession(id);
+      // No live child: a switch is the index's alone and spawns nothing.
+      if (!live && (commandType === "set_model" || commandType === "set_effort")) {
+        return NextResponse.json({ success: true, data: await setIdleClaudeSetting(id, body) });
+      }
+      const claudeSession = live ?? startClaudeSession(claudeRecord);
       const result = await claudeSession.send(body);
       promptAccepted = body.type === "prompt";
       return NextResponse.json({ success: true, data: result });

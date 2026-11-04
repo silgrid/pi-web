@@ -1,10 +1,13 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { flushSync } from "react-dom";
+import { PolyforgeAnalysisCard } from "@/components/PolyforgeAnalysisCard";
+import { PolyforgeFileTicketDialog } from "@/components/PolyforgeFileTicketDialog";
 import { useI18n } from "@/hooks/useI18n";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { usePolyforgeMessagesCollapse } from "@/hooks/usePolyforgeMessagesCollapse";
+import { usePolyforgeMessagesListCollapse } from "@/hooks/usePolyforgeMessagesListCollapse";
 import { useResizablePanel } from "@/hooks/useResizablePanel";
 import {
   getPolyforgeMessagesListDefaultWidth,
@@ -13,6 +16,7 @@ import {
   POLYFORGE_MESSAGES_LIST_MIN_WIDTH,
 } from "@/lib/panel-layout";
 import {
+  appendQuoteBlock,
   avatarColor,
   avatarInitial,
   compareContactsByName,
@@ -20,8 +24,14 @@ import {
   conversationForContact,
   conversationName,
   directRows,
+  firstWorkItemBinding,
   groupConversations,
   splitAnchor,
+  splitWorkItemLinks,
+  POLYFORGE_ANALYZE_MINIMUM_PF_VERSION,
+  POLYFORGE_PROMPT_MINIMUM_PF_VERSION,
+  type PolyforgeAnalysis,
+  type PolyforgePrompt,
   type PolyforgeContact,
   type PolyforgeConversation,
   type PolyforgeMessage,
@@ -52,6 +62,60 @@ import {
  * read-only with an explicit needs-admin notice. Its own storage is that width
  * and, through `usePolyforgeMessagesCollapse`, the collapsed groups. It never
  * writes a chat session or the agent composer.
+ *
+ * Message analysis: every received message — direct and
+ * group — carries an inline icon+text Analyze button in the normal
+ * foreground (never on the user's own messages, no menu, no hover-only
+ * control). Its in-flight state is per message: that message's control is
+ * disabled and starts nothing more while another message may still start.
+ * A refusal (slot-full, no task chain, a failed task, the below-floor upgrade
+ * text) renders in that message's own slot with the control left available;
+ * a result renders as the collapsible PolyforgeAnalysisCard under the message
+ * (expanded on arrival; the collapsed set is component memory). Its 【建票】
+ * opens PolyforgeFileTicketDialog (a confirmed registration ticket; the
+ * created slug is named under the card), its 【回复】 sets that message as the
+ * reply target and fills the composer with the analysis's reply draft when
+ * there is one — never overwriting the composer without one, never sending —
+ * and its task link opens the task's detail in Work › Tasks (onOpenTask).
+ *
+ * The 「@」 action: every message row — received and own —
+ * carries a visible 「@」 button beside Analyze (never inside the analysis
+ * card). A click first binds the fill target (`bindPromptTarget`, AppShell's
+ * click-time snapshot of the focused composer), then asks
+ * `POST /api/polyforge/messages/prompt` for the execution prompt. The answer
+ * is appended to that bound composer (or that session's stored draft) and
+ * `已填入 <会话名>` is reported under the message; with no composer at click
+ * time the prompt is shown under the message with
+ * `无目标会话，已显示在消息下`, and a target that closed meanwhile shows it
+ * under the message too — never redirected elsewhere. Nothing is ever sent.
+ * A refusal (the floor's upgrade text, a full lane, a failed task) shows
+ * under the message and leaves the action usable. In-flight state is per
+ * message (one run per message, any number across messages); every outcome
+ * is component memory and is gone with the panel.
+ *
+ * Work-item links: the composer carries no separate anchor
+ * field. A message text's first `@project#number` token outside a `>` quote
+ * line whose project is one of the panel's mapped projects becomes the
+ * send's `about_wi` (exactly `project#number`; the text is sent unchanged),
+ * and every syntactically valid token in any bubble renders in place as a
+ * clickable link opening Work › Jobs through onOpenAnchor. The old anchor
+ * line above a bubble is hidden only when its `about_wi` duplicates such a
+ * token; field-era and CLI anchors (`task-42`, `wi_…`, a `/path`
+ * suffix) keep that line. Own messages carry 【引用】 (a plain-text quote
+ * block appended to the composer, never sent, leaving any reply target
+ * untouched) instead of the peer 【回复】.
+ *
+ * Contact-column strip (; the mobile sheet folds too,
+ *): the list column folds to a strip carrying the expand
+ * control and the total-unread dot, and the chat pane takes the rest. On
+ * desktop the strip is 28px; at ≤640px it is 40px with a 40px-tall column
+ * header row holding the 单聊 heading and the 40×40 collapse control, and
+ * the strip's 40×40 expand control sits above the same dot. While folded
+ * the #222 resize separator is not rendered and no width is written, so
+ * expanding shows the stored #222 width again (the sheet returns to its
+ * fixed clamp); the state lives under its own key
+ * (`usePolyforgeMessagesListCollapse`), beside #222's width and #223's
+ * groups.
  */
 
 export interface PolyforgeMessagesProps {
@@ -84,10 +148,48 @@ export interface PolyforgeMessagesProps {
   onLoadOlder: () => void;
   onAcknowledge: () => void;
   onSend: (input: { to: string; text: string; aboutWi?: string; replyTo?: string }) => Promise<unknown>;
-  onAnalyze: (messageId: string) => Promise<string>;
-  analyses: Record<string, string>;
+  /** One analysis of one received message; rejects with pf's text (a
+   *  PolyforgeAnalyzeError whose `upgrade` marks the below-floor refusal). */
+  onAnalyze: (messageId: string) => Promise<PolyforgeAnalysis>;
+  /** The page-memory analyses by message id (the hook drops them on close). */
+  analyses: Record<string, PolyforgeAnalysis>;
   onOpenAnchor: (ref: string) => void;
+  /** The analysis card's task link: open that task in Work › Tasks. */
+  onOpenTask: (taskId: string) => void;
+  /** The total unread count (the panel's own sum): the collapsed strip's dot. */
+  unreadTotal: number;
+  /** the 「@」 action's click-time binding of its fill target
+   *  (null: no composer at click time). */
+  bindPromptTarget: () => PolyforgePromptTarget | null;
+  /** one prompt for one message (the prompt route); rejects
+   *  with pf's text, `upgrade` marking the below-floor refusal. */
+  onPrompt: (messageId: string) => Promise<PolyforgePrompt>;
+  /** whether any 「@」 run is in flight (false on unmount):
+   *  the desktop dock is not dismissed by an outside press meanwhile, so a
+   *  prompt shown under its message is not lost to a click elsewhere. */
+  onPromptBusyChange: (busy: boolean) => void;
 }
+
+/** The fill target the 「@」 action binds at click time. */
+export interface PolyforgePromptTarget {
+  /** The bound session's display name (the 已填入 feedback line). */
+  name: string;
+  /** Append the prompt to the bound composer, or to its session's stored
+   *  draft when that composer is not mounted; false when the bound target
+   *  has closed — then nothing was written anywhere. */
+  fill: (prompt: string) => boolean;
+}
+
+/** One 「@」 outcome under its message (component memory only). */
+interface PromptOutcome {
+  /** The prompt shown under the message (no target, or the target closed). */
+  shown?: string;
+  /** The feedback line. */
+  feedback?: string;
+  error?: { text: string; upgrade: boolean };
+}
+
+
 
 function AnchorText({ anchor, onOpenAnchor }: { anchor: string; onOpenAnchor: (ref: string) => void }) {
   const { ref, rest } = splitAnchor(anchor);
@@ -126,6 +228,14 @@ function Avatar({ seed, name }: { seed: string; name: string }) {
   );
 }
 
+/** A copy of `record` without `key` (per-message component state). */
+function withoutKey<T>(record: Record<string, T>, key: string): Record<string, T> {
+  if (!(key in record)) return record;
+  const next = { ...record };
+  delete next[key];
+  return next;
+}
+
 /** HH:MM from the sanitized created_at; the raw string when unparsable. */
 function formatTimestamp(iso: string): string {
   const date = new Date(iso);
@@ -158,10 +268,17 @@ export function PolyforgeMessages({
   onAnalyze,
   analyses,
   onOpenAnchor,
+  onOpenTask,
+  unreadTotal,
+  bindPromptTarget,
+  onPrompt,
+  onPromptBusyChange,
 }: PolyforgeMessagesProps) {
   const { t } = useI18n();
   const isMobile = useIsMobile();
   const { collapsed, toggleProject } = usePolyforgeMessagesCollapse();
+  //, the whole-column strip at every width.
+  const { listCollapsed, setListCollapsed } = usePolyforgeMessagesListCollapse();
   // The whole Messages surface measures the panel the list's bounds derive
   // from (the dock drag moves this width without a window resize).
   const messagesPanelRef = useRef<HTMLDivElement | null>(null);
@@ -175,11 +292,31 @@ export function PolyforgeMessages({
   // a list poll blip cannot blank a reply's recipient.
   const [lastPeer, setLastPeer] = useState("");
   const [replyTo, setReplyTo] = useState<string | null>(null);
-  const [analyzing, setAnalyzing] = useState<string | null>(null);
-  // The composer's draft: text, anchor, the refusal text and the in-flight
-  // flag.
+  // per-message analysis state — the messages in flight (the
+  // ref is the guard, the state renders it), each message's last refusal and
+  // the cards the user collapsed. Component memory only.
+  const analyzingRef = useRef(new Set<string>());
+  const [analyzing, setAnalyzing] = useState<Record<string, true>>({});
+  const [analysisErrors, setAnalysisErrors] = useState<Record<string, { text: string; upgrade: boolean }>>({});
+  const [collapsedCards, setCollapsedCards] = useState<Record<string, true>>({});
+  // per-message 「@」 state — the messages in flight (the ref is
+  // the guard, the state renders it) and each message's last outcome.
+  const promptingRef = useRef(new Set<string>());
+  const [prompting, setPrompting] = useState<Record<string, true>>({});
+  const [promptOutcomes, setPromptOutcomes] = useState<Record<string, PromptOutcome>>({});
+  const promptBusy = Object.keys(prompting).length > 0;
+  useEffect(() => {
+    onPromptBusyChange(promptBusy);
+  }, [onPromptBusyChange, promptBusy]);
+  useEffect(() => () => onPromptBusyChange(false), [onPromptBusyChange]);
+  // The message whose 【建票】 dialog is open, and the tickets created from
+  // each card (named under it).
+  const [ticketFor, setTicketFor] = useState<string | null>(null);
+  const [ticketNotices, setTicketNotices] = useState<Record<string, string>>({});
+  // The composer's draft, the refusal text and the in-flight flag.
   const [draftText, setDraftText] = useState("");
-  const [draftAnchor, setDraftAnchor] = useState("");
+  const textFieldId = useId();
+  const composerTextRef = useRef<HTMLTextAreaElement | null>(null);
   const [sendError, setSendError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   // the group whose add picker is open, the one membership
@@ -285,39 +422,102 @@ export function PolyforgeMessages({
   const submit = useCallback(async (event: React.FormEvent) => {
     event.preventDefault();
     if (sending) return;
-    const attempt = { text: draftText, anchor: draftAnchor };
+    const attempt = { text: draftText };
     setSending(true);
     setSendError(null);
     setDraftText("");
-    setDraftAnchor("");
+    // the binding comes from the text itself — the first token
+    // outside a `>` quote line whose project is mapped in this panel. No
+    // match sends plain text; the text is sent verbatim either way.
+    const aboutWi = firstWorkItemBinding(attempt.text, groups.map((group) => group.project));
     try {
       await onSend({
         to: recipient,
         text: attempt.text,
-        ...(attempt.anchor.trim() ? { aboutWi: attempt.anchor.trim() } : {}),
+        ...(aboutWi ? { aboutWi } : {}),
         ...(replyTo ? { replyTo } : {}),
       });
       setReplyTo(null);
     } catch (submitError) {
       setDraftText(attempt.text);
-      setDraftAnchor(attempt.anchor);
       setSendError(submitError instanceof Error ? submitError.message : String(submitError));
     } finally {
       setSending(false);
     }
-  }, [sending, draftText, draftAnchor, onSend, recipient, replyTo]);
+  }, [sending, draftText, groups, onSend, recipient, replyTo]);
 
   const analyze = useCallback(async (messageId: string) => {
-    if (analyzing) return;
-    setAnalyzing(messageId);
+    if (analyzingRef.current.has(messageId)) return;
+    analyzingRef.current.add(messageId);
+    setAnalyzing((previous) => ({ ...previous, [messageId]: true }));
+    setAnalysisErrors((previous) => withoutKey(previous, messageId));
     try {
       await onAnalyze(messageId);
+      setCollapsedCards((previous) => withoutKey(previous, messageId));
     } catch (analyzeError) {
-      setSendError(analyzeError instanceof Error ? analyzeError.message : String(analyzeError));
+      const text = analyzeError instanceof Error ? analyzeError.message : String(analyzeError);
+      const upgrade = Boolean((analyzeError as { upgrade?: unknown } | null)?.upgrade);
+      setAnalysisErrors((previous) => ({ ...previous, [messageId]: { text, upgrade } }));
     } finally {
-      setAnalyzing(null);
+      analyzingRef.current.delete(messageId);
+      setAnalyzing((previous) => withoutKey(previous, messageId));
     }
-  }, [analyzing, onAnalyze]);
+  }, [onAnalyze]);
+
+  // 「@」: the target is bound at click time, before the request; the answer
+  // fills only that target. Nothing is sent.
+  const promptMessage = useCallback(async (messageId: string) => {
+    if (promptingRef.current.has(messageId)) return;
+    const target = bindPromptTarget();
+    promptingRef.current.add(messageId);
+    setPrompting((previous) => ({ ...previous, [messageId]: true }));
+    setPromptOutcomes((previous) => withoutKey(previous, messageId));
+    let outcome: PromptOutcome;
+    try {
+      const { prompt } = await onPrompt(messageId);
+      if (!target) {
+        outcome = { shown: prompt, feedback: t("polyforge.messages.promptNoTarget") };
+      } else if (target.fill(prompt)) {
+        outcome = { feedback: t("polyforge.messages.promptFilled", { name: target.name }) };
+      } else {
+        outcome = { shown: prompt };
+      }
+    } catch (promptError) {
+      const text = promptError instanceof Error ? promptError.message : String(promptError);
+      outcome = { error: { text, upgrade: Boolean((promptError as { upgrade?: unknown } | null)?.upgrade) } };
+    }
+    setPromptOutcomes((previous) => ({ ...previous, [messageId]: outcome }));
+    promptingRef.current.delete(messageId);
+    setPrompting((previous) => withoutKey(previous, messageId));
+  }, [bindPromptTarget, onPrompt, t]);
+
+  // 【回复】: that message becomes the reply target; a reply draft fills the
+  // composer, and without one the composer keeps its text. Nothing is sent.
+  const replyFromAnalysis = useCallback((messageId: string, analysis: PolyforgeAnalysis) => {
+    flushSync(() => {
+      setReplyTo(messageId);
+      if (analysis.reply_draft) setDraftText(analysis.reply_draft);
+    });
+  }, []);
+
+  // 【引用】 on an own message: a plain-text quote block of its
+  // text appended to the draft — never sent, never overwriting it, and never
+  // touching replyTo (a pending peer reply survives). Repeated clicks append
+  // again; the textarea keeps focus with the caret at the end.
+  const quoteOwnMessage = useCallback((text: string) => {
+    flushSync(() => setDraftText((previous) => appendQuoteBlock(previous, text)));
+    const field = composerTextRef.current;
+    if (!field) return;
+    field.focus();
+    field.setSelectionRange(field.value.length, field.value.length);
+  }, []);
+
+  const toggleCard = useCallback((messageId: string) => {
+    setCollapsedCards((previous) => {
+      if (previous[messageId]) return withoutKey(previous, messageId);
+      return { ...previous, [messageId]: true };
+    });
+  }, []);
 
   // One membership change, behind a confirmation naming the project and the
   // display name (or the placeholder). Cancelling returns before any request.
@@ -351,16 +551,16 @@ export function PolyforgeMessages({
           {t("polyforge.messages.quote")}: {replyOriginal.text}
         </div>
       )}
-      <label style={{ display: "flex", flexDirection: "column", gap: 2, fontSize: 11, color: "var(--text-dim)" }}>
-        {t("polyforge.messages.anchor")}
-        <input value={draftAnchor} onChange={(event) => setDraftAnchor(event.target.value)}
-          style={{ background: "var(--bg)", color: "var(--text)", border: "1px solid var(--border)", borderRadius: 4, padding: "4px 6px", fontSize: 12 }} />
-      </label>
-      <label style={{ display: "flex", flexDirection: "column", gap: 2, fontSize: 11, color: "var(--text-dim)" }}>
-        {t("polyforge.messages.text")}
-        <textarea value={draftText} onChange={(event) => setDraftText(event.target.value)} rows={3}
+      {/* each field is named by its label alone (htmlFor, not a
+          wrapping label), so a filled or prefilled draft never becomes part
+          of the field's accessible name. the anchor field is
+          gone; the textarea's placeholder names the inline token form. */}
+      <div style={{ display: "flex", flexDirection: "column", gap: 2, fontSize: 11, color: "var(--text-dim)" }}>
+        <label htmlFor={textFieldId}>{t("polyforge.messages.text")}</label>
+        <textarea ref={composerTextRef} value={draftText} id={textFieldId} onChange={(event) => setDraftText(event.target.value)} rows={3}
+          placeholder={t("polyforge.messages.textPlaceholder")}
           style={{ background: "var(--bg)", color: "var(--text)", border: "1px solid var(--border)", borderRadius: 4, padding: "4px 6px", fontSize: 12, resize: "vertical" }} />
-      </label>
+      </div>
       {sendError && <div style={{ fontSize: 11, color: "#dc2626" }}>{sendError}</div>}
       <button type="submit" disabled={sending}
         style={{ alignSelf: "flex-end", background: "var(--accent)", color: "var(--bg-panel)", border: "none", borderRadius: 4, padding: "4px 12px", fontSize: 12, cursor: sending ? "default" : "pointer" }}>
@@ -598,18 +798,49 @@ export function PolyforgeMessages({
   // each with its empty placeholder. On desktop its left divider is the
   // resize separator; the stored width survives a narrow dock
   // and the chat pane always keeps its 200px floor. Mobile keeps the fixed
-  // clamp with no handle.
+  // clamp with no handle, but folds to its own 40px strip
+  // through the shared key.
   const listColumn = (
     <div
       ref={listResizer.panelRef}
       style={{
         position: "relative",
-        width: isMobile ? "clamp(120px, 35%, 220px)" : "var(--pf-messages-list-width)",
+        width: listCollapsed ? (isMobile ? 40 : 28)
+          : isMobile ? "clamp(120px, 35%, 220px)" : "var(--pf-messages-list-width)",
         flexShrink: 0, minHeight: 0,
         display: "flex", flexDirection: "column",
         "--pf-messages-list-width": `${listResizer.width}px`,
       } as React.CSSProperties}
     >
+      {listCollapsed ? (
+        <div
+          data-pf-messages-strip=""
+          style={{ flex: 1, minHeight: 0, borderLeft: "1px solid var(--border)", display: "flex", flexDirection: "column", alignItems: "center", gap: 8, paddingTop: isMobile ? 0 : 6 }}
+        >
+          <button
+            type="button"
+            aria-label={t("polyforge.messages.expandList")}
+            title={t("polyforge.messages.expandList")}
+            onClick={() => setListCollapsed(false)}
+            style={{ background: "none", border: "none", color: "var(--text-muted)", cursor: "pointer", padding: isMobile ? 0 : 2, width: isMobile ? 40 : undefined, height: isMobile ? 40 : undefined, display: "inline-flex", alignItems: "center", justifyContent: "center" }}
+          >
+            <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="m15 18-6-6 6-6" />
+            </svg>
+          </button>
+          {/* The total-unread indicator: filled while anything is unread,
+              an empty ring at zero (its label names the count either way). */}
+          <span
+            data-unread-dot=""
+            aria-label={t("polyforge.messages.unreadTotal", { count: unreadTotal })}
+            title={t("polyforge.messages.unreadTotal", { count: unreadTotal })}
+            style={{
+              width: 8, height: 8, borderRadius: 4, display: "inline-block", boxSizing: "border-box",
+              background: unreadTotal > 0 ? "var(--accent)" : "none", border: unreadTotal > 0 ? "none" : "1px solid var(--border)",
+            }}
+          />
+        </div>
+      ) : (<>
       {!isMobile && (
         <div
           {...listResizer.separatorProps}
@@ -618,6 +849,25 @@ export function PolyforgeMessages({
           data-resize-handle="polyforge-messages-list"
           title={`${t("polyforge.messages.resizeList")}: ${t("layout.resizeHint")}`}
         />
+      )}
+      {isMobile && (
+        <div
+          data-pf-messages-column-header=""
+          style={{ height: 40, flexShrink: 0, display: "flex", alignItems: "center", borderLeft: "1px solid var(--border)", paddingLeft: 8 }}
+        >
+          <span style={{ flex: 1, minWidth: 0, fontSize: 11, color: "var(--text-dim)" }}>{t("polyforge.messages.sectionDirect")}</span>
+          <button
+            type="button"
+            aria-label={t("polyforge.messages.collapseList")}
+            title={t("polyforge.messages.collapseList")}
+            onClick={() => setListCollapsed(true)}
+            style={{ width: 40, height: 40, flexShrink: 0, background: "none", border: "none", color: "var(--text-muted)", cursor: "pointer", padding: 0, display: "inline-flex", alignItems: "center", justifyContent: "center" }}
+          >
+            <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="m9 18 6-6-6-6" />
+            </svg>
+          </button>
+        </div>
       )}
       <div
         id="pf-messages-list"
@@ -628,9 +878,11 @@ export function PolyforgeMessages({
         }}
       >
         {error && <div style={{ padding: "6px 8px", color: "#dc2626", fontSize: 11, flexShrink: 0 }}>{error}</div>}
-        <div style={{ padding: "6px 8px 2px", fontSize: 11, color: "var(--text-dim)", flexShrink: 0 }}>
-          {t("polyforge.messages.sectionDirect")}
-        </div>
+        {!isMobile && (
+          <div style={{ padding: "6px 8px 2px", fontSize: 11, color: "var(--text-dim)", flexShrink: 0 }}>
+            {t("polyforge.messages.sectionDirect")}
+          </div>
+        )}
         {direct.map((row) => (row.kind === "conversation" ? renderRow(row.conversation) : renderContact(row.contact)))}
         {direct.length === 0 && (
           <div style={{ padding: "4px 8px", fontSize: 11, color: "var(--text-dim)" }}>{t("polyforge.messages.empty")}</div>
@@ -654,6 +906,20 @@ export function PolyforgeMessages({
           <div style={{ padding: "4px 8px", fontSize: 11, color: "var(--text-dim)" }}>{t("polyforge.messages.noGroups")}</div>
         )}
       </div>
+      {!isMobile && (
+        <button
+          type="button"
+          aria-label={t("polyforge.messages.collapseList")}
+          title={t("polyforge.messages.collapseList")}
+          onClick={() => setListCollapsed(true)}
+          style={{ position: "absolute", top: 4, right: 4, background: "none", border: "none", color: "var(--text-muted)", cursor: "pointer", padding: 2, display: "inline-flex" }}
+        >
+          <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="m9 18 6-6-6-6" />
+          </svg>
+        </button>
+      )}
+      </>)}
     </div>
   );
 
@@ -662,6 +928,8 @@ export function PolyforgeMessages({
   // nothing acks and no conversation was auto-opened); with a conversation
   // or a silent contact open it is the header, the bubble stream (empty for
   // a contact until its first send) and the composer.
+  const ticketMessage = ticketFor ? messages.find((message) => message.id === ticketFor) : undefined;
+  const ticketAnalysis = ticketFor ? analyses[ticketFor] : undefined;
   const headerName = selectedRow
     ? conversationName(selectedRow)
     : (selectedContact?.display_name.trim() ?? "");
@@ -700,6 +968,10 @@ export function PolyforgeMessages({
           // In a direct conversation every consecutive non-own neighbour is
           // the same peer, so the attribution shows on the first of a run.
           const firstOfRun = index === 0 || messages[index - 1].mine;
+          // every valid token in the body is linkable, and the
+          // separate anchor line stays only when it is not already in the body.
+          const bodySegments = splitWorkItemLinks(message.text);
+          const anchorIsInline = Boolean(message.about_wi) && bodySegments.some((segment) => segment.ref === message.about_wi);
           return (
             <div
               key={message.id}
@@ -718,13 +990,25 @@ export function PolyforgeMessages({
                   </span>
                 </span>
               )}
-              {message.about_wi && (
+              {message.about_wi && !anchorIsInline && (
                 <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
                   <AnchorText anchor={message.about_wi} onOpenAnchor={onOpenAnchor} />
                 </span>
               )}
               <span style={{ fontSize: 12, color: message.about_wi ? "var(--text)" : "var(--text-dim)", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
-                {message.text}
+                {bodySegments.map((segment, segmentIndex) => segment.ref ? (
+                  <button
+                    key={`${message.id}-${segmentIndex}`}
+                    type="button"
+                    onClick={(event) => { event.stopPropagation(); onOpenAnchor(segment.ref!); }}
+                    aria-label={segment.ref}
+                    style={{ background: "none", border: "none", padding: 0, color: "var(--accent)", cursor: "pointer", font: "inherit", textDecoration: "underline" }}
+                  >
+                    {segment.text}
+                  </button>
+                ) : (
+                  <span key={`${message.id}-${segmentIndex}`}>{segment.text}</span>
+                ))}
               </span>
               {message.reply_to && (
                 <span style={{ fontSize: 11, color: "var(--text-muted)", borderLeft: "2px solid var(--border)", paddingLeft: 6 }}>
@@ -733,20 +1017,100 @@ export function PolyforgeMessages({
               )}
               <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
                 <span style={{ fontSize: 10, color: "var(--text-dim)" }}>{formatTimestamp(message.created_at)}</span>
-                <button type="button" onClick={(event) => { event.stopPropagation(); flushSync(() => setReplyTo(message.id)); }}
-                  style={{ background: "none", border: "none", color: "var(--text-muted)", cursor: "pointer", fontSize: 11, padding: 0 }}>
-                  {t("polyforge.messages.reply")}
-                </button>
-                {!message.mine && (
-                  <button type="button" onClick={(event) => { event.stopPropagation(); void analyze(message.id); }}
-                    disabled={analyzing === message.id}
+                {message.mine ? (
+                  <button type="button" onClick={(event) => { event.stopPropagation(); quoteOwnMessage(message.text); }}
                     style={{ background: "none", border: "none", color: "var(--text-muted)", cursor: "pointer", fontSize: 11, padding: 0 }}>
-                    {t("polyforge.messages.analyze")}
+                    {t("polyforge.messages.quoteMessage")}
+                  </button>
+                ) : (
+                  <button type="button" onClick={(event) => { event.stopPropagation(); flushSync(() => setReplyTo(message.id)); }}
+                    style={{ background: "none", border: "none", color: "var(--text-muted)", cursor: "pointer", fontSize: 11, padding: 0 }}>
+                    {t("polyforge.messages.reply")}
                   </button>
                 )}
+                {!message.mine && (
+                  <button type="button" onClick={(event) => { event.stopPropagation(); void analyze(message.id); }}
+                    disabled={Boolean(analyzing[message.id])}
+                    aria-busy={Boolean(analyzing[message.id])}
+                    style={{
+                      display: "inline-flex", alignItems: "center", gap: 4, padding: "1px 6px",
+                      background: "none", border: "1px solid var(--border)", borderRadius: 4,
+                      color: "var(--text)", fontSize: 11, lineHeight: "16px",
+                      cursor: analyzing[message.id] ? "default" : "pointer", opacity: analyzing[message.id] ? 0.6 : 1,
+                    }}>
+                    <svg aria-hidden="true" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                      strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+                      className={analyzing[message.id] ? "animate-spin" : undefined}>
+                      {analyzing[message.id]
+                        ? <path d="M21 12a9 9 0 1 1-6.2-8.56" />
+                        : <><circle cx="11" cy="11" r="7" /><path d="m21 21-4.3-4.3" /></>}
+                    </svg>
+                    {analyzing[message.id] ? t("polyforge.messages.analyzing") : t("polyforge.messages.analyze")}
+                  </button>
+                )}
+                <button type="button" onClick={(event) => { event.stopPropagation(); void promptMessage(message.id); }}
+                  disabled={Boolean(prompting[message.id])}
+                  aria-busy={Boolean(prompting[message.id])}
+                  aria-label={prompting[message.id] ? t("polyforge.messages.prompting") : t("polyforge.messages.prompt")}
+                  title={prompting[message.id] ? t("polyforge.messages.prompting") : t("polyforge.messages.prompt")}
+                  style={{
+                    display: "inline-flex", alignItems: "center", gap: 4, padding: "1px 6px",
+                    background: "none", border: "1px solid var(--border)", borderRadius: 4,
+                    color: "var(--text)", fontSize: 11, lineHeight: "16px", fontWeight: 600,
+                    cursor: prompting[message.id] ? "default" : "pointer", opacity: prompting[message.id] ? 0.6 : 1,
+                  }}>
+                  {prompting[message.id] && (
+                    <svg aria-hidden="true" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                      strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="animate-spin">
+                      <path d="M21 12a9 9 0 1 1-6.2-8.56" />
+                    </svg>
+                  )}
+                  @
+                </button>
               </span>
-              {analyses[message.id] && (
-                <span style={{ fontSize: 11, color: "var(--text-muted)" }}>{analyses[message.id]}</span>
+              {promptOutcomes[message.id]?.error && (
+                <div role="alert" style={{ fontSize: 11, color: "#dc2626", overflowWrap: "anywhere" }}>
+                  {promptOutcomes[message.id].error?.upgrade
+                    ? t("polyforge.messages.promptUpgrade", { version: POLYFORGE_PROMPT_MINIMUM_PF_VERSION })
+                    : promptOutcomes[message.id].error?.text}
+                </div>
+              )}
+              {promptOutcomes[message.id]?.shown && (
+                <pre aria-label={t("polyforge.messages.promptShown")}
+                  style={{
+                    margin: 0, padding: "4px 6px", border: "1px solid var(--border)", borderRadius: 4,
+                    background: "var(--bg)", color: "var(--text)", fontSize: 11, fontFamily: "inherit",
+                    whiteSpace: "pre-wrap", overflowWrap: "anywhere", userSelect: "text", cursor: "text",
+                  }}>
+                  {promptOutcomes[message.id].shown}
+                </pre>
+              )}
+              {promptOutcomes[message.id]?.feedback && (
+                <div role="status" style={{ fontSize: 11, color: "var(--text-muted)", overflowWrap: "anywhere" }}>
+                  {promptOutcomes[message.id].feedback}
+                </div>
+              )}
+              {!message.mine && analysisErrors[message.id] && (
+                <div role="alert" style={{ fontSize: 11, color: "#dc2626", overflowWrap: "anywhere" }}>
+                  {analysisErrors[message.id].upgrade
+                    ? t("polyforge.messages.analysisUpgrade", { version: POLYFORGE_ANALYZE_MINIMUM_PF_VERSION })
+                    : analysisErrors[message.id].text}
+                </div>
+              )}
+              {!message.mine && analyses[message.id] && (
+                <PolyforgeAnalysisCard
+                  analysis={analyses[message.id]}
+                  expanded={!collapsedCards[message.id]}
+                  onToggle={() => toggleCard(message.id)}
+                  onFileTicket={() => setTicketFor(message.id)}
+                  onReply={() => replyFromAnalysis(message.id, analyses[message.id])}
+                  onOpenTask={onOpenTask}
+                />
+              )}
+              {!message.mine && ticketNotices[message.id] && (
+                <div role="status" style={{ fontSize: 11, color: "var(--text-muted)", overflowWrap: "anywhere" }}>
+                  {t("polyforge.messages.ticketCreated", { slug: ticketNotices[message.id] })}
+                </div>
               )}
             </div>
           );
@@ -754,6 +1118,19 @@ export function PolyforgeMessages({
       </div>
 
       {composer}
+      {ticketMessage && ticketAnalysis && (
+        <PolyforgeFileTicketDialog
+          key={ticketMessage.id}
+          analysis={ticketAnalysis}
+          message={ticketMessage}
+          projects={groups.map((group) => group.project)}
+          onClose={() => setTicketFor(null)}
+          onCreated={(slug) => {
+            setTicketNotices((previous) => ({ ...previous, [ticketMessage.id]: slug }));
+            setTicketFor(null);
+          }}
+        />
+      )}
     </div>
   );
 

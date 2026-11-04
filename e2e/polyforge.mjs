@@ -150,7 +150,7 @@ const transcript112 = join(capsule112, "session", "kilo-author.jsonl");
 writeFileSync(transcript112, [
   { type: "session", id: "s112", timestamp: at2(7) },
   { type: "message", id: "n112", parentId: null, timestamp: "2026-10-18T11:06:30Z", message: { role: "assistant", content: [{ type: "text", text: "E2E-PI112-NARRATION" }] } },
-  { type: "message", id: "t112", parentId: null, timestamp: "2026-10-18T11:06:40Z", message: { role: "assistant", content: [{ type: "thinking", thinking: "E2E-SECRET-THINKING-112" }, { type: "toolCall", id: "c", name: "bash", arguments: { command: "echo token=E2E-SECRET-TOKEN-112" } }] } },
+  { type: "message", id: "t112", parentId: null, timestamp: "2026-10-18T11:06:40Z", message: { role: "assistant", content: [{ type: "thinking", thinking: "E2E-PI112-THINKING" }, { type: "toolCall", id: "c", name: "bash", arguments: { command: "echo token=E2E-SECRET-TOKEN-112" } }] } },
 ].map((record) => JSON.stringify(record)).join("\n") + "\n");
 writeFileSync(join(capsule112, "runtime-state", "spawn-journal.jsonl"), JSON.stringify({ at: at2(7), work_item: WI112, step_id: "kilo-author", spawn_n: 2, started_at: at2(7), transcript: transcript112, harness: "pi" }) + "\n");
 writeFileSync(join(dataRoot, "runtime-state.json"), JSON.stringify({ version: 1, jobs: JOBS.map((j) => (j.work_item_id === WI112 ? { work_item_id: WI112, capsule_dir: capsule112 } : { work_item_id: j.work_item_id })) }));
@@ -286,7 +286,6 @@ async function openPage({ viewport = { width: 1280, height: 800 }, locale } = {}
 }
 const pfButton = (page) => page.getByRole("button", { name: /^(?!.*close).*polyforge/i }).first();
 const pfPanel = (page) => page.getByRole("complementary", { name: /polyforge/i }).or(page.getByRole("dialog", { name: /polyforge/i }));
-const bgPanel = (page) => page.getByRole("complementary", { name: "Background tasks" }).or(page.getByRole("dialog", { name: "Background tasks" }));
 async function openPanel(page) { await pfButton(page).click(); await pfPanel(page).first().waitFor(); return pfPanel(page).first(); }
 const countSince = (t0) => statusRequests.filter((t) => t >= t0).length;
 // (declared scope extension, owner-answered rewind): since
@@ -379,6 +378,37 @@ const LINES112 = [
   ["push_failed", `⚠ ${FAULT112.error}`], ["job_stopped", "⏸"],
   ["terminal", "⏹ completed"], ["terminal", "⏹ failed"], ["terminal", "⏹ cancelled"],
 ];
+// owner 有意变更 each spawn block's group head absorbs its
+// step_started line and its terminal line (its last step_done / step_failed /
+// step_dead — here step_dead in the kilo-author block): those two kinds of line
+// are no longer body rows; each absorbed line's raw kind and full text are on
+// the head's title (`<kind>\n<text>`, entries separated by a blank line). The
+// whole retained list is still pinned: the marker rows plus the head lines are
+// exactly LINES112.
+const ABSORBED112 = [
+  [["step_started", `▶ zulu-grill #2 · ${SHORT_MODEL112}`]],
+  [["step_started", `▶ kilo-author #2 · ${MODEL112}`], ["step_dead", "✕ mike-spec · timeout-after-3-retries"]],
+];
+const MARKERS112 = LINES112.filter(([kind]) => kind !== "step_started" && kind !== "step_dead");
+const headLines = (panel) => panel.first().evaluate((root) => [...root.querySelectorAll("[data-pf-progress] [data-pf-progress-block-toggle]")].map((el) => {
+  const cs = getComputedStyle(el);
+  return { status: el.closest("[data-pf-progress-block]").getAttribute("data-pf-progress-block-status"), text: (el.textContent || "").trim(),
+    ellipsis: cs.whiteSpace === "nowrap" && cs.textOverflow === "ellipsis",
+    lines: (el.getAttribute("title") || "").split("\n\n").map((entry) => { const at = entry.indexOf("\n"); return { kind: entry.slice(0, at), text: entry.slice(at + 1) }; }) };
+}));
+// two spawns form two folded blocks and only the newest is
+// expanded by default. A scenario that pins the WHOLE retained line list (or
+// both step_started lines) expands every block first; no line is dropped, so
+// the old full-list pins stay intact.
+async function expandProgressBlocks(panel) {
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const collapsed = panel.locator('[data-pf-progress-block-toggle][aria-expanded="false"]');
+    if ((await collapsed.count()) === 0) return;
+    await collapsed.first().evaluate((el) => el.click());
+  }
+  throw new Error("a progress block stayed folded");
+}
+
 async function ensureDetail112(page) {
   // The pi#112 detail is showing iff its title row names the slug and its
   // execution progress has rendered lifecycle lines. The job card TOGGLES
@@ -597,14 +627,19 @@ try {
   // pi#117: the desktop dock opens at 460 by default (resizable via its
   // left-edge handle; the e2e asserts the default width only — the clamp,
   // persistence and dismissal-exemption contracts are pinned by unit tests).
-  await withPage(T.AC9, "desktop dock + mutual exclusion", {}, async (page) => {
+  // (owner 有意变更): the pi session's top bar no longer carries
+  // a "Background tasks" toggle. This scenario now pins that absence and that
+  // the Polyforge dock still opens at 460px; the bg-tasks/Polyforge mutual
+  // exclusion is pinned by components/AppShell.polyforge.test.mjs (the
+  // notification-jump source pin; owner-approved narrowing, grill row 4).
+  await withPage(T.AC9, "desktop dock, no bg-tasks toggle", {}, async (page) => {
+    assert.equal(
+      await page.getByRole("button", { name: "Background tasks", exact: true }).count(),
+      0,
+      "the pi session's top bar still has a \"Background tasks\" button",
+    );
     const box = await (await openPanel(page)).boundingBox();
     assert.ok(Math.abs(box.width - 460) <= 2, `desktop dock is ${box.width}px wide`);
-    await page.getByRole("button", { name: "Background tasks", exact: true }).first().click();
-    await bgPanel(page).first().waitFor();
-    assert.equal(await pfPanel(page).count(), 0, "opening bg-tasks must close the Polyforge panel");
-    await pfButton(page).click(); await pfPanel(page).first().waitFor();
-    assert.equal(await bgPanel(page).count(), 0, "opening Polyforge must close bg-tasks");
   });
   // 600px: inside the app's mobile breakpoint (<= 640px) but above the narrow
   // (<= 480px) layout that tucks toolbar actions behind a "more" menu.
@@ -653,20 +688,33 @@ try {
   });
 
   // N2 — readable lines (en): each retained event is one line, glyph +
-  // whitelisted fields, in event order; the long model is the CSS-ellipsized
-  // line's text with the full value on hover; nothing else leaks.
+  // whitelisted fields, in event order; the long model wraps in full (no
+  // ellipsis since); nothing else leaks.
   await withPage(T.N2, "readable lines", {}, async (page) => {
     const panel = await ensureDetail112(page);
+    await expandProgressBlocks(panel);
     const lines = await eventLines(panel, null);
-    assert.deepEqual(lines.map((line) => [line.kind, lineBody(line)]), LINES112, `the lifecycle lines: ${JSON.stringify(lines.map((line) => line.text))}`);
-    for (const line of lines) assert.match(line.text, /^\d{2}:\d{2}:\d{2} /, `each line starts with its clock: ${line.text}`);
-    const long = lines.find((line) => line.text.includes(MODEL112));
-    assert.ok(long?.title.includes(MODEL112) && long.ellipsis, `the long model line is one ellipsized line with the full value on hover: ${JSON.stringify(long)}`);
+    // owner 有意变更 the marker rows plus the group heads' absorbed
+    // lines are the whole retained list (see ABSORBED112).
+    assert.deepEqual(lines.map((line) => [line.kind, lineBody(line)]), MARKERS112, `the lifecycle marker rows: ${JSON.stringify(lines.map((line) => line.text))}`);
+    const heads = await headLines(panel);
+    assert.deepEqual(heads.map((head) => head.lines.map((line) => [line.kind, lineBody(line)])), ABSORBED112, `the heads' absorbed lines: ${JSON.stringify(heads)}`);
+    assert.equal(lines.length + heads.flatMap((head) => head.lines).length, LINES112.length, "no retained line is dropped");
+    for (const line of [...lines, ...heads.flatMap((head) => head.lines)]) assert.match(line.text, /^\d{2}:\d{2}:\d{2} /, `each line starts with its clock: ${line.text}`);
+    // owner 有意变更 the long model rode the kilo-author start line,
+    // which the head absorbs — it is on the head's title in full, and neither the
+    // head nor any marker row is ellipsized.
+    const long = heads[1].lines.find((line) => line.text.includes(MODEL112));
+    assert.ok(long && !heads.some((head) => head.ellipsis) && !lines.some((line) => line.ellipsis), `the long model line stays whole, not ellipsized: ${JSON.stringify(heads[1])}`);
+    assert.ok(heads[1].text.includes("kilo-author #2"), `the head names the absorbed start's step and spawn: ${heads[1].text}`);
     const text = await panel.innerText();
-    assert.ok(text.includes("E2E-PI112-NARRATION") && text.includes("bash: echo token=***"), "the spawn's transcript lines share the stream");
-    for (const secret of [...SECRETS112, "E2E-SECRET-THINKING-112", "E2E-SECRET-TOKEN-112"]) assert.ok(!text.includes(secret), `panel leaks ${secret}`);
-    const titles = JSON.stringify(lines.map((line) => line.title));
-    for (const secret of SECRETS112) assert.ok(!titles.includes(secret), `a hover title leaks ${secret}`);
+    // owner 有意变更 the tool line is the shared tool card — its
+    // header shows the name and the masked argument, its title the full header.
+    const toolTitles = await panel.locator('[data-pf-progress] [data-pf-progress-kind="tool"] button[aria-expanded]').evaluateAll((els) => els.map((el) => el.getAttribute("title")));
+    assert.ok(text.includes("E2E-PI112-NARRATION") && text.includes("E2E-PI112-THINKING") && text.includes("echo token=***") && toolTitles.includes("bash: echo token=***"), "the spawn's text, thinking and tool lines share the stream");
+    for (const secret of [...SECRETS112, "E2E-SECRET-TOKEN-112"]) assert.ok(!text.includes(secret), `panel leaks ${secret}`);
+    const titles = JSON.stringify([...lines.map((line) => line.title), ...heads.flatMap((head) => head.lines), ...toolTitles]);
+    for (const secret of [...SECRETS112, "E2E-SECRET-TOKEN-112"]) assert.ok(!titles.includes(secret), `a hover title leaks ${secret}`);
   });
 
   // N3 — zh-CN and zh-TW: the same lines (glyphs and recorded values need no
@@ -674,8 +722,11 @@ try {
   for (const [locale, heading] of [["zh-CN", "执行进度"], ["zh-TW", "執行進度"]]) {
     await withPage(T.N3, locale, { locale }, async (page) => {
       const panel = await ensureDetail112(page);
+      await expandProgressBlocks(panel);
       const lines = await eventLines(panel, null);
-      assert.deepEqual(lines.map((line) => [line.kind, lineBody(line)]), LINES112, `${locale}: the lifecycle lines`);
+      // owner 有意变更 marker rows + the heads' absorbed lines.
+      assert.deepEqual(lines.map((line) => [line.kind, lineBody(line)]), MARKERS112, `${locale}: the lifecycle marker rows`);
+      assert.deepEqual((await headLines(panel)).map((head) => head.lines.map((line) => [line.kind, lineBody(line)])), ABSORBED112, `${locale}: the heads' absorbed lines`);
       assert.equal(await panel.locator("[data-pf-progress]").getByText(heading, { exact: true }).count(), 1, `${locale}: the progress heading is translated`);
       assert.doesNotMatch(await panel.innerText(), /polyforge\.[a-z]/i, `${locale} panel shows a raw i18n key`);
     });
@@ -695,12 +746,15 @@ try {
   // line and no collapsed `sync ×N` row; meaningful events never collapse.
   await withPage(T.N5, "no noise, no sync row", {}, async (page) => {
     const panel = await ensureDetail112(page);
+    await expandProgressBlocks(panel);
     for (const kind of ["published", "transcript_missing", "exec_init", "job_started"]) {
       assert.equal((await eventLines(panel, kind)).length, 0, `${kind} produces no line`);
     }
     assert.equal(await panel.getByText(/sync\s*[×x]\s*\d/i).count(), 0, "no collapsed sync row");
     assert.equal((await eventLines(panel, "terminal")).length, 3, "terminal events never collapse");
-    assert.equal((await eventLines(panel, "step_started")).length, 2, "step_started events never collapse");
+    // owner 有意变更 both step_started lines live on their group heads.
+    const starts = (await headLines(panel)).flatMap((head) => head.lines).filter((line) => line.kind === "step_started");
+    assert.equal(starts.length, 2, "step_started events never collapse");
   });
 
   // N6 — (was: verbose mode) there is no mode: no control switches the
@@ -716,10 +770,15 @@ try {
   // N7 — the raw kind is one hover away on every lifecycle line.
   await withPage(T.N7, "hover titles", {}, async (page) => {
     const panel = await ensureDetail112(page);
+    // owner 有意变更 an absorbed start/terminal line's raw kind and
+    // full text are on its group head's title; every other kind is a marker row.
+    const absorbed = (await headLines(panel)).flatMap((head) => head.lines);
     for (const kind of RETAINED112) {
       const lines = await eventLines(panel, kind);
-      assert.ok(lines.length >= 1, `no line carries the raw kind ${kind} on hover`);
+      const onHeads = absorbed.filter((line) => line.kind === kind);
+      assert.ok(lines.length + onHeads.length >= 1, `no line carries the raw kind ${kind} on hover`);
       for (const line of lines) assert.equal(line.title, `${kind}\n${line.text}`, `${kind}: the hover is the raw kind and the full line`);
+      for (const line of onHeads) assert.match(line.text, /^\d{2}:\d{2}:\d{2} [▶■✕]/, `${kind}: the head's hover is the raw kind and the full line (${line.text})`);
     }
   });
 
@@ -731,10 +790,14 @@ try {
     const first = async (kind) => (await eventLines(panel, kind))[0];
     const needsInput = await first("needs_input");
     assert.ok(needsInput.tone === "amber" && needsInput.family === "amber", `the needs_input line is not amber: ${JSON.stringify(needsInput)}`);
-    for (const kind of ["step_failed", "step_dead", "push_failed", "needs_recovery"]) {
+    for (const kind of ["step_failed", "push_failed", "needs_recovery"]) {
       const line = await first(kind);
       assert.ok(line.tone === "red" && line.family === "red", `the ${kind} line is not red: ${JSON.stringify(line)}`);
     }
+    // owner 有意变更 the step_dead line is its block's absorbed
+    // terminal — the block's head carries the failed status and its ✕ mark.
+    const heads = await headLines(panel);
+    assert.ok(heads[1].lines.some((line) => line.kind === "step_dead") && heads[1].status === "failed" && heads[1].text.includes("✕"), `the step_dead block reads failed: ${JSON.stringify(heads[1])}`);
     const terminals = await eventLines(panel, "terminal");
     assert.equal(terminals.length, 3, `expected 3 terminal lines, found ${terminals.length}`);
     assert.ok(terminals[0].tone === "green" && terminals[0].family === "green", "the terminal completed line is not green");
@@ -745,7 +808,9 @@ try {
       const line = await first(kind);
       assert.ok(line.tone === "neutral" && plainColour(line), `the ${kind} line is not neutral: ${JSON.stringify(line)}`);
     }
-    assert.equal((await first("step_started")).tone, "accent", "a start line is accent");
+    // owner 有意变更 start lines are absorbed into the group heads;
+    // the older head carries no mark, the head of the block with a failure ✕.
+    assert.deepEqual(heads.map((head) => head.status), ["none", "failed"], "each head carries its block's status");
   });
 
   // N9 — (was: the toggle persists) the toggle is gone and the old

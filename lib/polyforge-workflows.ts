@@ -2,16 +2,23 @@ import { spawn } from "node:child_process";
 import { isPolyforgeVersionBelowMinimum } from "./polyforge-detect";
 import { polyforgePfBin } from "./polyforge-pf-bin";
 import { probePolyforgeVersion } from "./polyforge-status";
+import { workspaceSectionPath } from "../components/polyforge-config-helpers";
 
 /**
  * Server-side read of the Settings › Polyforge WORKFLOW card.
- * Two `pf` subprocess reads per call — `pf --json workflows --cwd` (the
- * installed bundles, their steps, candidates, declared attrs and each mapped
- * project's effective chain) and `pf --json config workspace --cwd` (the
- * declared values, the one declared-value source) — and nothing cached: every
- * call (each ↻ click) spawns both afresh. The panel never parses a bundle or
- * the yaml itself. Every degradation (pf absent, below the floor, a failed or
- * undecodable read) is a field of a 200 answer, never an exception.
+ * the card shows the union of every cli.toml-mapped
+ * workspace's projects. One `pf --json config list` reads the
+ * `[workspace."<path>"]` mapping, then each mapped workspace is read with its
+ * own `--cwd`: `pf --json workflows` (the installed bundles, their steps,
+ * candidates, declared attrs and each project's effective chain) and
+ * `pf --json config workspace` (the declared values and the yaml CAS hash) —
+ * the workspaces in parallel, each independently degraded. The bound is 1 mapping read
+ * + 2 reads per mapped workspace, never one spawn per project, and nothing is
+ * cached: every call (each ↻ click) spawns them afresh. A machine with no
+ * mapping (or an unreadable list) reads the settings cwd alone, as #216 did.
+ * The panel never parses a bundle or the yaml itself. Every degradation (pf
+ * absent, below the floor, a failed or undecodable read) is a field of a 200
+ * answer, never an exception.
  */
 
 /** The workflow card's floor: the first pf with `pf workflows` and the
@@ -79,8 +86,18 @@ export interface PolyforgeWorkspaceStep {
 /** The declared values the card shows, from `pf --json config workspace`. */
 export interface PolyforgeWorkflowWorkspace {
   workspace: string;
-  yaml: { sha256: string | null; exists: boolean };
+  /** The workspace `.polyforge.yaml` (each project's source label). */
+  yaml: { path: string; sha256: string | null; exists: boolean };
   steps: Record<string, Record<string, PolyforgeWorkspaceStep>>;
+}
+
+/** One mapped workspace's two reads. A failed read leaves
+ *  `reason` set: the workspace contributes no project and so no write. */
+export interface PolyforgeWorkflowsWorkspaceRead {
+  workspace: string;
+  workflows: PolyforgeWorkflowsDoc | null;
+  declared: PolyforgeWorkflowWorkspace | null;
+  reason?: string;
 }
 
 export interface PolyforgeWorkflowsRead {
@@ -88,8 +105,12 @@ export interface PolyforgeWorkflowsRead {
   pfVersion: string | null;
   capable: boolean;
   reason?: string;
+  /** The settings cwd's own workspace (#216 consumers); null when the cwd
+   *  lies in no read workspace. */
   workflows: PolyforgeWorkflowsDoc | null;
   workspace: PolyforgeWorkflowWorkspace | null;
+  /** Every read workspace, in the mapping's order. */
+  workspaces?: PolyforgeWorkflowsWorkspaceRead[];
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -196,7 +217,11 @@ export function sanitizeWorkflowWorkspace(raw: unknown): PolyforgeWorkflowWorksp
   }
   return {
     workspace: str(raw.workspace),
-    yaml: { sha256: typeof yaml.sha256 === "string" ? yaml.sha256 : null, exists: yaml.exists === true },
+    yaml: {
+      path: str(yaml.path) || (str(raw.workspace) ? `${str(raw.workspace)}/.polyforge.yaml` : ""),
+      sha256: typeof yaml.sha256 === "string" ? yaml.sha256 : null,
+      exists: yaml.exists === true,
+    },
     steps,
   };
 }
@@ -233,6 +258,47 @@ function runPfJson(argv: string[]): Promise<unknown> {
   });
 }
 
+/** The cli.toml mapping's workspace paths, in pf's order (deduplicated):
+ *  every `[workspace."<abs path>"]` section item of `pf --json config list`.
+ *  Only an absolute path is ever passed on as a `--cwd` argv value. */
+export function mappedWorkspacesFromList(raw: unknown): string[] {
+  const items = isRecord(raw) && Array.isArray(raw.items) ? raw.items : [];
+  const paths: string[] = [];
+  for (const item of items) {
+    if (!isRecord(item) || typeof item.key !== "string") continue;
+    const path = workspaceSectionPath(item.key);
+    if (path && path.startsWith("/") && !paths.includes(path)) paths.push(path);
+  }
+  return paths;
+}
+
+function failure(read: PromiseSettledResult<unknown>, fallback: string): string {
+  if (read.status === "rejected") return read.reason instanceof Error ? read.reason.message : fallback;
+  return fallback;
+}
+
+/** One workspace's two reads, degraded independently. The workspaces are
+ *  read in parallel; inside one workspace the declared-value read runs
+ *  first, so a finished `pf workflows` read always has its yaml read beside
+ *  it (one deterministic spawn order per workspace). */
+async function readWorkspace(workspace: string): Promise<PolyforgeWorkflowsWorkspaceRead> {
+  const args = workspace ? ["--cwd", workspace] : [];
+  const [declaredRead] = await Promise.allSettled([
+    workspace ? runPfJson(["--json", "config", "workspace", "--cwd", workspace]) : Promise.resolve(null),
+  ]);
+  const [workflowsRead] = await Promise.allSettled([runPfJson(["--json", "workflows", ...args])]);
+  const workflows = workflowsRead.status === "fulfilled" ? sanitizeWorkflowsDoc(workflowsRead.value) : null;
+  const declared = declaredRead.status === "fulfilled" ? sanitizeWorkflowWorkspace(declaredRead.value) : null;
+  let reason: string | undefined;
+  if (!workflows) reason = failure(workflowsRead, "pf workflows answered without the documented shape");
+  else if (workspace && declaredRead.status === "rejected") reason = failure(declaredRead, "pf config workspace is unavailable");
+  return { workspace, workflows, declared, ...(reason ? { reason } : {}) };
+}
+
+function contains(workspace: string, cwd: string): boolean {
+  return cwd === workspace || cwd.startsWith(`${workspace.replace(/\/+$/, "")}/`);
+}
+
 /** The one read the workflows route calls. Fresh on every call. */
 export async function readPolyforgeWorkflows(cwd: string): Promise<PolyforgeWorkflowsRead> {
   const presence = await probePolyforgeVersion(true);
@@ -249,27 +315,33 @@ export async function readPolyforgeWorkflows(cwd: string): Promise<PolyforgeWork
       workspace: null,
     };
   }
-  const args = cwd ? ["--cwd", cwd] : [];
-  const [workflowsRead, workspaceRead] = await Promise.allSettled([
-    runPfJson(["--json", "workflows", ...args]),
-    cwd ? runPfJson(["--json", "config", "workspace", "--cwd", cwd]) : Promise.resolve(null),
-  ]);
-  const workflows = workflowsRead.status === "fulfilled" ? sanitizeWorkflowsDoc(workflowsRead.value) : null;
-  const workspace = workspaceRead.status === "fulfilled" ? sanitizeWorkflowWorkspace(workspaceRead.value) : null;
+  let mapped: string[] = [];
+  try {
+    mapped = mappedWorkspacesFromList(await runPfJson(["--json", "config", "list"]));
+  } catch {
+    mapped = [];
+  }
+  const workspaces = await Promise.all((mapped.length > 0 ? mapped : [cwd]).map(readWorkspace));
+  const own = mapped.length > 0 ? workspaces.find((entry) => cwd !== "" && contains(entry.workspace, cwd)) ?? null : workspaces[0];
+  // The page-level reason is the daemon's (one fact for every workspace) or,
+  // when no workspace could be read at all, every workspace's own failure;
+  // otherwise a workspace's failure is only its own entry's reason.
+  const docs = workspaces.map((entry) => entry.workflows).filter((doc): doc is PolyforgeWorkflowsDoc => doc !== null);
   let reason: string | undefined;
-  if (workflowsRead.status === "rejected") {
-    reason = workflowsRead.reason instanceof Error ? workflowsRead.reason.message : "pf workflows is unavailable";
-  } else if (!workflows) {
-    reason = "pf workflows answered without the documented shape";
-  } else if (!workflows.daemon_reachable || workflows.reason) {
-    reason = workflows.reason || "the daemon is not reachable";
+  if (docs.length === 0) {
+    reason = workspaces.length === 1
+      ? workspaces[0].reason
+      : workspaces.map((entry) => `${entry.workspace}: ${entry.reason ?? "unreadable"}`).join("; ");
+  } else if (!docs[0].daemon_reachable || docs[0].reason) {
+    reason = docs[0].reason || "the daemon is not reachable";
   }
   return {
     pfPresent: true,
     pfVersion: presence.version,
     capable: true,
     ...(reason ? { reason } : {}),
-    workflows,
-    workspace,
+    workflows: own?.workflows ?? null,
+    workspace: own?.declared ?? null,
+    workspaces,
   };
 }

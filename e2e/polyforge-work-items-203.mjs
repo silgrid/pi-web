@@ -25,6 +25,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
 import { startNextServer } from "./next-server.mjs";
+import { openPolyforgeDock, polyforgeDock as dock, waitForPolyforgeToggle } from "./polyforge-dock.mjs";
 import { COLD_MS, NAV_MS } from "./timeouts.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
@@ -120,7 +121,8 @@ const rest = args.filter((a) => a !== "--json");
 const flag = (name) => { const i = rest.indexOf(name); return i >= 0 ? rest[i + 1] : undefined; };
 if (rest[0] === "ops" && rest[1] === "status") out({ machine_id: "m-e2e", workspaces: [s.ws], jobs: s.jobs, queue: s.queue, tasks: { running: 0, completed: 0 } });
 if (rest[0] === "config" && rest[1] === "workspace") out(flag("--cwd") === s.ws ? { mapped: true, workspace: s.ws } : { mapped: false, workspace: null });
-if (rest[0] === "config" && rest[1] === "list") out({ items: [{ key: "user_id", value: "u_e2e", source: "file" }] });
+if (rest[0] === "config" && rest[1] === "list") out({ items: [{ key: "user_id", value: "u_e2e", source: "file" },
+  { key: '[workspace."' + s.ws + '"]', section: true, value: "workbench, polyforge" }] });
 if (rest[0] === "msg" && rest[1] === "list") out({ conversations: [] });
 if (rest[0] === "msg" && rest[1] === "contacts") out({ contacts: [] });
 if (rest[0] === "recall") out({ items: [], total: 0 });
@@ -155,12 +157,10 @@ async function check(id, fn) {
   try { await fn(); console.log(`PASS ${id}`); }
   catch (error) { failures.push(id); console.log(`FAIL ${id}: ${String(error?.message ?? error).split("\n")[0]}`); }
 }
-const RE_WORK = /工单|工單|work/i, RE_TASKS = /任务|任務|tasks/i, RE_ITEMS = /工单列表|工單列表|work items/i;
+const RE_WORK = /工单|工單|work/i, RE_TASKS = /任务|任務|tasks/i, RE_ITEMS = /工单列表|工單列表|work items/i, RE_MEMORY = /记忆|記憶|memory/i;
 const BARRIER = "/__e2e_request_barrier";
 const errors = [];
 let browser; let base; let stop = async () => {};
-const dock = (page) => page.locator("#polyforge-dock").or(page.getByRole("dialog", { name: /polyforge/i })).first();
-const pfButton = (page) => page.getByRole("button", { name: /^(?!.*close).*polyforge/i }).first();
 const topTab = (page, re) => dock(page).locator('[data-pf-tabstrip="top"] [role="tab"]').filter({ hasText: re }).first();
 const segments = (page) => dock(page).locator('[data-pf-tabstrip="work"] [role="tab"]');
 const segment = (page, re) => segments(page).filter({ hasText: re }).first();
@@ -204,17 +204,7 @@ async function waitFor(fn, label, ms = 20_000) {
 }
 async function openDock(page) {
   if ((await dock(page).count()) > 0 && await dock(page).isVisible().catch(() => false)) return dock(page);
-  // the toggle renders only after the mount-time status probe
-  // (`pfPresent`) and, since, is resident at ≤480px / inline
-  // wider. Never open ⋯ to reveal it: ⋯'s overlay covers that slot and
-  // intercepts the click. Wait for the toggle, close ⋯ if it is open, click.
-  const more = page.locator('[data-mobile-toolbar-more="true"]');
-  await waitFor(async () => (await pfButton(page).count()) > 0, "the Polyforge toggle renders", 20_000);
-  if ((await more.count()) > 0 && (await more.getAttribute("aria-expanded")) === "true") {
-    await more.click();
-    await page.locator('[data-mobile-toolbar-actions="true"]').waitFor({ state: "hidden", timeout: 10_000 });
-  }
-  await pfButton(page).click(); await dock(page).waitFor({ timeout: 20_000 }); return dock(page);
+  return openPolyforgeDock(page);
 }
 async function openWork(page) {
   await openDock(page);
@@ -234,13 +224,53 @@ async function afterStatusPolls(page, n, label) {
 async function openItems(page) {
   await openWork(page);
   const before = listRequests(page);
-  const tab = segment(page, RE_ITEMS);
+  // At ≤640px the Work rail is icon-only; its tab is named by aria-label, so
+  // fall back to the accessible name when the visible label is gone.
+  const tab = segment(page, RE_ITEMS)
+    .or(dock(page).locator('[data-pf-tabstrip="work"]').getByRole("tab", { name: RE_ITEMS }))
+    .first();
   await tab.waitFor({ timeout: 15_000 });
   await tab.click();
   await waitFor(() => listRequests(page) > before, "the items sub-tab issues its list read", 20_000);
   await requestBarrier(page);
   return dock(page);
 }
+async function openMemory(page) {
+  await openDock(page);
+  const tab = topTab(page, RE_MEMORY);
+  await tab.waitFor({ timeout: 15_000 });
+  await tab.click();
+  const bar = page.locator('[data-pf-searchbar]').first();
+  await bar.waitFor({ timeout: 20_000 });
+  return bar;
+}
+// The shared search-bar's measurable shape ( row 6): the input,
+// each select and the square action are compared control type by control
+// type; the container and filter rows are measured for the ≤640px layout.
+const barShape = (bar) => bar.evaluate((root) => {
+  const metric = (el) => {
+    const style = getComputedStyle(el); const rect = el.getBoundingClientRect();
+    return { height: Math.round(rect.height * 100) / 100, borderRadius: style.borderRadius,
+      borderWidth: style.borderTopWidth, fontSize: style.fontSize, top: Math.round(rect.top * 100) / 100 };
+  };
+  const row = root.querySelector('[data-pf-searchbar-row]');
+  const filters = root.querySelector('[data-pf-searchbar-filters]');
+  const input = row.querySelector('input[type="search"]');
+  const action = row.querySelector('[data-pf-searchbar-action]');
+  const children = [...filters.children].map((el) => {
+    const rect = el.getBoundingClientRect(); return { top: Math.round(rect.top), height: Math.round(rect.height * 100) / 100 };
+  });
+  const rows = {};
+  for (const child of children) (rows[child.top] ??= []).push(child.height);
+  const controls = [...filters.querySelectorAll('input:not([type="checkbox"]), select')].map((el) => metric(el).height);
+  return {
+    input: metric(input), action: metric(action),
+    selects: [...filters.querySelectorAll('select')].map((el) => metric(el)),
+    filterRowCounts: Object.values(rows).map((heights) => heights.length),
+    filterHeights: controls,
+    scrollWidth: root.scrollWidth, clientWidth: root.clientWidth,
+  };
+});
 const goalCount = (panel, re) => panel.getByText(re).count();
 const rawGet = (path, host) => new Promise((resolve, reject) => {
   const req = request({ host: "127.0.0.1", port: Number(new URL(base).port), path, headers: { Host: host }, setHost: false }, (res) => {
@@ -255,7 +285,8 @@ const get = async (path) => {
 };
 async function startServer(name, path = `${stubDir}${delimiter}${process.env.PATH}`) {
   const logFile = join(work, `server-${name}.log`);
-  const dir = `${distDir}-${name}`; rmSync(join(root, dir), { force: true, recursive: true });
+  const dir = join(distDir, name); // nested, so e2e/all.mjs clears it with the suite dir
+  rmSync(join(root, dir), { force: true, recursive: true });
   const started = await startNextServer({ name, logFile, env: { ...process.env, PI_WEB_DIST_DIR: dir, PATH: path, HOME: work,
     PI_CODING_AGENT_DIR: agentDir, PI_WEB_PASSWORD: "", NEXT_TELEMETRY_DISABLED: "1", PI_WEB_ALLOWED_ROOT_PREFIXES: work, POLYFORGE_V1_API_KEY: "" } });
   base = started.base; stop = started.stop;
@@ -264,7 +295,11 @@ async function startServer(name, path = `${stubDir}${delimiter}${process.env.PAT
 try {
   browser = await chromium.launch();
   await startServer("main");
-  await withPage({ warm: true }, async () => {});
+  // The warm-up also waits, at the cold ceiling, for the toggle: its status probe's route compiles
+  // cold on first use, and under a loaded full bar that outlasted S203-1's NAV_MS toggle wait
+  // (verification s17 of).
+  seed();
+  await withPage({ warm: true }, (page) => waitForPolyforgeToggle(page, COLD_MS));
 
   await check("S203-1", async () => {
     seed();
@@ -518,6 +553,83 @@ try {
     }
     assert.equal(itemVerbs(), before, "a refused request spawns no pf");
     assert.ok(!errors.some((line) => /^5\d\d /.test(line)), `no route answers 5xx: ${errors.join(" | ")}`);
+  });
+
+
+  await check("S203-13", async () => {
+    seed();
+    // the 工单列表 and Memory search bars are one shared shape.
+    // The numeric thresholds are the memo's row-6 oracle; on the pre-#258 tree
+    // there is no data-pf-searchbar marker and these checks are red.
+    for (const viewport of [{ width: 1280, height: 800 }, { width: 375, height: 800 }, { width: 600, height: 900 }]) {
+      await withPage({ viewport }, async (page) => {
+        const panel = await openItems(page);
+        await row(panel, "GOAL-B is running now").waitFor({ timeout: 20_000 });
+        const itemsBars = page.locator('[data-pf-searchbar]');
+        assert.equal(await itemsBars.count(), 1, `工单列表 carries exactly one data-pf-searchbar at ${viewport.width}px`);
+        const items = await barShape(itemsBars.first());
+        const memoryBar = await openMemory(page);
+        assert.equal(await page.locator('[data-pf-searchbar]').count(), 1, `Memory carries exactly one data-pf-searchbar at ${viewport.width}px`);
+        const memory = await barShape(memoryBar);
+        for (const key of ["input", "action"]) {
+          assert.deepEqual(
+            { height: memory[key].height, borderRadius: memory[key].borderRadius, borderWidth: memory[key].borderWidth, fontSize: memory[key].fontSize },
+            { height: items[key].height, borderRadius: items[key].borderRadius, borderWidth: items[key].borderWidth, fontSize: items[key].fontSize },
+            `${key} geometry matches between 工单列表 and Memory at ${viewport.width}px`,
+          );
+        }
+        assert.equal(memory.selects.length, items.selects.length, "both search bars render the same number of selects");
+        for (let index = 0; index < items.selects.length; index += 1) {
+          const pick = (control) => ({ height: control.height, borderRadius: control.borderRadius, borderWidth: control.borderWidth, fontSize: control.fontSize });
+          assert.deepEqual(pick(memory.selects[index]), pick(items.selects[index]), `select ${index} geometry matches at ${viewport.width}px`);
+        }
+        if (viewport.width <= 640) {
+          for (const [name, shape] of [["工单列表", items], ["Memory", memory]]) {
+            assert.ok(shape.scrollWidth <= shape.clientWidth, `${name} search bar does not overflow at ${viewport.width}px (${shape.scrollWidth}/${shape.clientWidth})`);
+            assert.ok(Math.abs(shape.input.top - shape.action.top) <= 2, `${name} input and action share row 1 at ${viewport.width}px (${shape.input.top}/${shape.action.top})`);
+            assert.ok(shape.action.height >= 40, `${name} action is ≥40px high at ${viewport.width}px (${shape.action.height})`);
+            for (const height of [shape.input.height, ...shape.selects.map((select) => select.height), ...shape.filterHeights]) {
+              assert.ok(height >= 40, `${name} control is ≥40px high at ${viewport.width}px (${height})`);
+            }
+            assert.ok(shape.filterRowCounts.every((count) => count <= 2), `${name} filter rows hold at most two controls at ${viewport.width}px (${JSON.stringify(shape.filterRowCounts)})`);
+          }
+        } else {
+          for (const [name, shape] of [["工单列表", items], ["Memory", memory]]) {
+            assert.equal(shape.input.height, 26, `${name} desktop input is 26px high (${shape.input.height})`);
+            assert.equal(shape.action.height, 26, `${name} desktop action is 26px high (${shape.action.height})`);
+            assert.equal(shape.input.borderWidth, "1px", `${name} desktop border is 1px`);
+            assert.equal(shape.input.borderRadius, "4px", `${name} desktop radius is 4px`);
+            assert.equal(shape.input.fontSize, "12px", `${name} desktop font is 12px`);
+            for (const select of shape.selects) assert.equal(select.height, 26, `${name} desktop select is 26px high (${select.height})`);
+          }
+        }
+      });
+    }
+  });
+
+  await check("S203-14", async () => {
+    seed();
+    await withPage({}, async (page) => {
+      const panel = await openItems(page);
+      await row(panel, "GOAL-B is running now").waitFor({ timeout: 20_000 });
+      const refresh = page.locator('[data-pf-searchbar] [data-pf-searchbar-action]').first();
+      assert.equal(await refresh.count(), 1, "the 工单列表 search bar renders the shared ↻ action");
+      const reads = listRequests(page); const spawns = queues().length;
+      // Hold the answer so the in-flight busy state is observable, then let
+      // the one read it represents land.
+      const workItemsPath = (url) => url.pathname === "/api/polyforge/work-items";
+      const holdWorkItems = async (route) => { await delay(800); await route.continue(); };
+      await page.route(workItemsPath, holdWorkItems);
+      await refresh.click();
+      await waitFor(() => refresh.isDisabled(), "the ↻ button is disabled while the newest read is in flight", 5_000);
+      assert.equal(await refresh.getAttribute("aria-busy"), "true", "the ↻ button reports aria-busy while in flight");
+      await waitFor(() => listRequests(page) === reads + 1, "one click issues exactly one list read", 20_000);
+      await waitFor(async () => !(await refresh.isDisabled()), "the ↻ button re-enables when the newest read lands", 20_000);
+      await page.unroute(workItemsPath, holdWorkItems);
+      await requestBarrier(page);
+      assert.equal(listRequests(page), reads + 1, "one click issues no second list request");
+      assert.equal(queues().length, spawns + 1, "one click spawns exactly one queue read");
+    });
   });
 
   await check("S203-12", async () => {

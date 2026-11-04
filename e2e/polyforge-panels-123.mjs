@@ -192,7 +192,7 @@ const errors = [];
 let browser; let base; let stop = async () => {};
 async function startServer(name) {
   const logFile = join(work, `server-${name}.log`);
-  const distDir = `${process.env.PI_WEB_DIST_DIR || ".next/e2e/polyforge-panels-123"}-${name}`;
+  const distDir = join(process.env.PI_WEB_DIST_DIR || ".next/e2e/polyforge-panels-123", name); // nested, so e2e/all.mjs clears it with the suite dir
   rmSync(join(root, distDir), { force: true, recursive: true });
   const started = await startNextServer({ name, logFile, env: { ...process.env,
     PI_WEB_DIST_DIR: distDir, PATH: `${stubDir}${delimiter}${process.env.PATH}`, HOME: work, PI_CODING_AGENT_DIR: agentDir,
@@ -202,7 +202,18 @@ async function startServer(name) {
 }
 async function openPage({ viewport = { width: 1280, height: 800 }, locale = "en", warm = false } = {}) {
   const context = await browser.newContext({ viewport, locale: "en-US" });
-  await context.addInitScript((loc) => { try { localStorage.setItem("pi-web:split-view-enabled", "false"); localStorage.setItem("pi-locale", loc); } catch {} }, locale);
+  // The fixture session is pinned to 2026-10-27, so the sidebar's default
+  // 7-day age filter would hide its row once the wall clock passes 7 days
+  //: W12's outside press would then land on the right-aligned
+  // chat message, which the dock overlay covers. Disable the filter for
+  // determinism, the seed e2e/run.mjs and e2e/claude-session-219.mjs already use.
+  await context.addInitScript((loc) => {
+    try {
+      localStorage.setItem("pi-web:split-view-enabled", "false");
+      localStorage.setItem("pi-locale", loc);
+      localStorage.setItem("pi-web:session-age-filter-days", "0");
+    } catch {}
+  }, locale);
   const page = await context.newPage();
   page.setDefaultTimeout(10_000);
   page.on("pageerror", (error) => errors.push(error.message));

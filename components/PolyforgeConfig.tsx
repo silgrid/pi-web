@@ -1,18 +1,29 @@
 "use client";
 
-import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from "react";
+import { Fragment, useCallback, useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { useI18n } from "@/hooks/useI18n";
 import type { PolyforgeDetectStatus } from "@/lib/polyforge-detect";
 import type { PolyforgeConfigHistoryEntry } from "@/lib/polyforge-config-history";
-import type { PolyforgeConfigItem, PolyforgeConfigRead } from "@/lib/polyforge-config";
-import { configValueError, stepValueError, stepWriteKey } from "@/lib/polyforge-config-schema";
+import type { PolyforgeConfigItem, PolyforgeConfigRead, PolyforgeMemoryPolicyEntry } from "@/lib/polyforge-config";
+import {
+  CLI_COMMON_KEYS,
+  CLI_WRITABLE_KEYS,
+  CONNECTION_KEYS,
+  configValueError,
+  POLYFORGE_CONFIG_SUMMARIZE_MINIMUM_PF_VERSION,
+  stepValueError,
+  stepWriteKey,
+  SUMMARIZE_KEYS,
+} from "@/lib/polyforge-config-schema";
 import type { PolyforgeWorkflowsRead } from "@/lib/polyforge-workflows";
 import {
   addCandidate,
   buildWorkflowRows,
   defaultProject,
   moveCandidate,
+  projectOwner,
   removeCandidate,
+  workflowUnion,
   type WorkflowRow,
 } from "@/lib/polyforge-workflows-pure";
 import type { PluginPackageInfo } from "@/lib/api-types";
@@ -40,6 +51,7 @@ import {
 import {
   groupConfigItems,
   isUnsetValue,
+  policyEntryNames,
   workspaceProjects,
   workspaceSectionPath,
   type ConfigGroupId,
@@ -65,15 +77,10 @@ type RowFeedback = { message: string; tone: "default" | "error" };
 
 type SourceState = { status: "pending" | "found" | "missing"; source: string | null };
 
-const WRITABLE = new Set([
-  "max_concurrent_jobs",
-  "step_timeout",
-  "stall_window",
-  "summarize.models",
-  "summarize.language",
-  "summarize.interval_sec",
-  "api_key",
-]);
+/** Every key the panel writes: the cli.toml keys and the
+ *  cli.toml [summarize] keys the write route's own
+ *  allowlist constants. */
+const WRITABLE = new Set([...CLI_WRITABLE_KEYS, ...SUMMARIZE_KEYS]);
 
 function isNumericKey(key: string): boolean {
   return key === "max_concurrent_jobs" || key === "summarize.interval_sec";
@@ -108,52 +115,77 @@ function isDaemonColumnKey(key: string): boolean {
   return key === "max_concurrent_jobs" || key === "step_timeout" || key === "stall_window";
 }
 
-/** The rendered cards: the summarize items join the
- *  workspace mapping in the one 工作区 card, so no summarize card exists. */
-type ConfigCardId = Exclude<ConfigGroupId, "summarize">;
+/** rendering a data-driven Latin token so a line breaks only
+ *  after one of these separators (or beside CJK), never between two letters.
+ *  A <wbr> adds the break opportunity without changing the text (copy, search,
+ *  String(item.value) all stay identical); overflow-wrap stays the fallback
+ *  only for a segment that is itself wider than its box. */
+const BREAK_AFTER = "-_/.:,;|";
 
-/** Each source card's title and one-line hint. */
-const GROUP_TITLE: Record<ConfigCardId, string> = {
-  flat: "polyforge.settings.configGroupFlat",
-  daemon: "polyforge.settings.configGroupDaemon",
-  workspace: "polyforge.settings.workspaceTitle",
+function breakableParts(text: string): string[] {
+  const parts: string[] = [];
+  let start = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    if (BREAK_AFTER.includes(text[index]) && index + 1 < text.length) {
+      parts.push(text.slice(start, index + 1));
+      start = index + 1;
+    }
+  }
+  if (start < text.length) parts.push(text.slice(start));
+  return parts;
+}
+
+function BreakableToken({ text }: { text: string }) {
+  const parts = breakableParts(text);
+  return (
+    <>
+      {parts.map((part, index) => (
+        <Fragment key={index}>
+          {part}
+          {index < parts.length - 1 ? <wbr /> : null}
+        </Fragment>
+      ))}
+    </>
+  );
+}
+
+/** one cli.toml card holds three file zones — the
+ *  top-level keys, the `[daemon]` table and the `[summarize]` table — plus
+ *  the read-only `[memory_policy]` blocks grouped per workspace path (added
+ *  at render); the 工作区 card holds the cli.toml
+ *  `[workspace]` mapping rows only. */
+type ConfigZoneId = "flat" | "daemon" | "summarize";
+type ConfigRowZone = ConfigZoneId | "workspace";
+
+/** Each zone header names the literal file section it writes (never translated). */
+const ZONE_TITLE: Record<ConfigZoneId, string> = {
+  flat: "cli.toml",
+  daemon: "cli.toml [daemon]",
+  summarize: "cli.toml [summarize]",
 };
-/** The disclosure region that folds each card's read-only rows. */
-const GROUP_REGION: Record<ConfigCardId, PolyforgeDisclosureRegion> = {
+/** The disclosure region that folds each zone's advanced rows (the #212
+ *  regions, reused: no new stored field). The summarize zone has no
+ *  advanced row, so its region never renders a fold. */
+const ZONE_REGION: Record<ConfigZoneId, PolyforgeDisclosureRegion> = {
   flat: "cliToml",
   daemon: "daemon",
-  workspace: "workspace",
-};
-const GROUP_HINT: Record<ConfigCardId, string> = {
-  flat: "polyforge.settings.configGroupFlatHint",
-  daemon: "polyforge.settings.configGroupDaemonHint",
-  workspace: "polyforge.settings.configGroupWorkspaceHint",
+  summarize: "cliToml",
 };
 
-/** one 工作区 card carries the cli.toml `[workspace]` mapping
- *  rows and the workspace yaml's summarize rows (its memory_policy rows are
- *  added at render); every other card is unchanged, in pf's order. */
-function configCards<T extends { key: string; section?: boolean }>(groups: { id: ConfigGroupId; items: T[] }[]): { id: ConfigCardId; items: T[] }[] {
-  const summarize = groups.find((group) => group.id === "summarize")?.items ?? [];
-  const cards = groups.filter((group): group is { id: ConfigCardId; items: T[] } => group.id !== "summarize");
-  const workspace = cards.find((group) => group.id === "workspace");
-  if (workspace) return cards.map((group) => (group === workspace ? { id: group.id, items: [...group.items, ...summarize] } : group));
-  return summarize.length > 0 ? [...cards, { id: "workspace", items: summarize }] : cards;
+function configCards<T extends { key: string; section?: boolean }>(groups: { id: ConfigGroupId; items: T[] }[]): { cli: { id: ConfigZoneId; items: T[] }[]; workspace: T[] } {
+  const itemsOf = (id: ConfigGroupId) => groups.find((group) => group.id === id)?.items ?? [];
+  return {
+    cli: (["flat", "daemon", "summarize"] as const).map((id) => ({ id, items: itemsOf(id) })).filter((zone) => zone.items.length > 0),
+    workspace: itemsOf("workspace"),
+  };
 }
 
-/** The file a workspace-card row lives in (its visible source tag). */
-function workspaceRowFile(item: { key: string; section?: boolean }): string {
-  return item.section ? "cli.toml" : ".polyforge.yaml";
-}
-
-/** The read snapshot the CAS compares: only the keys the file actually
- *  declares (source `file`), with api_key reduced to {set}. Keyed to the file
- *  the write targets, never the other file's keys. */
-function expectedValues(items: PolyforgeConfigItem[], workspace: boolean): Record<string, unknown> {
+/** The read snapshot the CAS compares: only the cli.toml keys the file
+ *  actually declares (source `file`), with api_key reduced to {set}. */
+function expectedValues(items: PolyforgeConfigItem[]): Record<string, unknown> {
   const values: Record<string, unknown> = {};
   for (const item of items) {
     if (item.section) continue;
-    if (item.key.startsWith("summarize.") !== workspace) continue;
     if (item.source !== "file") continue;
     if (item.key === "api_key") { values[item.key] = { set: item.set === true }; continue; }
     if (item.value !== undefined) values[item.key] = item.value;
@@ -255,6 +287,11 @@ export function PolyforgeConfig({ cwd, active }: Props) {
   const [modelEdits, setModelEdits] = useState<Record<string, string[]>>({});
   const [modelAdds, setModelAdds] = useState<Record<string, string>>({});
   const [writeBusy, setWriteBusy] = useState<string | null>(null);
+  // a connection-key save waits here for its second
+  // confirmation (nothing is posted until then), and a saved connection key
+  // keeps its history entry for the row's notice and one-click rollback.
+  const [confirming, setConfirming] = useState<{ item: PolyforgeConfigItem; value: unknown } | null>(null);
+  const [notices, setNotices] = useState<Record<string, PolyforgeConfigHistoryEntry>>({});
   const detectRanForActive = useRef(false);
   const { titleLength, pollIntervalSec } = usePolyforgePanelPreferences();
   // each region's open/closed state, this browser only.
@@ -305,14 +342,16 @@ export function PolyforgeConfig({ cwd, active }: Props) {
     }
   }, []);
 
-  // A cwd change is a NEW snapshot: two mapped workspaces never share one
-  // read's summarize values.
+  // A cwd change is a NEW snapshot: drafts and row feedback never carry over
+  // from another cwd's read.
   useEffect(() => {
     if (!active) return;
     setDrafts({});
     setModelEdits({});
     setModelAdds({});
     setRowFeedback({});
+    setConfirming(null);
+    setNotices({});
     void runConfigRead();
     void runHistory();
   }, [active, cwd, runConfigRead, runHistory]);
@@ -363,6 +402,56 @@ export function PolyforgeConfig({ cwd, active }: Props) {
     }
   }, [cwd, sourceState.source, runDetect, t]);
 
+  // The one POST of a cli.toml key (summarize included, no
+  // workspace): pf's outcome lands under the row, then a fresh read (the
+  // draft is dropped once the read shows the value). Never a reload,
+  // shutdown or ensure: Reload stays its own control.
+  const commit = useCallback(async (item: PolyforgeConfigItem, value: unknown) => {
+    if (!config) return;
+    setWriteBusy(item.key);
+    setRowFeedback({});
+    try {
+      const expectState = { file_sha256: config.file?.sha256 ?? null, values: expectedValues(config.items) };
+      const response = await fetch("/api/polyforge/config", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "set",
+          key: item.key,
+          value,
+          cwd: cwd ?? "",
+          expect_state: expectState,
+        }),
+      });
+      const data = await response.json() as { error?: string; message?: string; diff?: unknown; entry?: PolyforgeConfigHistoryEntry | null };
+      // the summarize floor refusal (400 naming the floor) is
+      // shown in the page's language, with the version the read found.
+      if (response.status === 400 && item.key.startsWith("summarize.") && data.error?.includes(POLYFORGE_CONFIG_SUMMARIZE_MINIMUM_PF_VERSION)) {
+        throw new Error(t("polyforge.settings.summarizeWriteRefused", {
+          required: POLYFORGE_CONFIG_SUMMARIZE_MINIMUM_PF_VERSION,
+          found: config.pfVersion ?? t("polyforge.settings.versionUnparseable"),
+        }));
+      }
+      if (!response.ok || data.error) {
+        throw new Error(data.diff ? `${data.error ?? "refused"} (${JSON.stringify(data.diff)})` : data.error ?? `HTTP ${response.status}`);
+      }
+      setRowFeedback({ [item.key]: { message: data.message ?? t("polyforge.settings.configSaved"), tone: "default" } });
+      const entry = data.entry;
+      if (CONNECTION_KEYS.includes(item.key) && entry) setNotices((current) => ({ ...current, [item.key]: entry }));
+      await runConfigRead();
+      await runHistory();
+      setDrafts((current) => { const next = { ...current }; delete next[item.key]; return next; });
+      if (isModelListKey(item)) {
+        setModelEdits((current) => { const next = { ...current }; delete next[item.key]; return next; });
+        setModelAdds((current) => ({ ...current, [item.key]: "" }));
+      }
+    } catch (error) {
+      setRowFeedback({ [item.key]: { message: error instanceof Error ? error.message : String(error), tone: "error" } });
+    } finally {
+      setWriteBusy(null);
+    }
+  }, [config, cwd, runConfigRead, runHistory, t]);
+
   const save = useCallback(async (item: PolyforgeConfigItem) => {
     if (!config) return;
     const raw = isModelListKey(item)
@@ -379,41 +468,21 @@ export function PolyforgeConfig({ cwd, active }: Props) {
       setRowFeedback({ [item.key]: { message: invalid, tone: "error" } });
       return;
     }
-    setWriteBusy(item.key);
-    setRowFeedback({});
-    try {
-      const workspace = item.key.startsWith("summarize.");
-      const hash = workspace ? config.workspaceFile?.sha256 : config.file?.sha256;
-      const expectState = { file_sha256: hash ?? null, values: expectedValues(config.items, workspace) };
-      const response = await fetch("/api/polyforge/config", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          action: "set",
-          key: item.key,
-          value,
-          cwd: cwd ?? "",
-          expect_state: expectState,
-        }),
-      });
-      const data = await response.json() as { error?: string; message?: string; diff?: unknown };
-      if (!response.ok || data.error) {
-        throw new Error(data.diff ? `${data.error ?? "refused"} (${JSON.stringify(data.diff)})` : data.error ?? `HTTP ${response.status}`);
-      }
-      setRowFeedback({ [item.key]: { message: data.message ?? t("polyforge.settings.configSaved"), tone: "default" } });
-      setDrafts((current) => ({ ...current, [item.key]: item.key === "api_key" ? "" : current[item.key] ?? "" }));
-      if (isModelListKey(item)) {
-        setModelEdits((current) => { const next = { ...current }; delete next[item.key]; return next; });
-        setModelAdds((current) => ({ ...current, [item.key]: "" }));
-      }
-      await runConfigRead();
-      await runHistory();
-    } catch (error) {
-      setRowFeedback({ [item.key]: { message: error instanceof Error ? error.message : String(error), tone: "error" } });
-    } finally {
-      setWriteBusy(null);
+    // a connection key posts only after its confirmation.
+    if (CONNECTION_KEYS.includes(item.key)) {
+      setRowFeedback({});
+      setConfirming({ item, value });
+      return;
     }
-  }, [config, cwd, drafts, modelAdds, modelEdits, runConfigRead, runHistory, t]);
+    await commit(item, value);
+  }, [commit, config, drafts, modelAdds, modelEdits]);
+
+  // Confirm: exactly one write. Cancel: no write, the draft stays.
+  const confirmSave = useCallback(async () => {
+    if (!confirming) return;
+    setConfirming(null);
+    await commit(confirming.item, confirming.value);
+  }, [commit, confirming]);
 
   const reload = useCallback(async () => {
     setWriteBusy("__reload__");
@@ -435,7 +504,9 @@ export function PolyforgeConfig({ cwd, active }: Props) {
     }
   }, [cwd, runConfigRead, t]);
 
-  const rollback = useCallback(async (entry: PolyforgeConfigHistoryEntry) => {
+  // A rollback from the history (feedback under its entry) or from a saved
+  // connection row's notice (feedback under that row): the same CAS write.
+  const rollback = useCallback(async (entry: PolyforgeConfigHistoryEntry, feedbackId: string = entry.id) => {
     if (entry.key === "api_key" || entry.rollbackable === false) return;
     setWriteBusy(entry.id);
     setRowFeedback({});
@@ -447,11 +518,13 @@ export function PolyforgeConfig({ cwd, active }: Props) {
       });
       const data = await response.json() as { error?: string; message?: string };
       if (!response.ok || data.error) throw new Error(data.error ?? `HTTP ${response.status}`);
-      setRowFeedback({ [entry.id]: { message: data.message ?? t("polyforge.settings.configRolledBack"), tone: "default" } });
+      setRowFeedback({ [feedbackId]: { message: data.message ?? t("polyforge.settings.configRolledBack"), tone: "default" } });
+      setNotices((current) => { const next = { ...current }; delete next[entry.key]; return next; });
       await runConfigRead();
       await runHistory();
+      setDrafts((current) => { const next = { ...current }; delete next[entry.key]; return next; });
     } catch (error) {
-      setRowFeedback({ [entry.id]: { message: error instanceof Error ? error.message : String(error), tone: "error" } });
+      setRowFeedback({ [feedbackId]: { message: error instanceof Error ? error.message : String(error), tone: "error" } });
     } finally {
       setWriteBusy(null);
     }
@@ -547,7 +620,7 @@ export function PolyforgeConfig({ cwd, active }: Props) {
       return projects.length > 0 ? (
         <span className="polyforge-config-chips" aria-label={t("polyforge.settings.configProjects")}>
           {projects.map((project) => (
-            <span key={project} className="polyforge-config-chip">{project}</span>
+            <span key={project} className="polyforge-config-chip"><BreakableToken text={project} /></span>
           ))}
         </span>
       ) : <span className="polyforge-config-empty">{unset}</span>;
@@ -559,7 +632,7 @@ export function PolyforgeConfig({ cwd, active }: Props) {
         <span className="polyforge-config-chips" aria-label={t("polyforge.settings.configModels")}>
           {models.map((model) => (
             <span key={model} className="polyforge-config-chip">
-              <span className="polyforge-config-chip-label">{model}</span>
+              <span className="polyforge-config-chip-label"><BreakableToken text={model} /></span>
               {writable && (
                 <button
                   type="button"
@@ -618,9 +691,10 @@ export function PolyforgeConfig({ cwd, active }: Props) {
     if (item.key !== "api_key" && isUnsetValue(item.value)) {
       return <span className="polyforge-config-empty">{unset}</span>;
     }
+    const text = item.key === "api_key" ? (item.set ? "<set>" : "<unset>") : JSON.stringify(item.value ?? null);
     return (
       <span className="polyforge-config-value">
-        {item.key === "api_key" ? (item.set ? "<set>" : "<unset>") : JSON.stringify(item.value ?? null)}
+        <BreakableToken text={text} />
       </span>
     );
   };
@@ -638,11 +712,29 @@ export function PolyforgeConfig({ cwd, active }: Props) {
     );
   };
 
+  // a saved connection key's inline notice — the running
+  // daemon keeps the old value until a restart — with a one-click rollback
+  // (never for api_key: its history is set/unset only).
+  const renderNotice = (key: string) => {
+    const entry = notices[key];
+    if (!entry) return null;
+    return (
+      <div className="polyforge-config-row-notice" role="status">
+        <span>{t("polyforge.settings.configConnectionNotice")}</span>
+        {entry.rollbackable && entry.key !== "api_key" && (
+          <ConfigButton size="small" disabled={writeBusy !== null} onClick={() => void rollback(entry, entry.key)}>
+            {t("polyforge.settings.configRollback")}
+          </ConfigButton>
+        )}
+      </div>
+    );
+  };
+
   // A region holding an unsaved draft or a row error stays open and says so
   //; the lock is runtime state, never written to storage.
   const lockMarker = (ids: string[]): string | null => {
     if (ids.some((id) => rowFeedback[id]?.tone === "error")) return t("polyforge.settings.configErrorMarker");
-    if (ids.some((id) => drafts[id] !== undefined || modelEdits[id] !== undefined || Boolean(modelAdds[id]?.trim()))) {
+    if (ids.some((id) => drafts[id] !== undefined || modelEdits[id] !== undefined || Boolean(modelAdds[id]?.trim()) || confirming?.item.key === id)) {
       return t("polyforge.settings.configDraftMarker");
     }
     return null;
@@ -653,6 +745,94 @@ export function PolyforgeConfig({ cwd, active }: Props) {
     // While locked a toggle attempt keeps the region open and writes nothing.
     onToggle: () => { if (marker === null) setRegion(region, !disclosure[region]); },
   });
+
+  const cards = config?.capable ? configCards(groupConfigItems(config.items ?? [])) : null;
+  // the read-only memory_policy blocks of `pf config list`,
+  // one group per mapped workspace path (sorted; pf builds them from a map).
+  const memoryPolicyPaths = config?.capable && config.memoryPolicy
+    ? Object.entries(config.memoryPolicy).sort(([a], [b]) => a.localeCompare(b))
+    : [];
+  // A memory_policy row: read-only, no write control, its class badge.
+  const renderMemoryRow = (name: string, entry: PolyforgeMemoryPolicyEntry) => (
+    <div key={name} className="polyforge-config-row is-readonly">
+      <span className="polyforge-config-key">
+        <span className="polyforge-config-key-name"><BreakableToken text={`memory_policy.${name}`} /></span>
+      </span>
+      <span className="polyforge-config-class">
+        <span className="polyforge-config-badge" title="next-claim">{reloadClassLabel("next-claim")}</span>
+      </span>
+      <span className="polyforge-config-file">
+        {entry.record.length === 0 && entry.skip.length === 0
+          ? <span className="polyforge-config-empty">{unset}</span>
+          : (["record", "skip"] as const).map((list) => entry[list].length > 0 && (
+            <span key={list} className="polyforge-config-chips" aria-label={list}>
+              <span className="polyforge-config-empty">{list}:</span>
+              {entry[list].map((value, index) => <span key={`${index}:${value}`} className="polyforge-config-chip"><BreakableToken text={value} /></span>)}
+            </span>
+          ))}
+      </span>
+    </div>
+  );
+  const classesOf = (items: { class?: string }[]): string[] => [...new Set(items.map((item) => item.class)
+    .filter((value): value is string => Boolean(value)))];
+  const legendOf = (classes: string[]) => classes.length > 0 && (
+    <p className="polyforge-config-legend">
+      <span>{t("polyforge.settings.configLegend")}</span>
+      {classes.map((reloadClass) => (
+        <span key={reloadClass} className="polyforge-config-badge" title={reloadClass}>
+          {reloadClassLabel(reloadClass)}
+        </span>
+      ))}
+    </p>
+  );
+  // A zone/card declares only its effective columns (#126): the daemon
+  // column header exists in the [daemon] zone alone.
+  const gridHeader = (hasDaemon: boolean) => (
+    <div className="polyforge-config-grid-header" aria-hidden="true">
+      <span>{t("polyforge.settings.configColKey")}</span>
+      <span>{t("polyforge.settings.configColClass")}</span>
+      <span>{t("polyforge.settings.configColFile")}</span>
+      {hasDaemon && <span>{t("polyforge.settings.configColDaemon")}</span>}
+    </div>
+  );
+  const renderRow = (item: PolyforgeConfigItem, zone: ConfigRowZone) => {
+    const hasDaemon = zone === "daemon";
+    const isWorkspace = zone === "workspace";
+    const writable = WRITABLE.has(item.key) && !item.section;
+    const workspacePath = item.section ? workspaceSectionPath(item.key) : null;
+    const daemonCell = hasDaemon && isDaemonColumnKey(item.key);
+    return (
+      <div key={item.key} className={`polyforge-config-row${writable ? "" : " is-readonly"}${daemonCell ? "" : hasDaemon ? " no-daemon" : ""}`}>
+        <span className="polyforge-config-key">
+          {workspacePath !== null
+            ? <span className="polyforge-config-workspace-path"><BreakableToken text={shortenPath(workspacePath)} /></span>
+            : isWorkspace
+              ? <span className="polyforge-config-key-name"><BreakableToken text={item.key} /></span>
+              : <BreakableToken text={item.key} />}
+          {isWorkspace
+            ? <span className="polyforge-config-file-tag" title={t("polyforge.settings.workspaceSourceFile")}>cli.toml</span>
+            : null}
+        </span>
+        <span className="polyforge-config-class">
+          {item.class
+            ? <span className="polyforge-config-badge" title={item.class}>{reloadClassLabel(item.class)}</span>
+            : null}
+        </span>
+        <span className="polyforge-config-file">{renderValue(item, writable)}</span>
+        {daemonCell && (
+          <span className="polyforge-config-daemon">
+            {config?.daemonReachable === false
+              ? t("polyforge.settings.configDaemonDown")
+              : item.daemon
+                ? <>{t("polyforge.settings.configDaemonValue")}: <BreakableToken text={`${String(item.daemon.value)}${item.stale_reason ? ` (${item.stale_reason})` : ""}`} /></>
+                : <span className="polyforge-config-empty">{t("polyforge.settings.configUnset")}</span>}
+          </span>
+        )}
+        {renderFeedback(item.key)}
+        {renderNotice(item.key)}
+      </div>
+    );
+  };
 
   const historyRegion = regionToggle("history", lockMarker(history.map((entry) => entry.id)));
 
@@ -713,154 +893,135 @@ export function PolyforgeConfig({ cwd, active }: Props) {
 
         <div className="polyforge-config-panel">
           <ConfigSectionTitle>{t("polyforge.settings.configTitle")}</ConfigSectionTitle>
-          <p className="config-scope-switch-reason">{t("polyforge.settings.configMachineScope")}</p>
+          {/* its own class — one ellipsised line with the full text in the title at desktop, whole and balanced on phones. */}
+          <p className="config-machine-scope-hint" title={t("polyforge.settings.configMachineScope")}>{t("polyforge.settings.configMachineScope")}</p>
           {configError && <p role="alert" className="config-add-source-error">{configError}</p>}
           {configReason && <p className="config-scope-switch-reason">{configReason}</p>}
           {config && (
             <>
-              {config.capable && configCards(groupConfigItems(config.items ?? [])).map((group) => {
-                const hasDaemon = group.id === "daemon";
-                const region = GROUP_REGION[group.id];
-                const isWorkspace = group.id === "workspace";
-                // the 工作区 card's read-only memory_policy rows
-                // (the default entry, then each mapped project's own lists).
-                const policy = isWorkspace ? config.memoryPolicy ?? null : null;
-                const memoryRows = policy
-                  ? [
-                      { key: "memory_policy.default", entry: policy.default },
-                      ...Object.entries(policy.projects).map(([project, entry]) => ({ key: `memory_policy.${project}`, entry })),
-                    ]
-                  : [];
-                const classes = [...new Set([...group.items.map((item) => item.class), ...(policy && memoryRows.length > 0 ? [policy.class] : [])]
-                  .filter((value): value is string => Boolean(value)))];
-                // the common rows are the seven writable keys, decided
-                // by key definition (never by whether the cwd is mapped), in pf's
-                // order; every other item folds under the card's counted disclosure.
-                // in the 工作区 card the summarize keys are its
-                // common rows; the mapping and memory_policy rows fold.
-                const common = group.items.filter((item) => WRITABLE.has(item.key) && !item.section);
-                const folded = group.items.filter((item) => !common.includes(item));
-                const foldCount = folded.length + memoryRows.length;
-                const fold = regionToggle(region, lockMarker(folded.map((item) => item.key)));
-                const legend = classes.length > 0 && (
-                  <p className="polyforge-config-legend">
-                    <span>{t("polyforge.settings.configLegend")}</span>
-                    {classes.map((reloadClass) => (
-                      <span key={reloadClass} className="polyforge-config-badge" title={reloadClass}>
-                        {reloadClassLabel(reloadClass)}
-                      </span>
-                    ))}
-                  </p>
-                );
-                const gridHeader = (
-                  <div className="polyforge-config-grid-header" aria-hidden="true">
-                    <span>{t("polyforge.settings.configColKey")}</span>
-                    <span>{t("polyforge.settings.configColClass")}</span>
-                    <span>{t("polyforge.settings.configColFile")}</span>
-                    {hasDaemon && <span>{t("polyforge.settings.configColDaemon")}</span>}
-                  </div>
-                );
-                const renderRow = (item: PolyforgeConfigItem) => {
-                  const writable = WRITABLE.has(item.key) && !item.section && (!item.key.startsWith("summarize.") || config.mapped);
-                  const workspacePath = item.section ? workspaceSectionPath(item.key) : null;
-                  const daemonCell = hasDaemon && isDaemonColumnKey(item.key);
-                  return (
-                    <div key={item.key} className={`polyforge-config-row${writable ? "" : " is-readonly"}${daemonCell ? "" : hasDaemon ? " no-daemon" : ""}`}>
-                      <span className="polyforge-config-key">
-                        {workspacePath !== null
-                          ? <span className="polyforge-config-workspace-path">{shortenPath(workspacePath)}</span>
-                          : isWorkspace ? <span className="polyforge-config-key-name">{item.key}</span> : item.key}
-                        {isWorkspace
-                          ? <span className="polyforge-config-file-tag" title={t("polyforge.settings.workspaceSourceFile")}>{workspaceRowFile(item)}</span>
-                          : null}
-                      </span>
-                      <span className="polyforge-config-class">
-                        {item.class
-                          ? <span className="polyforge-config-badge" title={item.class}>{reloadClassLabel(item.class)}</span>
-                          : null}
-                      </span>
-                      <span className="polyforge-config-file">{renderValue(item, writable)}</span>
-                      {daemonCell && (
-                        <span className="polyforge-config-daemon">
-                          {config.daemonReachable === false
-                            ? t("polyforge.settings.configDaemonDown")
-                            : item.daemon
-                              ? <>{t("polyforge.settings.configDaemonValue")}: {String(item.daemon.value)}{item.stale_reason ? ` (${item.stale_reason})` : ""}</>
-                              : <span className="polyforge-config-empty">{t("polyforge.settings.configUnset")}</span>}
-                        </span>
-                      )}
-                      {renderFeedback(item.key)}
-                    </div>
-                  );
-                };
-                // A memory_policy row: read-only, no write control, the yaml tag.
-                const renderMemoryRow = ({ key, entry }: (typeof memoryRows)[number]) => (
-                  <div key={key} className="polyforge-config-row is-readonly">
-                    <span className="polyforge-config-key">
-                      <span className="polyforge-config-key-name">{key}</span>
-                      <span className="polyforge-config-file-tag" title={t("polyforge.settings.workspaceSourceFile")}>.polyforge.yaml</span>
-                    </span>
-                    <span className="polyforge-config-class">
-                      {policy?.class ? <span className="polyforge-config-badge" title={policy.class}>{reloadClassLabel(policy.class)}</span> : null}
-                    </span>
-                    <span className="polyforge-config-file">
-                      {entry.record.length === 0 && entry.skip.length === 0
-                        ? <span className="polyforge-config-empty">{unset}</span>
-                        : (["record", "skip"] as const).map((list) => entry[list].length > 0 && (
-                          <span key={list} className="polyforge-config-chips" aria-label={list}>
-                            <span className="polyforge-config-empty">{list}:</span>
-                            {entry[list].map((value, index) => <span key={`${index}:${value}`} className="polyforge-config-chip">{value}</span>)}
-                          </span>
-                        ))}
-                    </span>
-                  </div>
-                );
-                // the legend and the column header sit above the
-                // whole-card fold in every card, so collapsing a card hides rows only.
-                return (
-                  <section key={group.id} className="polyforge-config-card" aria-label={t(GROUP_TITLE[group.id])}>
-                    <p className="polyforge-config-card-title">{t(GROUP_TITLE[group.id])}</p>
-                    <p className="polyforge-config-card-hint">{t(GROUP_HINT[group.id])}</p>
-                    {legend}
-                    {(common.length > 0 || foldCount > 0) && (
-                      <div className={`polyforge-config-grid${hasDaemon ? " has-daemon" : ""}`}>
-                        {gridHeader}
-                        {common.map(renderRow)}
-                      </div>
-                    )}
-                    {foldCount > 0 && (
-                      <>
-                        <DisclosureToggle
-                          open={fold.open}
-                          controls={`${regionId}-${region}`}
-                          onToggle={fold.onToggle}
-                          marker={fold.marker}
-                        >
-                          {isWorkspace
-                            ? t("polyforge.settings.configRowCount", { count: foldCount })
-                            : t("polyforge.settings.configReadOnlyCount", { count: foldCount })}
-                        </DisclosureToggle>
-                        <div id={`${regionId}-${region}`} className="polyforge-disclosure-body polyforge-config-fold" hidden={!fold.open}>
-                          {folded.length > 0 && (
-                            <div className={`polyforge-config-grid${hasDaemon ? " has-daemon" : ""}`}>
-                              {folded.map(renderRow)}
-                            </div>
-                          )}
-                          {memoryRows.length > 0 && (
-                            <>
-                              <p className="polyforge-config-subtitle">{t("polyforge.settings.memoryPolicyTitle")}</p>
-                              {policy?.appendToDefault && <p className="config-scope-switch-reason">{t("polyforge.settings.memoryPolicyAppendNote")}</p>}
-                              <div className="polyforge-config-grid">
-                                {memoryRows.map(renderMemoryRow)}
-                              </div>
-                            </>
-                          )}
+              {cards && cards.cli.length > 0 && (
+                <section className="polyforge-config-card polyforge-config-cli" aria-label={t("polyforge.settings.configGroupFlat")}>
+                  <p className="polyforge-config-card-title">{t("polyforge.settings.configGroupFlat")}</p>
+                  <p className="polyforge-config-card-hint">{t("polyforge.settings.configGroupFlatHint")}</p>
+                  {legendOf(classesOf(cards.cli.flatMap((zone) => zone.items)))}
+                  {cards.cli.map((zone) => {
+                    // each file zone shows its common keys and
+                    // folds the rest (the advanced keys, plus any key pf adds
+                    // later, read-only) behind one counted control; the daemon
+                    // column lives only in the [daemon] zone (the #126 ruling).
+                    const hasDaemon = zone.id === "daemon";
+                    const region = ZONE_REGION[zone.id];
+                    const common = zone.items.filter((item) => (CLI_COMMON_KEYS.includes(item.key) || SUMMARIZE_KEYS.includes(item.key)) && !item.section);
+                    const advanced = zone.items.filter((item) => !common.includes(item));
+                    const fold = regionToggle(region, lockMarker(advanced.map((item) => item.key)));
+                    return (
+                      <div key={zone.id} className={`polyforge-config-zone is-${zone.id}`}>
+                        <p className="polyforge-config-zone-title">{ZONE_TITLE[zone.id]}</p>
+                        {hasDaemon && <p className="polyforge-config-card-hint">{t("polyforge.settings.configGroupDaemonHint")}</p>}
+                        <div className={`polyforge-config-grid${hasDaemon ? " has-daemon" : ""}`}>
+                          {gridHeader(hasDaemon)}
+                          {common.map((item) => renderRow(item, zone.id))}
                         </div>
-                      </>
-                    )}
+                        {advanced.length > 0 && (
+                          <>
+                            <DisclosureToggle
+                              open={fold.open}
+                              controls={`${regionId}-${region}`}
+                              onToggle={fold.onToggle}
+                              marker={fold.marker}
+                            >
+                              {t("polyforge.settings.configAdvancedCount", { count: advanced.length })}
+                            </DisclosureToggle>
+                            <div id={`${regionId}-${region}`} className="polyforge-disclosure-body polyforge-config-fold" hidden={!fold.open}>
+                              <div className={`polyforge-config-grid${hasDaemon ? " has-daemon" : ""}`}>
+                                {advanced.map((item) => renderRow(item, zone.id))}
+                              </div>
+                            </div>
+                          </>
+                        )}
+                      </div>
+                    );
+                  })}
+                  {/* below the summarize floor the [summarize]
+                      zone and the [memory_policy] blocks are hidden (the read
+                      drops them) and this one localized hint stands in. */}
+                  {config.summarizeReason && (
+                    <p className="config-scope-switch-reason">
+                      {t("polyforge.settings.summarizeFloorHint", {
+                        required: POLYFORGE_CONFIG_SUMMARIZE_MINIMUM_PF_VERSION,
+                        found: config.pfVersion ?? t("polyforge.settings.versionUnparseable"),
+                      })}
+                    </p>
+                  )}
+                  {memoryPolicyPaths.length > 0 && (
+                    <div className="polyforge-config-zone is-memory-policy">
+                      <p className="polyforge-config-zone-title">cli.toml [memory_policy]</p>
+                      <p className="polyforge-config-subtitle">{t("polyforge.settings.memoryPolicyTitle")}</p>
+                      <p className="config-scope-switch-reason">{t("polyforge.settings.memoryPolicyAppendNote")}</p>
+                      {memoryPolicyPaths.map(([path, entries]) => (
+                        <div key={path} className="polyforge-config-policy-path">
+                          <p className="polyforge-config-policy-path-title" title={path}>
+                            {t("polyforge.settings.memoryPolicyPath", { path: shortenPath(path) })}
+                          </p>
+                          <div className="polyforge-config-grid">
+                            {policyEntryNames(entries).map((name) => renderMemoryRow(name, entries[name]))}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </section>
+              )}
+              {/* the connection-key confirmation renders outside
+                  every folded region, so a collapsed zone never hides it. */}
+              {confirming && (
+                <div role="alertdialog" aria-labelledby={`${regionId}-confirm`} className="polyforge-config-confirm">
+                  <p id={`${regionId}-confirm`} className="polyforge-config-confirm-text">
+                    {t("polyforge.settings.configConfirmConnection", { key: confirming.item.key })}
+                  </p>
+                  <div className="polyforge-config-confirm-actions">
+                    <ConfigButton size="small" variant="primary" disabled={writeBusy !== null} onClick={() => void confirmSave()}>
+                      {t("polyforge.settings.configConfirmSave")}
+                    </ConfigButton>
+                    <ConfigButton size="small" onClick={() => setConfirming(null)}>
+                      {t("polyforge.settings.configConfirmCancel")}
+                    </ConfigButton>
+                  </div>
+                </div>
+              )}
+              {cards && cards.workspace.length > 0 && (() => {
+                ///#290: the 工作区 card holds the cli.toml
+                // [workspace] mapping rows only, folded under its counted
+                // disclosure; the two moved families render in the cli.toml
+                // card above.
+                const items = cards.workspace;
+                const fold = regionToggle("workspace", lockMarker(items.map((item) => item.key)));
+                // The legend and the column header sit above the fold, so
+                // collapsing the card hides rows only.
+                return (
+                  <section className="polyforge-config-card" aria-label={t("polyforge.settings.workspaceTitle")}>
+                    <p className="polyforge-config-card-title">{t("polyforge.settings.workspaceTitle")}</p>
+                    <p className="polyforge-config-card-hint">{t("polyforge.settings.configGroupWorkspaceHint")}</p>
+                    {legendOf(classesOf(items))}
+                    <div className="polyforge-config-grid">
+                      {gridHeader(false)}
+                    </div>
+                    <DisclosureToggle
+                      open={fold.open}
+                      controls={`${regionId}-workspace`}
+                      onToggle={fold.onToggle}
+                      marker={fold.marker}
+                    >
+                      {t("polyforge.settings.configRowCount", { count: items.length })}
+                    </DisclosureToggle>
+                    <div id={`${regionId}-workspace`} className="polyforge-disclosure-body polyforge-config-fold" hidden={!fold.open}>
+                      <div className="polyforge-config-grid">
+                        {items.map((item) => renderRow(item, "workspace"))}
+                      </div>
+                    </div>
                   </section>
                 );
-              })}
+              })()}
               <div>
                 <ConfigButton size="small" disabled={writeBusy !== null || !config.capable} onClick={() => void reload()}>
                   {t("polyforge.settings.configReload")}
@@ -943,8 +1104,8 @@ export function PolyforgeConfig({ cwd, active }: Props) {
             <div id={`${regionId}-history`} className="polyforge-disclosure-body polyforge-config-history" hidden={!historyRegion.open}>
               {history.map((entry) => (
                 <div key={entry.id} className="polyforge-config-history-row">
-                  <span>{entry.key}</span>
-                  <span>{JSON.stringify(entry.old)} → {JSON.stringify(entry.new)}</span>
+                  <span className="polyforge-config-history-key"><BreakableToken text={entry.key} /></span>
+                  <span className="polyforge-config-history-change"><BreakableToken text={`${JSON.stringify(entry.old)} → ${JSON.stringify(entry.new)}`} /></span>
                   {entry.rollbackable && entry.key !== "api_key" && (
                     <ConfigButton size="small" disabled={writeBusy !== null} onClick={() => void rollback(entry)}>
                       {t("polyforge.settings.configRollback")}
@@ -982,8 +1143,8 @@ export function PolyforgeConfig({ cwd, active }: Props) {
             {installMessage && <span className="config-scope-switch-reason">{installMessage}</span>}
           </div>
           <div id={`${regionId}-install`} className="polyforge-disclosure-body polyforge-config-fold" hidden={!installForced && !disclosure.install}>
-            <p style={{ fontFamily: "var(--font-mono)", fontSize: 12, margin: 0, wordBreak: "break-all", color: "var(--text-muted)" }}>
-              {installCommand}
+            <p className="polyforge-config-install-command">
+              <BreakableToken text={installCommand} />
             </p>
           </div>
         </section>
@@ -1011,9 +1172,10 @@ type WorkflowRowFeedback = { message: string; tone: "default" | "error" };
 /**
  * The workflow card: the installed bundles' steps for one
  * mapped project — `default` first, one row per step id across bundles, then
- * `task` — each with its declared chain (or Inherited), the effective chain
- * and its source level, the bundles it appears in, its declared attrs and
- * the live badge with the next-dispatch note. Reads `GET
+ * `task`. Each row is one summary line with its declared chain (or Inherited),
+ * the effective chain and its source level, and the bundles it appears in;
+ * declared attrs stay a sub-line. the live badge and the
+ * next-dispatch note sit once at card level. Reads `GET
  * /api/polyforge/workflows` (fresh per ↻ click, no cache: only the newest read
  * may write the card, a failed one keeps the last good list plus an error);
  * writes go through `POST /api/polyforge/config` with the yaml sha as the
@@ -1052,7 +1214,9 @@ function WorkflowCard({ cwd, active, regionId, reloadClassLabel, onWritten }: {
         const body = await response.json() as PolyforgeWorkflowsRead & { error?: string };
         if (seq !== readSeqRef.current) return;
         setRefreshing(false);
-        const good = response.ok && body.capable && body.workflows !== null && body.workflows.daemon_reachable;
+        // Good = at least one workspace answered with a reachable daemon; a
+        // single failed workspace is its own line inside the card.
+        const good = response.ok && body.capable && workflowUnion(body).sources.some((entry) => entry.workflows?.daemon_reachable === true);
         if (!good) {
           // Keep the list on screen; the error sits above it.
           setReadError(body.reason ?? body.error ?? `HTTP ${response.status}`);
@@ -1077,11 +1241,18 @@ function WorkflowCard({ cwd, active, regionId, reloadClassLabel, onWritten }: {
     runRead();
   }, [active, runRead]);
 
-  const workflows = read?.workflows ?? null;
-  const projects = workflows?.projects ?? [];
-  const project = selectedProject !== null && projects.includes(selectedProject) ? selectedProject : defaultProject(projects);
-  const rows = buildWorkflowRows(workflows, read?.workspace ?? null, project);
-  const writeCapable = workflows?.write_capable === true && read?.workspace !== null && project !== null;
+  // the union of every mapped workspace's projects; a
+  // project's rows, capability and writes come from the workspace owning it.
+  const union = workflowUnion(read);
+  const projects = union.projects.map((entry) => entry.project);
+  const ownProjects = (read?.workflows?.projects ?? []).filter((name) => projects.includes(name));
+  const project = selectedProject !== null && projects.includes(selectedProject) ? selectedProject : defaultProject([...ownProjects, ...projects]);
+  const owner = projectOwner(union, project);
+  // With no project at all the first readable workspace still shows its
+  // bundle facts (no rows, no write).
+  const workflows = owner?.workflows ?? union.sources[0]?.workflows ?? null;
+  const rows = buildWorkflowRows(workflows, owner?.declared ?? null, project);
+  const writeCapable = workflows?.write_capable === true && owner?.declared != null && project !== null;
   const editorId = `${regionId}-workflow`;
 
   const draftIds = [
@@ -1095,7 +1266,7 @@ function WorkflowCard({ cwd, active, regionId, reloadClassLabel, onWritten }: {
   const foldOpen = marker !== null || disclosure.workflow;
 
   const write = useCallback(async (rowId: string, key: string, action: "set" | "unset", value?: unknown) => {
-    if (!project) return;
+    if (!project || !owner) return;
     setWriting(key);
     setFeedback({});
     try {
@@ -1106,8 +1277,9 @@ function WorkflowCard({ cwd, active, regionId, reloadClassLabel, onWritten }: {
           action,
           key,
           ...(action === "set" ? { value } : {}),
-          cwd: cwd ?? "",
-          expect_state: { file_sha256: read?.workspace?.yaml.sha256 ?? null, values: {} },
+          // The owning workspace's --cwd and yaml CAS, never the settings cwd.
+          cwd: owner.workspace,
+          expect_state: { file_sha256: owner.declared?.yaml.sha256 ?? null, values: {} },
         }),
       });
       const data = await response.json() as { error?: string; message?: string };
@@ -1127,7 +1299,7 @@ function WorkflowCard({ cwd, active, regionId, reloadClassLabel, onWritten }: {
     } finally {
       setWriting(null);
     }
-  }, [cwd, onWritten, project, read, runRead, t]);
+  }, [onWritten, owner, project, runRead, t]);
 
   const chainOf = (row: WorkflowRow) => chainEdits[row.id] ?? row.declaredModels ?? [];
   const editChain = (row: WorkflowRow, next: string[]) => setChainEdits((current) => ({ ...current, [row.id]: next }));
@@ -1154,7 +1326,7 @@ function WorkflowCard({ cwd, active, regionId, reloadClassLabel, onWritten }: {
         <span className="polyforge-config-chips">
           {chain.map((model, index) => (
             <span key={`${index}:${model}`} className="polyforge-config-chip">
-              <span className="polyforge-config-chip-label">{model}</span>
+              <span className="polyforge-config-chip-label"><BreakableToken text={model} /></span>
               <button type="button" className="polyforge-config-chip-remove" disabled={disabled || index === 0}
                 aria-label={`↑ ${model}`} onClick={() => editChain(row, moveCandidate(chain, index, -1))}>↑</button>
               <button type="button" className="polyforge-config-chip-remove" disabled={disabled || index === chain.length - 1}
@@ -1240,11 +1412,37 @@ function WorkflowCard({ cwd, active, regionId, reloadClassLabel, onWritten }: {
         </button>
       </div>
       <p className="polyforge-config-card-hint">{t("polyforge.settings.workflowHint")}</p>
+      {/* the next-dispatch fact and its live reload class are
+          the card's, stated once; no row repeats either. */}
+      {workflows && (
+        <p className="polyforge-workflow-live">
+          <span className="polyforge-config-badge" title="live">{reloadClassLabel("live")}</span>
+          <span>{t("polyforge.settings.classLiveNote")}</span>
+        </p>
+      )}
       {readError && <p role="alert" className="config-add-source-error">{readError}</p>}
       {workflows && !workflows.write_capable && (
         <p className="config-scope-switch-reason">
           {t("polyforge.settings.workflowCapabilityHint")}{workflows.write_reason ? ` (${workflows.write_reason})` : ""}
         </p>
+      )}
+      {/* A workspace whose read failed: exactly one line with its reason,
+          and none of its projects (so no write) in the union. */}
+      {union.failures.map((entry) => (
+        <p key={entry.workspace} className="config-scope-switch-reason is-error">
+          {t("polyforge.settings.workflowWorkspaceFailed")}: {entry.yamlPath} — {entry.reason}
+        </p>
+      ))}
+      {union.sources.length > 0 && (
+        <ul className="polyforge-workflow-sources">
+          {union.sources.map((entry) => (
+            <li key={entry.workspace} className="polyforge-workflow-source">
+              <span className="polyforge-workflow-label">{t("polyforge.settings.workflowProjectSource")}</span>
+              <span className="polyforge-workflow-yaml"><BreakableToken text={entry.yamlPath} /></span>
+              {renderChips(entry.workflows?.projects ?? [])}
+            </li>
+          ))}
+        </ul>
       )}
       {workflows && (
         <>
@@ -1254,7 +1452,9 @@ function WorkflowCard({ cwd, active, regionId, reloadClassLabel, onWritten }: {
               {projects.map((name) => <option key={name} value={name}>{name}</option>)}
             </select>
           </label>
-          <p className="config-scope-switch-reason">{t("polyforge.settings.workflowSubmitNote")}</p>
+          {/* this is a full sentence, not a short scope-switch
+              reason, so it keeps its own class without the shared 320px cap. */}
+          <p className="polyforge-workflow-submit-note">{t("polyforge.settings.workflowSubmitNote")}</p>
           {workflows.bundle_errors.map((entry) => (
             <p key={entry.bundle} className="config-scope-switch-reason is-error">
               {t("polyforge.settings.workflowBundleError")}: {entry.bundle} — {entry.reason}
@@ -1271,45 +1471,51 @@ function WorkflowCard({ cwd, active, regionId, reloadClassLabel, onWritten }: {
           <ul id={editorId} className="polyforge-workflow-list">
             {rows.map((row) => (
               <li key={row.id} className="polyforge-workflow-row">
-                <div className="polyforge-workflow-head">
-                  <span className="polyforge-workflow-id">{row.id}</span>
-                  {row.kind === "default" && <span className="polyforge-workflow-kind">{t("polyforge.settings.workflowDefaultRow")}</span>}
-                  {row.kind === "task" && <span className="polyforge-workflow-kind">{t("polyforge.settings.workflowTaskRow")}</span>}
-                  <span className="polyforge-config-badge" title="live">{reloadClassLabel("live")}</span>
-                </div>
-                <p className="polyforge-workflow-note">{t("polyforge.settings.classLiveNote")}</p>
-                {row.bundles.length > 0 && (
-                  <p className="polyforge-workflow-line">
-                    <span className="polyforge-workflow-label">{t("polyforge.settings.workflowBundleLabel")}</span>
-                    {row.bundles.map((ref) => (
-                      <span key={ref.bundle} className="polyforge-workflow-bundle">
-                        <span className="polyforge-workflow-bundle-name">{ref.bundle}</span>
-                        {ref.candidates && ref.candidates.length > 0 && <> {renderChips(ref.candidates)}</>}
+                <p className={row.diverges ? "polyforge-workflow-summary is-divergent" : "polyforge-workflow-summary"}>
+                  {/* the row wraps by segment — this lead (id, kind,
+                      declared chain), then the effective chain, then the suffix. */}
+                  <span className="polyforge-workflow-lead">
+                    <span className="polyforge-workflow-id">{row.id}</span>
+                    {row.kind === "default" && <span className="polyforge-workflow-kind">{t("polyforge.settings.workflowDefaultRow")}</span>}
+                    {row.kind === "task" && <span className="polyforge-workflow-kind">{t("polyforge.settings.workflowTaskRow")}</span>}
+                    {row.declared ? (
+                      <>
+                        <span className="polyforge-workflow-label">{t("polyforge.settings.workflowDeclared")}</span>
+                        {renderChips(row.declaredModels ?? [])}
+                      </>
+                    ) : (
+                      <span className="polyforge-workflow-inherit">{t("polyforge.settings.workflowInherit")}</span>
+                    )}
+                  </span>
+                  <span className="polyforge-workflow-effective">
+                    <span className="polyforge-workflow-label">{t("polyforge.settings.workflowEffective")}</span>
+                    {row.effective.length === 0 && <span className="polyforge-config-empty">{t("polyforge.settings.configUnset")}</span>}
+                    {row.effective.map((view) => (
+                      <span key={view.bundle ?? ""} className="polyforge-workflow-chain">
+                        {view.bundle && <span className="polyforge-workflow-bundle-name">{view.bundle}</span>}
+                        {renderChips(view.models)}
+                        <span className="polyforge-workflow-from" title={`${t("polyforge.settings.workflowSourceLabel")}: ${view.from}`}>
+                          {t("polyforge.settings.workflowSourceLabel")}: <BreakableToken text={view.from} />
+                        </span>
                       </span>
                     ))}
-                  </p>
-                )}
-                <p className="polyforge-workflow-line">
-                  {row.declared ? (
-                    <>
-                      <span className="polyforge-workflow-label">{t("polyforge.settings.workflowDeclared")}</span>
-                      {renderChips(row.declaredModels ?? [])}
-                    </>
-                  ) : (
-                    <span className="polyforge-workflow-inherit">{t("polyforge.settings.workflowInherit")}</span>
+                  </span>
+                  {row.bundles.length > 0 && (
+                    <span className="polyforge-workflow-bundle-suffix">
+                      {row.bundles.map((ref, index) => (
+                        <Fragment key={ref.bundle}>
+                          {index > 0 && " · "}
+                          <span
+                            className="polyforge-workflow-bundle-name"
+                            title={ref.candidates && ref.candidates.length > 0 ? `${t("polyforge.tasks.candidates")}: ${ref.candidates.join(", ")}` : undefined}
+                          >
+                            {ref.bundle}
+                          </span>
+                        </Fragment>
+                      ))}
+                    </span>
                   )}
                 </p>
-                <div className="polyforge-workflow-effective">
-                  <span className="polyforge-workflow-label">{t("polyforge.settings.workflowEffective")}</span>
-                  {row.effective.length === 0 && <span className="polyforge-config-empty">{t("polyforge.settings.configUnset")}</span>}
-                  {row.effective.map((view) => (
-                    <span key={view.bundle ?? ""} className="polyforge-workflow-chain">
-                      {view.bundle && <span className="polyforge-workflow-bundle-name">{view.bundle}</span>}
-                      {renderChips(view.models)}
-                      <span className="polyforge-workflow-from">{t("polyforge.settings.workflowSourceLabel")}: {view.from}</span>
-                    </span>
-                  ))}
-                </div>
                 {row.attrs.map((attr) => (
                   <p key={attr.name} className="polyforge-workflow-line">
                     <span className="polyforge-workflow-label">{attr.name === "question_batch_size" ? t("polyforge.settings.workflowAttrBatch") : attr.name}</span>
